@@ -2,22 +2,136 @@
 //! introspection, and query execution land in a later plan.
 
 use async_trait::async_trait;
+use sqlx::postgres::PgRow;
+use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
 
 use crate::drivers::{Driver, QueryResult, SchemaInfo};
 
-pub struct PostgresDriver;
+pub struct PostgresDriver {
+    connection_string: String,
+    pool: Option<PgPool>,
+}
+
+impl PostgresDriver {
+    pub fn new(connection_string: &str) -> Self {
+        Self {
+            connection_string: connection_string.to_string(),
+            pool: None,
+        }
+    }
+}
 
 #[async_trait]
 impl Driver for PostgresDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
-        todo!("postgres connect")
+        self.pool = Some(PgPool::connect(&self.connection_string).await?);
+        Ok(())
     }
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
-        todo!("postgres list_schema")
+        let pool = self.pool.as_ref().expect("connect() must be called first");
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name,)| SchemaInfo { name })
+            .collect())
     }
 
-    async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
-        todo!("postgres execute")
+    async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
+        let pool = self.pool.as_ref().expect("connect() must be called first");
+        let rows = sqlx::query(query).fetch_all(pool).await?;
+
+        let columns = rows
+            .first()
+            .map(|row| row.columns().iter().map(|c| c.name().to_string()).collect())
+            .unwrap_or_default();
+
+        let rows = rows
+            .iter()
+            .map(|row| (0..row.len()).map(|i| stringify_column(row, i)).collect())
+            .collect();
+
+        Ok(QueryResult { columns, rows })
+    }
+}
+
+fn stringify_column(row: &PgRow, index: usize) -> String {
+    let raw = row.try_get_raw(index).expect("valid column index");
+    if raw.is_null() {
+        return "NULL".to_string();
+    }
+    match raw.type_info().name() {
+        "INT2" => row.try_get::<i16, _>(index).map(|v| v.to_string()),
+        "INT4" => row.try_get::<i32, _>(index).map(|v| v.to_string()),
+        "INT8" => row.try_get::<i64, _>(index).map(|v| v.to_string()),
+        "FLOAT4" => row.try_get::<f32, _>(index).map(|v| v.to_string()),
+        "FLOAT8" | "NUMERIC" => row.try_get::<f64, _>(index).map(|v| v.to_string()),
+        "BOOL" => row.try_get::<bool, _>(index).map(|v| v.to_string()),
+        _ => row.try_get::<String, _>(index),
+    }
+    .unwrap_or_else(|_| "NULL".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testcontainers_modules::postgres::Postgres;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    #[tokio::test]
+    async fn connect_succeeds_for_a_running_postgres() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+        let mut driver = PostgresDriver::new(&conn_string);
+        let result = driver.connect().await;
+
+        assert!(result.is_ok(), "connect failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn list_schema_returns_created_tables() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .execute(driver.pool.as_ref().unwrap())
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        assert_eq!(schema.len(), 1);
+        assert_eq!(schema[0].name, "users");
+    }
+
+    #[tokio::test]
+    async fn execute_returns_columns_and_rows_for_a_select() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER, name TEXT)")
+            .execute(driver.pool.as_ref().unwrap())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (id, name) VALUES (1, 'Ada')")
+            .execute(driver.pool.as_ref().unwrap())
+            .await
+            .unwrap();
+
+        let result = driver.execute("SELECT id, name FROM users").await.unwrap();
+
+        assert_eq!(result.columns, vec!["id", "name"]);
+        assert_eq!(result.rows, vec![vec!["1".to_string(), "Ada".to_string()]]);
     }
 }
