@@ -38,6 +38,7 @@ impl App {
     pub fn set_result(&mut self, result: QueryResult) {
         self.last_result = Some(result);
         self.last_error = None;
+        self.query_input.clear();
     }
 
     pub fn set_error(&mut self, error: String) {
@@ -197,6 +198,19 @@ mod tests {
     }
 
     #[test]
+    fn set_result_clears_the_query_input() {
+        let mut app = App::new(connections());
+        app.push_char('x');
+
+        app.set_result(QueryResult {
+            columns: vec![],
+            rows: vec![],
+        });
+
+        assert_eq!(app.query_input, "");
+    }
+
+    #[test]
     fn set_error_replaces_any_previous_result() {
         let mut app = App::new(connections());
         app.set_result(QueryResult {
@@ -208,5 +222,15 @@ mod tests {
 
         assert!(app.last_result.is_none());
         assert_eq!(app.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn set_error_keeps_the_query_input_so_it_can_be_fixed() {
+        let mut app = App::new(connections());
+        app.push_char('x');
+
+        app.set_error("boom".to_string());
+
+        assert_eq!(app.query_input, "x");
     }
 }
