@@ -6,5 +6,5 @@ mod storage;
 mod tui;
 
 fn main() {
-    println!("rowdy — pre-alpha");
+    println!("tradar — pre-alpha");
 }

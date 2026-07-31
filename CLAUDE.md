@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Rowdy (formerly named `tradar` — renamed because the old name was left over from an earlier, unrelated "trading platform" idea) has a compiling module skeleton: the `Driver` trait is defined in `src/drivers/mod.rs`, `drivers::postgres`/`drivers::sqlite` are stub implementations (`todo!()` bodies), and `app`/`tui`/`query_engine`/`storage`/`config` are empty modules with only responsibility doc comments. No driver is functional yet and there is no TUI to run. The full v1 scope and architecture rationale live in `docs/superpowers/specs/2026-08-01-rowdy-rebrand-and-v1-design.md` — read it before adding new modules.
+Tradar's name is a portmanteau of the author's name (tuannm) + "radar" — not related to trading, despite the surface reading. The project briefly went through a rename to "Rowdy" before reverting back to `tradar`; don't propose renaming it again.
 
-## What Rowdy is
+The crate has a compiling module skeleton: the `Driver` trait is defined in `src/drivers/mod.rs`, `drivers::postgres`/`drivers::sqlite` are stub implementations (`todo!()` bodies), and `app`/`tui`/`query_engine`/`storage`/`config` are empty modules with only responsibility doc comments. No driver is functional yet and there is no TUI to run. The full v1 scope and architecture rationale live in `docs/superpowers/specs/2026-08-01-tradar-v1-design.md` — read it before adding new modules.
+
+## What Tradar is
 
 A terminal-first database exploration and query tool (TUI), in the spirit of LazyGit or k9s but for databases. It gives a unified, keyboard-driven interface for querying, browsing, analyzing, and managing different databases without switching between multiple native CLI clients — while still preserving each database's native query language (SQL for SQL databases, Mongo Shell JS for MongoDB, Query DSL for Elasticsearch) rather than inventing a custom query language.
 

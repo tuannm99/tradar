@@ -1,6 +1,6 @@
 # Architecture
 
-Rowdy is a single Cargo crate with layered modules, structured so that the boundaries between layers are already crate-boundary-shaped — a future split into a Cargo workspace (one crate per driver) would be mechanical rather than a redesign. See the [design spec](superpowers/specs/2026-08-01-rowdy-rebrand-and-v1-design.md) for why a workspace wasn't adopted immediately.
+Tradar is a single Cargo crate with layered modules, structured so that the boundaries between layers are already crate-boundary-shaped — a future split into a Cargo workspace (one crate per driver) would be mechanical rather than a redesign. See the [design spec](superpowers/specs/2026-08-01-tradar-v1-design.md) for why a workspace wasn't adopted immediately.
 
 ```
 src/
