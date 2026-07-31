@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tradar's name is a portmanteau of the author's name (tuannm) + "radar" — not related to trading, despite the surface reading. The project briefly went through a rename to "Rowdy" before reverting back to `tradar`; don't propose renaming it again.
 
-The crate has a compiling module skeleton: the `Driver` trait is defined in `src/drivers/mod.rs`, `drivers::postgres`/`drivers::sqlite` are stub implementations (`todo!()` bodies), and `app`/`tui`/`query_engine`/`storage`/`config` are empty modules with only responsibility doc comments. No driver is functional yet and there is no TUI to run. The full v1 scope and architecture rationale live in `docs/superpowers/specs/2026-08-01-tradar-v1-design.md` — read it before adding new modules.
+The crate is a runnable walking skeleton: `cargo run` connects to a real PostgreSQL or SQLite database (via `Driver` implementations in `src/drivers/postgres` and `src/drivers/sqlite`), runs queries through `query_engine`, and renders a connection picker + query/results screen via `tui`, driven by `app`'s state machine and wired together in `main.rs`. There's no interactive "add connection" UI yet — saved connections are read from a TOML file (`src/storage/mod.rs`) that has to be edited by hand. Schema browsing (`SchemaInfo`/`list_schema` exist on `Driver` but aren't wired into the TUI), multi-tab editing, syntax highlighting, and export are not built yet. The full v1 scope and architecture rationale live in `docs/superpowers/specs/2026-08-01-tradar-v1-design.md` — read it before adding new modules.
 
 ## What Tradar is
 
@@ -25,6 +25,8 @@ This is a Rust project built with Cargo (edition 2024).
 - Format: `cargo fmt`
 - Check without building: `cargo check`
 
+The Postgres driver's tests (`src/drivers/postgres/mod.rs`) spin up a real Postgres via `testcontainers-modules`, which requires a working Docker daemon. If Docker isn't available, run `cargo test --lib -- --skip drivers::postgres` to exercise everything else.
+
 ## Architecture
 
 See `docs/architecture.md` for the full module layout and the `Driver` trait contract. The rule that matters most for any change: code under `drivers/*` only implements `Driver` and depends on nothing else in the app; code in `app`, `tui`, and `query_engine` depends only on the `Driver` trait, never on a concrete driver module (`drivers::postgres`, `drivers::sqlite`, etc.). This is what lets new databases be added without touching core logic.
@@ -39,14 +41,14 @@ Other standing principles from the design spec:
 
 ## Current dependencies
 
-The `Cargo.toml` stack underpinning this design:
-
 - `tokio` (async runtime, full features) — async I/O for DB connections/queries
 - `ratatui` + `crossterm` — the terminal UI layer
 - `async-trait` — enables the async `Driver` trait
-- `reqwest` (json) — HTTP client, e.g. for Elasticsearch's REST API
-- `serde` / `serde_json` — serialization for query results, config, and JSON-based DBs
-- `clap` (derive) — CLI argument parsing
-- `directories` — platform-appropriate config/data paths (e.g. saved connections)
-- `thiserror` / `anyhow` — error handling
-- `tracing` / `tracing-subscriber` — structured logging/observability
+- `sqlx` (sqlite + postgres features) — the two v1 drivers are built on this
+- `toml` — saved-connections file format
+- `directories` — platform-appropriate config path for the saved-connections file
+- `serde` / `serde_json` — serialization
+- `anyhow` — error handling
+- Dev-only: `tempfile` (driver/storage tests use real temp files, not mocks), `testcontainers-modules` (spins up a real Postgres for driver tests)
+
+Present but not yet used by any code: `reqwest` (planned for Elasticsearch's REST API), `clap`, `thiserror`, `tracing`/`tracing-subscriber`.

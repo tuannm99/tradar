@@ -6,7 +6,7 @@ It gives you a single, keyboard-driven interface for connecting to, browsing, an
 
 ## Status
 
-Pre-alpha. The crate currently compiles a module skeleton — `Driver` trait defined, `app`/`tui`/`query_engine`/`storage`/`config` modules stubbed out — but no driver is functional yet and there is no TUI to run. See `docs/architecture.md` for the shape of the system and the [design spec](docs/superpowers/specs/2026-08-01-tradar-v1-design.md) for the full v1 plan.
+Pre-alpha, but runnable: `tradar` connects to a real PostgreSQL or SQLite database, runs queries, and shows results in the terminal — connection picker → query screen → results, all keyboard-driven. There's no interactive "add connection" screen yet, so saved connections must be added by hand to the TOML file at the path `tradar` prints when none exist (see `src/storage/mod.rs`). Schema browsing, multi-tab editing, and export are not built yet. See `docs/architecture.md` for the shape of the system and the [design spec](docs/superpowers/specs/2026-08-01-tradar-v1-design.md) for the full v1 plan.
 
 ## Databases
 

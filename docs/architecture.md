@@ -4,15 +4,16 @@ Tradar is a single Cargo crate with layered modules, structured so that the boun
 
 ```
 src/
-  tui/            — ratatui views/widgets, input handling
-  app/            — application state, event loop, command dispatch
-  query_engine/   — takes a query string, hands it to the active driver, normalizes results
+  main.rs         — the event loop: crossterm input -> App transitions -> query_engine/driver calls
+  tui/            — ratatui views/widgets: draw(frame, &App), pure rendering
+  app/            — App/Screen: synchronous state machine (no I/O, no ratatui, fully unit-tested)
+  query_engine/   — takes a query string, hands it to the active driver, tracks history
   drivers/
     mod.rs        — the Driver trait (connect, list_schema, execute, ...)
     postgres/
     sqlite/
-  storage/        — local config/connection persistence (via the `directories` crate)
-  config/         — app config loading
+  storage/        — saved connections as TOML (via the `directories` crate for the config path)
+  config/         — reserved for app config loading; not used yet
 ```
 
 ## The `Driver` trait
@@ -41,4 +42,11 @@ Adding a new database means adding a new module under `drivers/` that implements
 
 ## Current state
 
-Only the module skeleton exists today: the `Driver` trait is defined, and `drivers::postgres` / `drivers::sqlite` are stub implementations (`todo!()` bodies). `app`, `tui`, `query_engine`, `storage`, and `config` are empty modules awaiting the v1 implementation plan described in the design spec.
+The v1 walking skeleton works end to end: `tradar` loads saved connections from `storage`, connects via the selected `Driver` (Postgres or SQLite, both fully implemented against real databases), and runs queries typed into the `tui`'s query screen through `query_engine`, rendering real results or errors.
+
+Notably thin/missing pieces:
+
+- No interactive "add connection" screen — connections are added by hand-editing the TOML file.
+- `Driver::list_schema` is implemented and tested for both drivers, but nothing in the TUI calls it yet — there's no schema explorer pane.
+- `config/` is an empty placeholder module; app configuration beyond the connections file doesn't exist yet.
+- Query editor is single-line with no syntax highlighting or autocomplete, matching v1 scope in the design spec but worth noting as intentionally minimal, not an oversight.
