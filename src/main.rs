@@ -10,7 +10,7 @@ use ratatui::backend::CrosstermBackend;
 
 use tradar::app::{App, Screen};
 use tradar::drivers::Driver;
-use tradar::drivers::elasticsearch::ElasticsearchDriver;
+use tradar::drivers::elasticsearch::{self, ElasticsearchDriver};
 use tradar::drivers::postgres::PostgresDriver;
 use tradar::drivers::sqlite::SqliteDriver;
 use tradar::query_engine::QueryEngine;
@@ -102,6 +102,7 @@ async fn handle_key(
                 app.back_to_picker();
                 *engine = None;
             }
+            KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => export_curl(app),
             _ if is_submit(code, modifiers) => run_query(app, engine).await,
             KeyCode::Enter => app.push_char('\n'),
             KeyCode::Backspace => app.backspace(),
@@ -139,6 +140,20 @@ async fn run_query(app: &mut App, engine: &mut Option<QueryEngine>) {
         Ok(result) => app.set_result(result),
         Err(e) => app.set_error(e.to_string()),
     }
+}
+
+fn export_curl(app: &App) {
+    let Some(connection) = &app.active_connection else {
+        return;
+    };
+    if connection.driver != DriverKind::Elasticsearch {
+        return;
+    }
+    let Some(curl) = elasticsearch::to_curl(&connection.target, &app.query_input) else {
+        return;
+    };
+    let script = format!("#!/usr/bin/env bash\n{curl}\n");
+    let _ = std::fs::write("./tradar-query.sh", script);
 }
 
 #[cfg(test)]

@@ -33,6 +33,19 @@ pub fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
     Some((method, path, body))
 }
 
+pub fn to_curl(base_url: &str, query: &str) -> Option<String> {
+    let (method, path, body) = parse_query(query)?;
+    let base_url = base_url.trim_end_matches('/');
+    let url = format!("{base_url}/{}", path.trim_start_matches('/'));
+    let method = method.to_uppercase();
+    Some(match body {
+        Some(body) => format!(
+            "curl -X {method} \"{url}\" -H 'Content-Type: application/json' -d '{body}'"
+        ),
+        None => format!("curl -X {method} \"{url}\""),
+    })
+}
+
 #[async_trait]
 impl Driver for ElasticsearchDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -154,5 +167,31 @@ mod tests {
             "schema was: {:?}",
             schema.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn to_curl_includes_the_body_when_present() {
+        let curl = to_curl(
+            "http://localhost:9200",
+            "POST my-index/_search\n{\"query\":{\"match_all\":{}}}",
+        )
+        .unwrap();
+
+        assert_eq!(
+            curl,
+            "curl -X POST \"http://localhost:9200/my-index/_search\" -H 'Content-Type: application/json' -d '{\"query\":{\"match_all\":{}}}'"
+        );
+    }
+
+    #[test]
+    fn to_curl_omits_the_body_flags_when_there_is_no_body() {
+        let curl = to_curl("http://localhost:9200", "GET _cat/indices?v").unwrap();
+
+        assert_eq!(curl, "curl -X GET \"http://localhost:9200/_cat/indices?v\"");
+    }
+
+    #[test]
+    fn to_curl_returns_none_for_unparseable_queries() {
+        assert!(to_curl("http://localhost:9200", "").is_none());
     }
 }
