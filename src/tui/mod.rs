@@ -45,7 +45,11 @@ fn draw_query_screen(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(frame.area());
 
-    let connection_name = app.active_connection.as_deref().unwrap_or("");
+    let connection_name = app
+        .active_connection
+        .as_ref()
+        .map(|c| c.name.as_str())
+        .unwrap_or("");
     let input = Paragraph::new(app.query_input.as_str()).block(
         Block::default()
             .borders(Borders::ALL)

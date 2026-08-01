@@ -14,7 +14,7 @@ pub struct App {
     pub screen: Screen,
     pub connections: Vec<SavedConnection>,
     pub selected: usize,
-    pub active_connection: Option<String>,
+    pub active_connection: Option<SavedConnection>,
     pub query_input: String,
     pub should_quit: bool,
     pub last_result: Option<QueryResult>,
@@ -69,7 +69,7 @@ impl App {
     }
 
     pub fn connect_to_selected(&mut self) {
-        self.active_connection = self.connections.get(self.selected).map(|c| c.name.clone());
+        self.active_connection = self.connections.get(self.selected).cloned();
         self.screen = Screen::Query;
     }
 
@@ -138,7 +138,10 @@ mod tests {
         app.connect_to_selected();
 
         assert_eq!(app.screen, Screen::Query);
-        assert_eq!(app.active_connection.as_deref(), Some("local-postgres"));
+        assert_eq!(
+            app.active_connection.as_ref().map(|c| c.name.as_str()),
+            Some("local-postgres")
+        );
     }
 
     #[test]
