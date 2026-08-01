@@ -6,13 +6,18 @@ It gives you a single, keyboard-driven interface for connecting to, browsing, an
 
 ## Status
 
-Pre-alpha, but runnable: `tradar` connects to a real PostgreSQL or SQLite database, runs queries, and shows results in the terminal — connection picker → query screen → results, all keyboard-driven. There's no interactive "add connection" screen yet, so saved connections must be added by hand to the TOML file at the path `tradar` prints when none exist (see `src/storage/mod.rs`). Schema browsing, multi-tab editing, and export are not built yet. See `docs/architecture.md` for the shape of the system and the [design spec](docs/superpowers/specs/2026-08-01-tradar-v1-design.md) for the full v1 plan.
+Pre-alpha, but runnable: `tradar` connects to a real PostgreSQL, SQLite, MongoDB, Elasticsearch, or Redis instance, runs queries, and shows results in the terminal — connection picker → query screen → results, all keyboard-driven. The query editor is multi-line: plain `Enter` inserts a newline, and `Ctrl+Enter` (or `F5`, since not every terminal reports Ctrl+Enter distinctly) runs the query. On an Elasticsearch connection, `Ctrl+Y` writes the current request as a `curl` command to `./tradar-query.sh` in the working directory. There's no interactive "add connection" screen yet, so saved connections must be added by hand to the TOML file at the path `tradar` prints when none exist (see `src/storage/mod.rs`). Schema browsing, multi-tab editing, and general export (beyond Elasticsearch's curl export) are not built yet. See `docs/architecture.md` for the shape of the system, the [v1 design spec](docs/superpowers/specs/2026-08-01-tradar-v1-design.md), and the [NoSQL drivers spec](docs/superpowers/specs/2026-08-01-nosql-drivers-design.md).
 
 ## Databases
 
-**v1 target:** PostgreSQL, SQLite
+**v1 target:** PostgreSQL, SQLite, MongoDB, Elasticsearch, Redis — each a `Driver` implementation with its own execution model:
 
-**Planned:** MySQL, MariaDB, MongoDB, Elasticsearch, Redis, ClickHouse
+- **PostgreSQL / SQLite** — real SQL, tabular results.
+- **MongoDB** — a minimal shell-subset parser for `db.<collection>.<method>(<json-args>)` (`find`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`); not a real JS engine.
+- **Elasticsearch** — a Kibana Dev Tools-style console: type `METHOD /path` plus an optional JSON body and it's sent to the cluster as-is, not limited to the Search API.
+- **Redis** — one command line per execution, naive whitespace parsing; `HGETALL` and `ZRANGE`/`ZREVRANGE ... WITHSCORES` get type-aware JSON formatting, everything else uses a generic RESP-to-JSON conversion.
+
+**Planned:** MySQL, MariaDB, ClickHouse
 
 New database support is added as a `Driver` implementation without touching the rest of the application — see `docs/architecture.md`.
 

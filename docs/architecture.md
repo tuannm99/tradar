@@ -12,6 +12,9 @@ src/
     mod.rs        — the Driver trait (connect, list_schema, execute, ...)
     postgres/
     sqlite/
+    elasticsearch/
+    redis/
+    mongo/
   storage/        — saved connections as TOML (via the `directories` crate for the config path)
   config/         — reserved for app config loading; not used yet
 ```
@@ -29,7 +32,16 @@ pub trait Driver: Send + Sync {
 }
 ```
 
-`QueryResult` and `SchemaInfo` are the normalized shapes the rest of the app renders — a driver is responsible for translating its database's native results into these types.
+`SchemaInfo` and `QueryResult` are the normalized shapes the rest of the app renders — a driver is responsible for translating its database's native results into these types. `QueryResult` is an enum, not a single struct, because SQL results and document-shaped results (MongoDB, Elasticsearch, Redis) don't fit the same shape:
+
+```rust
+pub enum QueryResult {
+    Table { columns: Vec<String>, rows: Vec<Vec<String>> },
+    Documents(Vec<serde_json::Value>),
+}
+```
+
+`Table` is what Postgres and SQLite return. `Documents` is shared by the other three drivers: each Elasticsearch hit/response, MongoDB document, or Redis reply becomes one `serde_json::Value` in the vec. `tui` renders `Table` as a text table and `Documents` as pretty-printed JSON blocks.
 
 ## Isolation rule
 
@@ -42,7 +54,7 @@ Adding a new database means adding a new module under `drivers/` that implements
 
 ## Current state
 
-The v1 walking skeleton works end to end: `tradar` loads saved connections from `storage`, connects via the selected `Driver` (Postgres or SQLite, both fully implemented against real databases), and runs queries typed into the `tui`'s query screen through `query_engine`, rendering real results or errors.
+The v1 walking skeleton works end to end: `tradar` loads saved connections from `storage`, connects via the selected `Driver` (Postgres, SQLite, Elasticsearch, Redis, or MongoDB, all fully implemented against real backends), and runs queries typed into the `tui`'s query screen through `query_engine`, rendering real results or errors.
 
 Notably thin/missing pieces:
 
