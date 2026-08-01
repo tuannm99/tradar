@@ -32,7 +32,21 @@ fn draw_connection_picker(frame: &mut Frame, app: &App) {
         .collect();
 
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Connections"));
-    frame.render_widget(list, frame.area());
+
+    let Some(error) = &app.last_error else {
+        frame.render_widget(list, frame.area());
+        return;
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(frame.area());
+    frame.render_widget(list, chunks[0]);
+
+    let error_box =
+        Paragraph::new(error.as_str()).block(Block::default().borders(Borders::ALL).title("Error"));
+    frame.render_widget(error_box, chunks[1]);
 }
 
 fn draw_query_screen(frame: &mut Frame, app: &App) {
@@ -168,6 +182,23 @@ mod tests {
 
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("Ada"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn connection_picker_shows_a_connection_error() {
+        let mut app = App::new(vec![SavedConnection {
+            name: "local-sqlite".to_string(),
+            driver: DriverKind::Sqlite,
+            target: "test.db".to_string(),
+        }]);
+        app.set_error("connection refused".to_string());
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("connection refused"), "buffer was: {text}");
     }
 
     #[test]
