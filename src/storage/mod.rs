@@ -17,6 +17,7 @@ pub struct SavedConnection {
 pub enum DriverKind {
     Postgres,
     Sqlite,
+    Elasticsearch,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

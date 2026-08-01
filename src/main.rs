@@ -10,6 +10,7 @@ use ratatui::backend::CrosstermBackend;
 
 use tradar::app::{App, Screen};
 use tradar::drivers::Driver;
+use tradar::drivers::elasticsearch::ElasticsearchDriver;
 use tradar::drivers::postgres::PostgresDriver;
 use tradar::drivers::sqlite::SqliteDriver;
 use tradar::query_engine::QueryEngine;
@@ -118,6 +119,7 @@ async fn connect_to_selected(app: &mut App, engine: &mut Option<QueryEngine>) {
     let mut driver: Box<dyn Driver> = match connection.driver {
         DriverKind::Sqlite => Box::new(SqliteDriver::new(&connection.target)),
         DriverKind::Postgres => Box::new(PostgresDriver::new(&connection.target)),
+        DriverKind::Elasticsearch => Box::new(ElasticsearchDriver::new(&connection.target)),
     };
     match driver.connect().await {
         Ok(()) => {

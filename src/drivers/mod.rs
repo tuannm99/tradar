@@ -7,6 +7,7 @@
 // Nothing wires up a Driver yet — app/query_engine land in the next plan.
 #![allow(dead_code)]
 
+pub mod elasticsearch;
 pub mod postgres;
 pub mod sqlite;
 
