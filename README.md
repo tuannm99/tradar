@@ -21,6 +21,39 @@ Pre-alpha, but runnable: `tradar` connects to a real PostgreSQL, SQLite, MongoDB
 
 New database support is added as a `Driver` implementation without touching the rest of the application — see `docs/architecture.md`.
 
+## Saved connections
+
+There's no interactive "add connection" screen yet, so connections are added by hand to the TOML file at the path `tradar` prints when none exist (see `src/storage/mod.rs`). Each entry is a `[[connections]]` table with a `name`, a `driver` (the lowercase `DriverKind` name), and a `target` whose format depends on the driver:
+
+```toml
+[[connections]]
+name = "local postgres"
+driver = "postgres"
+target = "postgres://user:password@localhost:5432/mydb"
+
+[[connections]]
+name = "local sqlite"
+driver = "sqlite"
+target = "test.db"
+
+[[connections]]
+name = "local elasticsearch"
+driver = "elasticsearch"
+target = "http://localhost:9200"
+
+[[connections]]
+name = "local redis"
+driver = "redis"
+target = "redis://localhost:6379/0"
+
+[[connections]]
+name = "local mongo"
+driver = "mongo"
+target = "mongodb://localhost:27017/mydb"
+```
+
+MongoDB's `target` must include a database path (`/mydb` above) — `MongoDriver::connect()` errors with "connection string must include a default database" if it's omitted.
+
 ## Philosophy
 
 - **Keyboard-first.** Every feature works without a mouse.
