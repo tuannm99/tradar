@@ -38,7 +38,6 @@ impl App {
     pub fn set_result(&mut self, result: QueryResult) {
         self.last_result = Some(result);
         self.last_error = None;
-        self.query_input.clear();
     }
 
     pub fn set_error(&mut self, error: String) {
@@ -207,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn set_result_clears_the_query_input() {
+    fn set_result_preserves_the_query_input() {
         let mut app = App::new(connections());
         app.push_char('x');
 
@@ -216,7 +215,9 @@ mod tests {
             rows: vec![],
         });
 
-        assert_eq!(app.query_input, "");
+        // The editor is multi-line and Ctrl+Y exports the current
+        // query_input as curl, so a successful query must not wipe it.
+        assert_eq!(app.query_input, "x");
     }
 
     #[test]
