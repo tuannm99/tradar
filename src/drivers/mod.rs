@@ -17,9 +17,13 @@ pub struct SchemaInfo {
     // extended per-database (columns, indexes, etc.) in a later plan
 }
 
-pub struct QueryResult {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryResult {
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    Documents(Vec<serde_json::Value>),
 }
 
 #[async_trait]

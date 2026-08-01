@@ -48,17 +48,14 @@ mod tests {
         }
 
         async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
-            Ok(QueryResult {
-                columns: self.result.columns.clone(),
-                rows: self.result.rows.clone(),
-            })
+            Ok(self.result.clone())
         }
     }
 
     #[tokio::test]
     async fn run_delegates_to_the_active_driver() {
         let driver = FakeDriver {
-            result: QueryResult {
+            result: QueryResult::Table {
                 columns: vec!["id".to_string()],
                 rows: vec![vec!["1".to_string()]],
             },
@@ -67,14 +64,19 @@ mod tests {
 
         let result = engine.run("SELECT id FROM users").await.unwrap();
 
-        assert_eq!(result.columns, vec!["id"]);
-        assert_eq!(result.rows, vec![vec!["1".to_string()]]);
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["id".to_string()],
+                rows: vec![vec!["1".to_string()]],
+            }
+        );
     }
 
     #[tokio::test]
     async fn run_appends_the_query_to_history() {
         let driver = FakeDriver {
-            result: QueryResult {
+            result: QueryResult::Table {
                 columns: Vec::new(),
                 rows: Vec::new(),
             },

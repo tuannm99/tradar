@@ -57,7 +57,7 @@ impl Driver for SqliteDriver {
             .map(|row| (0..row.len()).map(|i| stringify_column(row, i)).collect())
             .collect();
 
-        Ok(QueryResult { columns, rows })
+        Ok(QueryResult::Table { columns, rows })
     }
 }
 
@@ -135,7 +135,12 @@ mod tests {
 
         let result = driver.execute("SELECT id, name FROM users").await.unwrap();
 
-        assert_eq!(result.columns, vec!["id", "name"]);
-        assert_eq!(result.rows, vec![vec!["1".to_string(), "Ada".to_string()]]);
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["id".to_string(), "name".to_string()],
+                rows: vec![vec!["1".to_string(), "Ada".to_string()]],
+            }
+        );
     }
 }

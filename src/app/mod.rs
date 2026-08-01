@@ -188,13 +188,19 @@ mod tests {
         let mut app = App::new(connections());
         app.set_error("boom".to_string());
 
-        app.set_result(QueryResult {
+        app.set_result(QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![vec!["1".to_string()]],
         });
 
         assert!(app.last_error.is_none());
-        assert_eq!(app.last_result.as_ref().unwrap().columns, vec!["id"]);
+        assert_eq!(
+            app.last_result,
+            Some(QueryResult::Table {
+                columns: vec!["id".to_string()],
+                rows: vec![vec!["1".to_string()]],
+            })
+        );
     }
 
     #[test]
@@ -202,7 +208,7 @@ mod tests {
         let mut app = App::new(connections());
         app.push_char('x');
 
-        app.set_result(QueryResult {
+        app.set_result(QueryResult::Table {
             columns: vec![],
             rows: vec![],
         });
@@ -213,7 +219,7 @@ mod tests {
     #[test]
     fn set_error_replaces_any_previous_result() {
         let mut app = App::new(connections());
-        app.set_result(QueryResult {
+        app.set_result(QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![],
         });

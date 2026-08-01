@@ -7,6 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{App, Screen};
+use crate::drivers::QueryResult;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     match app.screen {
@@ -55,14 +56,22 @@ fn draw_query_screen(frame: &mut Frame, app: &App) {
     let body_text = if let Some(error) = &app.last_error {
         error.clone()
     } else if let Some(result) = &app.last_result {
-        let header = result.columns.join(" | ");
-        let rows = result
-            .rows
-            .iter()
-            .map(|row| row.join(" | "))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("{header}\n{rows}")
+        match result {
+            QueryResult::Table { columns, rows } => {
+                let header = columns.join(" | ");
+                let rows = rows
+                    .iter()
+                    .map(|row| row.join(" | "))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{header}\n{rows}")
+            }
+            QueryResult::Documents(docs) => docs
+                .iter()
+                .map(|doc| serde_json::to_string_pretty(doc).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        }
     } else {
         String::new()
     };
@@ -128,7 +137,7 @@ mod tests {
             target: "test.db".to_string(),
         }]);
         app.connect_to_selected();
-        app.set_result(crate::drivers::QueryResult {
+        app.set_result(crate::drivers::QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![vec!["42".to_string()]],
         });
@@ -139,6 +148,26 @@ mod tests {
 
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("42"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn query_screen_shows_documents_pretty_printed() {
+        let mut app = App::new(vec![SavedConnection {
+            name: "local-sqlite".to_string(),
+            driver: DriverKind::Sqlite,
+            target: "test.db".to_string(),
+        }]);
+        app.connect_to_selected();
+        app.set_result(crate::drivers::QueryResult::Documents(vec![
+            serde_json::json!({"name": "Ada"}),
+        ]));
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Ada"), "buffer was: {text}");
     }
 
     #[test]
