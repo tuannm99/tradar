@@ -127,8 +127,22 @@ async fn run_method(
         json_to_document(value.clone())
     };
 
+    // Every arm below reads a fixed number of leading arguments and ignores
+    // the rest; `max_args` rejects anything beyond what that arm actually
+    // consumes, per the module's promise to reject unsupported shapes with a
+    // clear error rather than silently guessing.
+    let max_args = |max: usize| -> anyhow::Result<()> {
+        if args.len() > max {
+            anyhow::bail!("{method} does not support more than {max} argument(s)");
+        }
+        Ok(())
+    };
+
     match method {
         "find" => {
+            // Only a filter is supported; projection (a 2nd argument) is not
+            // implemented yet.
+            max_args(1)?;
             let filter = if args.is_empty() { Document::new() } else { doc_arg(0)? };
             let mut cursor = collection.find(filter).await?;
             let mut docs = Vec::new();
@@ -138,9 +152,17 @@ async fn run_method(
             Ok(QueryResult::Documents(docs))
         }
         "aggregate" => {
-            let pipeline = args
-                .iter()
-                .cloned()
+            // Real Mongo shell syntax passes a single pipeline array:
+            // db.<coll>.aggregate([{"$match": ...}, {"$group": ...}]). Unwrap
+            // that into individual stage documents. Fall back to treating
+            // each top-level argument as its own stage document, for the
+            // non-shell varargs form: aggregate({stage}, {stage}).
+            let stage_values: Vec<serde_json::Value> = match args {
+                [serde_json::Value::Array(stages)] => stages.clone(),
+                other => other.to_vec(),
+            };
+            let pipeline = stage_values
+                .into_iter()
                 .map(json_to_document)
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let mut cursor = collection.aggregate(pipeline).await?;
@@ -151,10 +173,12 @@ async fn run_method(
             Ok(QueryResult::Documents(docs))
         }
         "insertOne" => {
+            max_args(1)?;
             let result = collection.insert_one(doc_arg(0)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "insertMany" => {
+            max_args(1)?;
             let docs_arg = args
                 .first()
                 .and_then(|v| v.as_array())
@@ -168,18 +192,23 @@ async fn run_method(
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "updateOne" => {
+            // filter, update; a 3rd "options" argument is not supported.
+            max_args(2)?;
             let result = collection.update_one(doc_arg(0)?, doc_arg(1)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "updateMany" => {
+            max_args(2)?;
             let result = collection.update_many(doc_arg(0)?, doc_arg(1)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "deleteOne" => {
+            max_args(1)?;
             let result = collection.delete_one(doc_arg(0)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "deleteMany" => {
+            max_args(1)?;
             let result = collection.delete_many(doc_arg(0)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
@@ -278,6 +307,51 @@ mod tests {
             }
             QueryResult::Table { .. } => panic!("expected Documents"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_aggregate_accepts_the_real_shell_pipeline_array_syntax() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.orders.insertMany([{"item": "pen", "qty": 2}, {"item": "pencil", "qty": 5}])"#)
+            .await
+            .unwrap();
+
+        let result = driver
+            .execute(r#"db.orders.aggregate([{"$match": {"item": "pen"}}])"#)
+            .await
+            .unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => {
+                assert_eq!(docs.len(), 1);
+                assert_eq!(docs[0]["item"], "pen");
+                assert_eq!(docs[0]["qty"], 2);
+            }
+            QueryResult::Table { .. } => panic!("expected Documents"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_find_rejects_a_projection_argument_it_does_not_support() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+
+        let result = driver.execute(r#"db.users.find({}, {"name": 1})"#).await;
+
+        assert!(
+            result.is_err(),
+            "expected find with a projection argument to be rejected, got {result:?}"
+        );
     }
 
     #[tokio::test]
