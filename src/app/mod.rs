@@ -114,7 +114,10 @@ mod tests {
         assert_eq!(app.selected, 1);
 
         app.move_selection_down();
-        assert_eq!(app.selected, 1, "should stop at the last connection, not wrap");
+        assert_eq!(
+            app.selected, 1,
+            "should stop at the last connection, not wrap"
+        );
     }
 
     #[test]

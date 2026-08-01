@@ -30,7 +30,10 @@ impl Driver for RedisDriver {
     }
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
-        let mut connection = self.connection.clone().expect("connect() must be called first");
+        let mut connection = self
+            .connection
+            .clone()
+            .expect("connect() must be called first");
         let (_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
             .arg(0)
             .arg("COUNT")
@@ -41,7 +44,10 @@ impl Driver for RedisDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
-        let mut connection = self.connection.clone().expect("connect() must be called first");
+        let mut connection = self
+            .connection
+            .clone()
+            .expect("connect() must be called first");
         let parts: Vec<&str> = query.split_whitespace().collect();
         let (command, args) = parts
             .split_first()
@@ -53,7 +59,9 @@ impl Driver for RedisDriver {
         }
         let value: redis::Value = cmd.query_async(&mut connection).await?;
 
-        Ok(QueryResult::Documents(vec![shape_reply(command, args, &value)]))
+        Ok(QueryResult::Documents(vec![shape_reply(
+            command, args, &value,
+        )]))
     }
 }
 
@@ -139,7 +147,7 @@ fn value_to_json(value: &redis::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testcontainers_modules::redis::{Redis, REDIS_PORT};
+    use testcontainers_modules::redis::{REDIS_PORT, Redis};
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
     #[tokio::test]
@@ -178,7 +186,10 @@ mod tests {
         let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
         let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
         driver.connect().await.unwrap();
-        driver.execute("ZADD leaderboard 10 alice 20 bob").await.unwrap();
+        driver
+            .execute("ZADD leaderboard 10 alice 20 bob")
+            .await
+            .unwrap();
 
         let result = driver
             .execute("ZRANGE leaderboard 0 -1 WITHSCORES")

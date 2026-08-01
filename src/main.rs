@@ -1,9 +1,13 @@
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -82,7 +86,8 @@ async fn run(
 }
 
 fn is_submit(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    matches!(code, KeyCode::F(5)) || (code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL))
+    matches!(code, KeyCode::F(5))
+        || (code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL))
 }
 
 async fn handle_key(

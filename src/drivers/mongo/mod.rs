@@ -11,9 +11,9 @@ pub struct ParsedQuery {
 
 pub fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
     let query = query.trim();
-    let rest = query
-        .strip_prefix("db.")
-        .ok_or_else(|| anyhow::anyhow!("expected a query starting with \"db.<collection>.<method>(...)\""))?;
+    let rest = query.strip_prefix("db.").ok_or_else(|| {
+        anyhow::anyhow!("expected a query starting with \"db.<collection>.<method>(...)\"")
+    })?;
 
     let dot = rest
         .find('.')
@@ -21,7 +21,9 @@ pub fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
     let collection = rest[..dot].to_string();
     let rest = &rest[dot + 1..];
 
-    let paren = rest.find('(').ok_or_else(|| anyhow::anyhow!("missing method call"))?;
+    let paren = rest
+        .find('(')
+        .ok_or_else(|| anyhow::anyhow!("missing method call"))?;
     let method = rest[..paren].to_string();
     let rest = rest[paren + 1..].trim_end();
     let args_text = rest
@@ -34,7 +36,11 @@ pub fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("invalid JSON argument: {e}"))?;
 
-    Ok(ParsedQuery { collection, method, args })
+    Ok(ParsedQuery {
+        collection,
+        method,
+        args,
+    })
 }
 
 fn split_top_level_args(text: &str) -> anyhow::Result<Vec<&str>> {
@@ -83,7 +89,10 @@ impl MongoDriver {
     }
 
     fn database(&self) -> anyhow::Result<mongodb::Database> {
-        let client = self.client.as_ref().expect("connect() must be called first");
+        let client = self
+            .client
+            .as_ref()
+            .expect("connect() must be called first");
         client
             .default_database()
             .ok_or_else(|| anyhow::anyhow!("connection string must include a default database"))
@@ -143,7 +152,11 @@ async fn run_method(
             // Only a filter is supported; projection (a 2nd argument) is not
             // implemented yet.
             max_args(1)?;
-            let filter = if args.is_empty() { Document::new() } else { doc_arg(0)? };
+            let filter = if args.is_empty() {
+                Document::new()
+            } else {
+                doc_arg(0)?
+            };
             let mut cursor = collection.find(filter).await?;
             let mut docs = Vec::new();
             while let Some(doc) = cursor.try_next().await? {
@@ -212,7 +225,9 @@ async fn run_method(
             let result = collection.delete_many(doc_arg(0)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
-        other => anyhow::bail!("unsupported query: db.<collection>.{other}(...) is not implemented"),
+        other => {
+            anyhow::bail!("unsupported query: db.<collection>.{other}(...) is not implemented")
+        }
     }
 }
 

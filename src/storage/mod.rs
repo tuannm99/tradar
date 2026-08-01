@@ -29,8 +29,9 @@ struct ConnectionsFile {
 }
 
 pub fn default_connections_path() -> anyhow::Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "tradar")
-        .ok_or_else(|| anyhow::anyhow!("could not determine a config directory for this platform"))?;
+    let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
+        anyhow::anyhow!("could not determine a config directory for this platform")
+    })?;
     Ok(dirs.config_dir().join("connections.toml"))
 }
 

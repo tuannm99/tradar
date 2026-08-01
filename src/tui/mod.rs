@@ -31,11 +31,7 @@ fn draw_connection_picker(frame: &mut Frame, app: &App) {
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Connections"),
-    );
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Connections"));
     frame.render_widget(list, frame.area());
 }
 
@@ -79,8 +75,8 @@ fn draw_query_screen(frame: &mut Frame, app: &App) {
     } else {
         String::new()
     };
-    let body = Paragraph::new(body_text)
-        .block(Block::default().borders(Borders::ALL).title("Results"));
+    let body =
+        Paragraph::new(body_text).block(Block::default().borders(Borders::ALL).title("Results"));
     frame.render_widget(body, chunks[1]);
 }
 
