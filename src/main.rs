@@ -11,6 +11,7 @@ use ratatui::backend::CrosstermBackend;
 use tradar::app::{App, Screen};
 use tradar::drivers::Driver;
 use tradar::drivers::elasticsearch::{self, ElasticsearchDriver};
+use tradar::drivers::mongo::MongoDriver;
 use tradar::drivers::postgres::PostgresDriver;
 use tradar::drivers::redis::RedisDriver;
 use tradar::drivers::sqlite::SqliteDriver;
@@ -123,6 +124,7 @@ async fn connect_to_selected(app: &mut App, engine: &mut Option<QueryEngine>) {
         DriverKind::Postgres => Box::new(PostgresDriver::new(&connection.target)),
         DriverKind::Elasticsearch => Box::new(ElasticsearchDriver::new(&connection.target)),
         DriverKind::Redis => Box::new(RedisDriver::new(&connection.target)),
+        DriverKind::Mongo => Box::new(MongoDriver::new(&connection.target)),
     };
     match driver.connect().await {
         Ok(()) => {

@@ -20,7 +20,10 @@ async-trait = "0.1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres"] }
 toml = "0.8"
 redis = { version = "1", features = ["tokio-comp"] }
+mongodb = { version = "3", features = ["bson-3"] }
+bson = { version = "3.1", features = ["serde_json-1"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
-testcontainers-modules = { version = "0.11", features = ["postgres", "elastic_search", "redis"] }
+testcontainers-modules = { version = "0.11", features = ["postgres", "elastic_search", "redis", "mongo"] }
