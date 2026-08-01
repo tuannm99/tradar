@@ -9,6 +9,7 @@
 
 pub mod elasticsearch;
 pub mod postgres;
+pub mod redis;
 pub mod sqlite;
 
 use async_trait::async_trait;

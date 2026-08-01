@@ -18,6 +18,7 @@ pub enum DriverKind {
     Postgres,
     Sqlite,
     Elasticsearch,
+    Redis,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

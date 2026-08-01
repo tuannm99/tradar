@@ -12,6 +12,7 @@ use tradar::app::{App, Screen};
 use tradar::drivers::Driver;
 use tradar::drivers::elasticsearch::{self, ElasticsearchDriver};
 use tradar::drivers::postgres::PostgresDriver;
+use tradar::drivers::redis::RedisDriver;
 use tradar::drivers::sqlite::SqliteDriver;
 use tradar::query_engine::QueryEngine;
 use tradar::storage::{ConnectionStore, DriverKind, default_connections_path};
@@ -121,6 +122,7 @@ async fn connect_to_selected(app: &mut App, engine: &mut Option<QueryEngine>) {
         DriverKind::Sqlite => Box::new(SqliteDriver::new(&connection.target)),
         DriverKind::Postgres => Box::new(PostgresDriver::new(&connection.target)),
         DriverKind::Elasticsearch => Box::new(ElasticsearchDriver::new(&connection.target)),
+        DriverKind::Redis => Box::new(RedisDriver::new(&connection.target)),
     };
     match driver.connect().await {
         Ok(()) => {
