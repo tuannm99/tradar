@@ -12,7 +12,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use tradar::app::{App, Screen};
+use tradar::app::{App, Focus, Screen};
 use tradar::drivers::Driver;
 use tradar::drivers::elasticsearch::{self, ElasticsearchDriver};
 use tradar::drivers::mongo::MongoDriver;
@@ -109,6 +109,13 @@ async fn handle_key(
                 app.back_to_picker();
                 *engine = None;
             }
+            KeyCode::Tab => app.toggle_focus(),
+            _ if app.focus == Focus::Sidebar => match code {
+                KeyCode::Down | KeyCode::Char('j') => app.schema_move_down(),
+                KeyCode::Up | KeyCode::Char('k') => app.schema_move_up(),
+                KeyCode::Enter => app.insert_schema_selection(),
+                _ => {}
+            },
             KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => export_curl(app),
             _ if is_submit(code, modifiers) => run_query(app, engine).await,
             KeyCode::Enter => app.push_char('\n'),
@@ -134,7 +141,12 @@ async fn connect_to_selected(app: &mut App, engine: &mut Option<QueryEngine>) {
     match driver.connect().await {
         Ok(()) => {
             app.connect_to_selected();
-            *engine = Some(QueryEngine::new(driver));
+            let new_engine = QueryEngine::new(driver);
+            match new_engine.list_schema().await {
+                Ok(schema) => app.set_schema(schema),
+                Err(e) => app.set_schema_error(e.to_string()),
+            }
+            *engine = Some(new_engine);
         }
         Err(e) => app.set_error(e.to_string()),
     }
