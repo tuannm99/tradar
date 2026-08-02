@@ -110,14 +110,14 @@ async fn handle_key(
                 *engine = None;
             }
             KeyCode::Tab => app.toggle_focus(),
+            KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => export_curl(app),
+            _ if is_submit(code, modifiers) => run_query(app, engine).await,
             _ if app.focus == Focus::Sidebar => match code {
                 KeyCode::Down | KeyCode::Char('j') => app.schema_move_down(),
                 KeyCode::Up | KeyCode::Char('k') => app.schema_move_up(),
                 KeyCode::Enter => app.insert_schema_selection(),
                 _ => {}
             },
-            KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => export_curl(app),
-            _ if is_submit(code, modifiers) => run_query(app, engine).await,
             KeyCode::Enter => app.push_char('\n'),
             KeyCode::Backspace => app.backspace(),
             KeyCode::Char(c) => app.push_char(c),
@@ -179,6 +179,9 @@ fn export_curl(app: &App) {
 
 #[cfg(test)]
 mod tests {
+    use tradar::drivers::SchemaInfo;
+    use tradar::storage::SavedConnection;
+
     use super::*;
 
     #[test]
@@ -199,5 +202,71 @@ mod tests {
     #[test]
     fn plain_characters_do_not_submit() {
         assert!(!is_submit(KeyCode::Char('a'), KeyModifiers::NONE));
+    }
+
+    fn sidebar_focused_app_with_schema() -> App {
+        let mut app = App::new(vec![SavedConnection {
+            name: "local-sqlite".to_string(),
+            driver: DriverKind::Sqlite,
+            target: "test.db".to_string(),
+        }]);
+        app.connect_to_selected();
+        app.set_schema(vec![SchemaInfo {
+            name: "users".to_string(),
+        }]);
+        app.toggle_focus();
+        assert_eq!(app.focus, Focus::Sidebar);
+        app
+    }
+
+    #[tokio::test]
+    async fn ctrl_enter_runs_the_query_instead_of_inserting_the_schema_selection_when_sidebar_focused()
+     {
+        let mut app = sidebar_focused_app_with_schema();
+        app.push_char('x');
+        let mut engine: Option<QueryEngine> = None;
+
+        handle_key(&mut app, &mut engine, KeyCode::Enter, KeyModifiers::CONTROL)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.query_input, "x",
+            "Ctrl+Enter must be treated as submit, not as a sidebar Enter that inserts \
+             the schema selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn f5_runs_the_query_instead_of_being_swallowed_by_the_sidebar_guard() {
+        let mut app = sidebar_focused_app_with_schema();
+        app.push_char('x');
+        let mut engine: Option<QueryEngine> = None;
+
+        handle_key(&mut app, &mut engine, KeyCode::F(5), KeyModifiers::NONE)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.query_input, "x",
+            "F5 must reach the submit arm even when the sidebar has focus"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_enter_still_inserts_the_schema_selection_when_sidebar_focused() {
+        let mut app = sidebar_focused_app_with_schema();
+        let mut engine: Option<QueryEngine> = None;
+
+        handle_key(&mut app, &mut engine, KeyCode::Enter, KeyModifiers::NONE)
+            .await
+            .unwrap();
+
+        assert!(
+            app.query_input.contains("users"),
+            "plain Enter with the sidebar focused should still insert the schema \
+             selection: got {:?}",
+            app.query_input
+        );
     }
 }

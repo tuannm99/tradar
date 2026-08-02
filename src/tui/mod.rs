@@ -4,7 +4,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Screen};
 use crate::drivers::QueryResult;
@@ -105,16 +105,13 @@ fn draw_schema_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .schema
         .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let item = ListItem::new(entry.name.clone());
-            if i == app.schema_selected {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else {
-                item
-            }
-        })
+        .map(|entry| ListItem::new(entry.name.clone()))
         .collect();
+
+    let mut state = ListState::default();
+    if !app.schema.is_empty() {
+        state.select(Some(app.schema_selected));
+    }
 
     let title = if app.focus == Focus::Sidebar {
         "Schema [focused]"
@@ -123,21 +120,26 @@ fn draw_schema_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let Some(error) = &app.schema_error else {
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-        frame.render_widget(list, area);
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_stateful_widget(list, area, &mut state);
         return;
     };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .constraints([Constraint::Min(1), Constraint::Length(7)])
         .split(area);
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, chunks[0]);
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(list, chunks[0], &mut state);
 
-    let error_box =
-        Paragraph::new(error.as_str()).block(Block::default().borders(Borders::ALL).title("Error"));
+    let error_box = Paragraph::new(error.as_str())
+        .block(Block::default().borders(Borders::ALL).title("Error"))
+        .wrap(Wrap { trim: true });
     frame.render_widget(error_box, chunks[1]);
 }
 
@@ -312,13 +314,88 @@ mod tests {
             target: "test.db".to_string(),
         }]);
         app.connect_to_selected();
-        app.set_schema_error("scan failed".to_string());
+        let message =
+            "failed to run SCAN against redis at 10.0.0.5:6379: connection timed out after 5s"
+                .to_string();
+        app.set_schema_error(message.clone());
+        let term_height = 10u16;
+        let backend = TestBackend::new(64, term_height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+
+        // The error box is a Length(7) region at the bottom of the 24-wide
+        // sidebar; its inner (post-border) text area is 22 columns wide and
+        // 5 rows tall. Extract just that region, word-wrapped across rows,
+        // to confirm the whole message survived wrapping instead of being
+        // clipped to a single line.
+        let inner_error_area = Rect::new(1, term_height - 7 + 1, 22, 5);
+        let wrapped = sidebar_text_in(terminal.backend().buffer(), inner_error_area);
+        assert_eq!(wrapped, message, "buffer region was: {wrapped:?}");
+    }
+
+    /// Extracts text from a rectangular region of the buffer, treating each
+    /// row as independently word-wrapped: trims each row and rejoins
+    /// non-empty rows with a single space, reconstructing the original
+    /// (unwrapped) sentence.
+    fn sidebar_text_in(buffer: &Buffer, region: Rect) -> String {
+        let mut rows = Vec::new();
+        for y in region.y..region.y + region.height {
+            let mut row = String::new();
+            for x in region.x..region.x + region.width {
+                if let Some(cell) = buffer.cell((x, y)) {
+                    row.push_str(cell.symbol());
+                }
+            }
+            let trimmed = row.trim().to_string();
+            if !trimmed.is_empty() {
+                rows.push(trimmed);
+            }
+        }
+        rows.join(" ")
+    }
+
+    #[test]
+    fn schema_sidebar_selection_highlight_tracks_schema_selected() {
+        let mut app = App::new(vec![SavedConnection {
+            name: "local-sqlite".to_string(),
+            driver: DriverKind::Sqlite,
+            target: "test.db".to_string(),
+        }]);
+        app.connect_to_selected();
+        app.set_schema(vec![
+            crate::drivers::SchemaInfo {
+                name: "aaa".to_string(),
+            },
+            crate::drivers::SchemaInfo {
+                name: "bbb".to_string(),
+            },
+            crate::drivers::SchemaInfo {
+                name: "ccc".to_string(),
+            },
+        ]);
+        app.schema_move_down();
+        assert_eq!(app.schema_selected, 1);
+
         let backend = TestBackend::new(64, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| draw(frame, &app)).unwrap();
 
-        let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("scan failed"), "buffer was: {text}");
+        let buffer = terminal.backend().buffer();
+        // Sidebar area starts at (0, 0); the top border occupies row 0, so
+        // list item 0 ("aaa") renders at row 1 and item 1 ("bbb") at row 2.
+        // Column 1 is the first text column inside the left border.
+        let unselected_cell = buffer.cell((1, 1)).unwrap();
+        let selected_cell = buffer.cell((1, 2)).unwrap();
+
+        assert!(
+            selected_cell.modifier.contains(Modifier::REVERSED),
+            "expected the selected row (schema_selected = 1) to carry the REVERSED modifier"
+        );
+        assert!(
+            !unselected_cell.modifier.contains(Modifier::REVERSED),
+            "expected an unselected row to not carry the REVERSED modifier"
+        );
     }
 }
