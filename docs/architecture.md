@@ -59,5 +59,5 @@ The v1 walking skeleton works end to end: `tradar` loads saved connections from 
 Notably thin/missing pieces:
 
 - No interactive "add connection" screen — connections are added by hand-editing the TOML file.
-- `Driver::list_schema` is implemented and tested for all five drivers, but nothing in the TUI calls it yet — there's no schema explorer pane.
+- `Driver::list_schema` is implemented and tested for all five drivers, and wired into the TUI as a schema sidebar on the query screen (loads automatically on connect; `Tab` to focus it, `Enter` to insert the selected name into the query).
 - `config/` is an empty placeholder module; app configuration beyond the connections file doesn't exist yet.
