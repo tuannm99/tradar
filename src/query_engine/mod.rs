@@ -1,7 +1,7 @@
 //! Takes a query string, hands it to the active `Driver`, and normalizes
 //! the result for the TUI to render. No database-specific logic lives here.
 
-use crate::drivers::{Driver, QueryResult};
+use crate::drivers::{Driver, QueryResult, SchemaInfo};
 
 pub struct QueryEngine {
     driver: Box<dyn Driver>,
@@ -22,6 +22,10 @@ impl QueryEngine {
         Ok(result)
     }
 
+    pub async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
+        self.driver.list_schema().await
+    }
+
     pub fn history(&self) -> &[String] {
         &self.history
     }
@@ -35,6 +39,7 @@ mod tests {
 
     struct FakeDriver {
         result: QueryResult,
+        schema: Vec<SchemaInfo>,
     }
 
     #[async_trait]
@@ -44,7 +49,7 @@ mod tests {
         }
 
         async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
-            Ok(Vec::new())
+            Ok(self.schema.clone())
         }
 
         async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
@@ -59,6 +64,7 @@ mod tests {
                 columns: vec!["id".to_string()],
                 rows: vec![vec!["1".to_string()]],
             },
+            schema: Vec::new(),
         };
         let mut engine = QueryEngine::new(Box::new(driver));
 
@@ -80,6 +86,7 @@ mod tests {
                 columns: Vec::new(),
                 rows: Vec::new(),
             },
+            schema: Vec::new(),
         };
         let mut engine = QueryEngine::new(Box::new(driver));
 
@@ -87,5 +94,28 @@ mod tests {
         engine.run("SELECT 2").await.unwrap();
 
         assert_eq!(engine.history(), &["SELECT 1", "SELECT 2"]);
+    }
+
+    #[tokio::test]
+    async fn list_schema_delegates_to_the_active_driver() {
+        let driver = FakeDriver {
+            result: QueryResult::Table {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            },
+            schema: vec![SchemaInfo {
+                name: "users".to_string(),
+            }],
+        };
+        let engine = QueryEngine::new(Box::new(driver));
+
+        let schema = engine.list_schema().await.unwrap();
+
+        assert_eq!(
+            schema,
+            vec![SchemaInfo {
+                name: "users".to_string()
+            }]
+        );
     }
 }

@@ -15,6 +15,7 @@ pub mod sqlite;
 
 use async_trait::async_trait;
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchemaInfo {
     pub name: String,
     // extended per-database (columns, indexes, etc.) in a later plan
