@@ -7,6 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+#[derive(Default)]
 pub struct QueryEditorComponent {
     pub query_input: String,
 }
