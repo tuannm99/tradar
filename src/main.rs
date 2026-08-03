@@ -77,13 +77,12 @@ async fn run(
     while !root.should_quit {
         terminal.draw(|frame| root.draw(frame, frame.area()))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            if let Some(action) = root.handle_key_event(key.code, key.modifiers) {
-                let _ = action_tx.send(action);
-            }
+        if event::poll(std::time::Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && let Some(action) = root.handle_key_event(key.code, key.modifiers)
+        {
+            let _ = action_tx.send(action);
         }
 
         while let Ok(action) = action_rx.try_recv() {
