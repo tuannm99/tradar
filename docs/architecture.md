@@ -47,7 +47,7 @@ pub enum QueryResult {
 }
 ```
 
-`Table` is what Postgres and SQLite return. `Documents` is shared by the other three drivers: each Elasticsearch hit/response, MongoDB document, or Redis reply becomes one `serde_json::Value` in the vec. `tui` renders `Table` as a text table and `Documents` as pretty-printed JSON blocks.
+`Table` is what Postgres and SQLite return. `Documents` is shared by the other three drivers: each Elasticsearch hit/response, MongoDB document, or Redis reply becomes one `serde_json::Value` in the vec. `ResultsComponent` renders `Table` as a text table and `Documents` as pretty-printed JSON blocks.
 
 ## Isolation rule
 
@@ -61,7 +61,7 @@ Adding a new database means adding a new module under `drivers/` that implements
 
 ## Current state
 
-The v1 walking skeleton works end to end: `tradar` loads saved connections from `storage`, connects via the selected `Driver` (Postgres, SQLite, Elasticsearch, Redis, or MongoDB, all fully implemented against real backends), and runs queries typed into the `tui`'s query screen through `query_engine`, rendering real results or errors.
+The v1 walking skeleton works end to end: `tradar` loads saved connections from `storage`, connects via the selected `Driver` (Postgres, SQLite, Elasticsearch, Redis, or MongoDB, all fully implemented against real backends), and runs queries typed into `QueryScreenComponent`'s query editor through `query_engine`, rendering real results or errors.
 
 Notably thin/missing pieces:
 
