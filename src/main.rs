@@ -1,8 +1,8 @@
 use std::io;
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -11,8 +11,10 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::sync::mpsc;
 
-use tradar::app::{App, Focus, Screen};
+use tradar::action::{Action, Component};
+use tradar::components::RootComponent;
 use tradar::drivers::Driver;
 use tradar::drivers::elasticsearch::{self, ElasticsearchDriver};
 use tradar::drivers::mongo::MongoDriver;
@@ -20,8 +22,7 @@ use tradar::drivers::postgres::PostgresDriver;
 use tradar::drivers::redis::RedisDriver;
 use tradar::drivers::sqlite::SqliteDriver;
 use tradar::query_engine::QueryEngine;
-use tradar::storage::{ConnectionStore, DriverKind, default_connections_path};
-use tradar::tui;
+use tradar::storage::{ConnectionStore, DriverKind, SavedConnection, default_connections_path};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,8 +40,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut app = App::new(connections);
-    let mut engine: Option<QueryEngine> = None;
+    let (action_tx, action_rx) = mpsc::unbounded_channel();
+    let mut root = RootComponent::new(connections, action_tx.clone());
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, &mut app, &mut engine).await;
+    let result = run(&mut terminal, &mut root, action_tx, action_rx).await;
 
     if keyboard_enhancement {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
@@ -69,204 +70,74 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-    engine: &mut Option<QueryEngine>,
+    root: &mut RootComponent,
+    action_tx: mpsc::UnboundedSender<Action>,
+    mut action_rx: mpsc::UnboundedReceiver<Action>,
 ) -> anyhow::Result<()> {
-    while !app.should_quit {
-        terminal.draw(|frame| tui::draw(frame, app))?;
+    while !root.should_quit {
+        terminal.draw(|frame| root.draw(frame, frame.area()))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            handle_key(app, engine, key.code, key.modifiers).await?;
+            if let Some(action) = root.handle_key_event(key.code, key.modifiers) {
+                let _ = action_tx.send(action);
+            }
+        }
+
+        while let Ok(action) = action_rx.try_recv() {
+            match action {
+                Action::ConnectRequested(connection) => {
+                    spawn_connect(action_tx.clone(), connection);
+                }
+                Action::ExportCurl { connection, query } => {
+                    export_curl(&connection, &query);
+                }
+                other => {
+                    if let Some(next) = root.update(other) {
+                        let _ = action_tx.send(next);
+                    }
+                }
+            }
         }
     }
     Ok(())
 }
 
-fn is_submit(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    matches!(code, KeyCode::F(5))
-        || (code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL))
-}
-
-async fn handle_key(
-    app: &mut App,
-    engine: &mut Option<QueryEngine>,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> anyhow::Result<()> {
-    match app.screen {
-        Screen::ConnectionPicker => match code {
-            KeyCode::Char('q') => app.quit(),
-            KeyCode::Down | KeyCode::Char('j') => app.move_selection_down(),
-            KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
-            KeyCode::Enter => connect_to_selected(app, engine).await,
-            _ => {}
-        },
-        Screen::Query => match code {
-            KeyCode::Esc => {
-                app.back_to_picker();
-                *engine = None;
+fn spawn_connect(action_tx: mpsc::UnboundedSender<Action>, connection: SavedConnection) {
+    tokio::spawn(async move {
+        let mut driver: Box<dyn Driver> = match connection.driver {
+            DriverKind::Sqlite => Box::new(SqliteDriver::new(&connection.target)),
+            DriverKind::Postgres => Box::new(PostgresDriver::new(&connection.target)),
+            DriverKind::Elasticsearch => Box::new(ElasticsearchDriver::new(&connection.target)),
+            DriverKind::Redis => Box::new(RedisDriver::new(&connection.target)),
+            DriverKind::Mongo => Box::new(MongoDriver::new(&connection.target)),
+        };
+        match driver.connect().await {
+            Ok(()) => {
+                let engine = QueryEngine::new(driver);
+                let schema = engine.list_schema().await.map_err(|e| e.to_string());
+                let _ = action_tx.send(Action::Connected {
+                    connection,
+                    engine,
+                    schema,
+                });
             }
-            KeyCode::Tab => app.toggle_focus(),
-            KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => export_curl(app),
-            _ if is_submit(code, modifiers) => run_query(app, engine).await,
-            _ if app.focus == Focus::Sidebar => match code {
-                KeyCode::Down | KeyCode::Char('j') => app.schema_move_down(),
-                KeyCode::Up | KeyCode::Char('k') => app.schema_move_up(),
-                KeyCode::Enter => app.insert_schema_selection(),
-                _ => {}
-            },
-            KeyCode::Enter => app.push_char('\n'),
-            KeyCode::Backspace => app.backspace(),
-            KeyCode::Char(c) => app.push_char(c),
-            _ => {}
-        },
-    }
-    Ok(())
-}
-
-async fn connect_to_selected(app: &mut App, engine: &mut Option<QueryEngine>) {
-    let Some(connection) = app.connections.get(app.selected).cloned() else {
-        return;
-    };
-    let mut driver: Box<dyn Driver> = match connection.driver {
-        DriverKind::Sqlite => Box::new(SqliteDriver::new(&connection.target)),
-        DriverKind::Postgres => Box::new(PostgresDriver::new(&connection.target)),
-        DriverKind::Elasticsearch => Box::new(ElasticsearchDriver::new(&connection.target)),
-        DriverKind::Redis => Box::new(RedisDriver::new(&connection.target)),
-        DriverKind::Mongo => Box::new(MongoDriver::new(&connection.target)),
-    };
-    match driver.connect().await {
-        Ok(()) => {
-            app.connect_to_selected();
-            let new_engine = QueryEngine::new(driver);
-            match new_engine.list_schema().await {
-                Ok(schema) => app.set_schema(schema),
-                Err(e) => app.set_schema_error(e.to_string()),
+            Err(e) => {
+                let _ = action_tx.send(Action::ConnectFailed(e.to_string()));
             }
-            *engine = Some(new_engine);
         }
-        Err(e) => app.set_error(e.to_string()),
-    }
+    });
 }
 
-async fn run_query(app: &mut App, engine: &mut Option<QueryEngine>) {
-    let Some(engine) = engine.as_mut() else {
-        return;
-    };
-    let query = app.query_input.clone();
-    match engine.run(&query).await {
-        Ok(result) => app.set_result(result),
-        Err(e) => app.set_error(e.to_string()),
-    }
-}
-
-fn export_curl(app: &App) {
-    let Some(connection) = &app.active_connection else {
-        return;
-    };
+fn export_curl(connection: &SavedConnection, query: &str) {
     if connection.driver != DriverKind::Elasticsearch {
         return;
     }
-    let Some(curl) = elasticsearch::to_curl(&connection.target, &app.query_input) else {
+    let Some(curl) = elasticsearch::to_curl(&connection.target, query) else {
         return;
     };
     let script = format!("#!/usr/bin/env bash\n{curl}\n");
     let _ = std::fs::write("./tradar-query.sh", script);
-}
-
-#[cfg(test)]
-mod tests {
-    use tradar::drivers::SchemaInfo;
-    use tradar::storage::SavedConnection;
-
-    use super::*;
-
-    #[test]
-    fn ctrl_enter_submits() {
-        assert!(is_submit(KeyCode::Enter, KeyModifiers::CONTROL));
-    }
-
-    #[test]
-    fn plain_enter_does_not_submit() {
-        assert!(!is_submit(KeyCode::Enter, KeyModifiers::NONE));
-    }
-
-    #[test]
-    fn f5_submits_regardless_of_modifiers() {
-        assert!(is_submit(KeyCode::F(5), KeyModifiers::NONE));
-    }
-
-    #[test]
-    fn plain_characters_do_not_submit() {
-        assert!(!is_submit(KeyCode::Char('a'), KeyModifiers::NONE));
-    }
-
-    fn sidebar_focused_app_with_schema() -> App {
-        let mut app = App::new(vec![SavedConnection {
-            name: "local-sqlite".to_string(),
-            driver: DriverKind::Sqlite,
-            target: "test.db".to_string(),
-        }]);
-        app.connect_to_selected();
-        app.set_schema(vec![SchemaInfo {
-            name: "users".to_string(),
-        }]);
-        app.toggle_focus();
-        assert_eq!(app.focus, Focus::Sidebar);
-        app
-    }
-
-    #[tokio::test]
-    async fn ctrl_enter_runs_the_query_instead_of_inserting_the_schema_selection_when_sidebar_focused()
-     {
-        let mut app = sidebar_focused_app_with_schema();
-        app.push_char('x');
-        let mut engine: Option<QueryEngine> = None;
-
-        handle_key(&mut app, &mut engine, KeyCode::Enter, KeyModifiers::CONTROL)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            app.query_input, "x",
-            "Ctrl+Enter must be treated as submit, not as a sidebar Enter that inserts \
-             the schema selection"
-        );
-    }
-
-    #[tokio::test]
-    async fn f5_runs_the_query_instead_of_being_swallowed_by_the_sidebar_guard() {
-        let mut app = sidebar_focused_app_with_schema();
-        app.push_char('x');
-        let mut engine: Option<QueryEngine> = None;
-
-        handle_key(&mut app, &mut engine, KeyCode::F(5), KeyModifiers::NONE)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            app.query_input, "x",
-            "F5 must reach the submit arm even when the sidebar has focus"
-        );
-    }
-
-    #[tokio::test]
-    async fn plain_enter_still_inserts_the_schema_selection_when_sidebar_focused() {
-        let mut app = sidebar_focused_app_with_schema();
-        let mut engine: Option<QueryEngine> = None;
-
-        handle_key(&mut app, &mut engine, KeyCode::Enter, KeyModifiers::NONE)
-            .await
-            .unwrap();
-
-        assert!(
-            app.query_input.contains("users"),
-            "plain Enter with the sidebar focused should still insert the schema \
-             selection: got {:?}",
-            app.query_input
-        );
-    }
 }
