@@ -28,10 +28,12 @@ pub enum Action {
     QueryCompleted {
         engine: QueryEngine,
         result: QueryResult,
+        epoch: u64,
     },
     QueryFailed {
         engine: QueryEngine,
         error: String,
+        epoch: u64,
     },
     ExportCurl {
         connection: SavedConnection,

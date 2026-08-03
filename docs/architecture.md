@@ -5,9 +5,9 @@ Tradar is a single Cargo crate with layered modules, structured so that the boun
 ```
 src/
   main.rs                 — the event loop: crossterm input -> Component actions -> query_engine/driver calls
-  action.rs               — the Action enum defining all possible state transitions
-  components/             — ratatui components (each implements Component trait)
-    mod.rs                — Component trait; RootComponent composes ConnectionPickerComponent and QueryScreenComponent
+  action.rs               — the Action enum defining all possible state transitions, and the Component trait
+  components/             — ratatui components; RootComponent, ConnectionPickerComponent, and QueryScreenComponent implement the Component trait from action.rs, while query_editor.rs, results.rs, and schema_sidebar.rs are plain state+draw structs composed by QueryScreenComponent without implementing it
+    mod.rs                — RootComponent composes ConnectionPickerComponent and QueryScreenComponent
     connection_picker.rs  — ConnectionPickerComponent
     query_screen.rs       — QueryScreenComponent (composes QueryEditorComponent, ResultsComponent, SchemaSidebarComponent)
     query_editor.rs       — QueryEditorComponent

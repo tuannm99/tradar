@@ -74,18 +74,23 @@ async fn run(
     action_tx: mpsc::UnboundedSender<Action>,
     mut action_rx: mpsc::UnboundedReceiver<Action>,
 ) -> anyhow::Result<()> {
-    while !root.should_quit {
-        terminal.draw(|frame| root.draw(frame, frame.area()))?;
+    terminal.draw(|frame| root.draw(frame, frame.area()))?;
 
-        if event::poll(std::time::Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && let Some(action) = root.handle_key_event(key.code, key.modifiers)
-        {
-            let _ = action_tx.send(action);
+    while !root.should_quit {
+        let mut dirty = false;
+
+        if event::poll(std::time::Duration::from_millis(50))? {
+            dirty = true;
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+                && let Some(action) = root.handle_key_event(key.code, key.modifiers)
+            {
+                let _ = action_tx.send(action);
+            }
         }
 
         while let Ok(action) = action_rx.try_recv() {
+            dirty = true;
             match action {
                 Action::ConnectRequested(connection) => {
                     spawn_connect(action_tx.clone(), connection);
@@ -99,6 +104,10 @@ async fn run(
                     }
                 }
             }
+        }
+
+        if dirty && !root.should_quit {
+            terminal.draw(|frame| root.draw(frame, frame.area()))?;
         }
     }
     Ok(())

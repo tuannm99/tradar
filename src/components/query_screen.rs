@@ -31,6 +31,7 @@ pub struct QueryScreenComponent {
     pub results: ResultsComponent,
     pub engine: Option<QueryEngine>,
     action_tx: UnboundedSender<Action>,
+    epoch: u64,
 }
 
 fn is_submit(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -48,6 +49,7 @@ impl QueryScreenComponent {
             results: ResultsComponent::new(),
             engine: None,
             action_tx,
+            epoch: 0,
         }
     }
 }
@@ -100,6 +102,7 @@ impl Component for QueryScreenComponent {
                     Ok(schema) => self.schema_sidebar.set_schema(schema),
                     Err(e) => self.schema_sidebar.set_schema_error(e),
                 }
+                self.epoch += 1;
                 None
             }
             Action::BackToPicker => {
@@ -107,6 +110,7 @@ impl Component for QueryScreenComponent {
                 self.engine = None;
                 self.schema_sidebar.reset();
                 self.focus = Focus::Editor;
+                self.epoch += 1;
                 None
             }
             Action::ToggleFocus => {
@@ -136,28 +140,48 @@ impl Component for QueryScreenComponent {
                 let engine = self.engine.take()?;
                 let query = self.query_editor.query_input.clone();
                 let tx = self.action_tx.clone();
+                let epoch = self.epoch;
                 tokio::spawn(async move {
                     let mut engine = engine;
                     match engine.run(&query).await {
                         Ok(result) => {
-                            let _ = tx.send(Action::QueryCompleted { engine, result });
+                            let _ = tx.send(Action::QueryCompleted {
+                                engine,
+                                result,
+                                epoch,
+                            });
                         }
                         Err(e) => {
                             let _ = tx.send(Action::QueryFailed {
                                 engine,
                                 error: e.to_string(),
+                                epoch,
                             });
                         }
                     }
                 });
                 None
             }
-            Action::QueryCompleted { engine, result } => {
+            Action::QueryCompleted {
+                engine,
+                result,
+                epoch,
+            } => {
+                if epoch != self.epoch {
+                    return None;
+                }
                 self.engine = Some(engine);
                 self.results.set_result(result);
                 None
             }
-            Action::QueryFailed { engine, error } => {
+            Action::QueryFailed {
+                engine,
+                error,
+                epoch,
+            } => {
+                if epoch != self.epoch {
+                    return None;
+                }
                 self.engine = Some(engine);
                 self.results.set_error(error);
                 None
@@ -397,6 +421,7 @@ mod tests {
                 columns: vec!["id".to_string()],
                 rows: vec![vec!["1".to_string()]],
             },
+            epoch: 0,
         });
 
         assert!(screen.engine.is_some());
@@ -419,10 +444,51 @@ mod tests {
                 rows: vec![],
             }),
             error: "syntax error".to_string(),
+            epoch: 0,
         });
 
         assert!(screen.engine.is_some());
         assert_eq!(screen.results.last_error.as_deref(), Some("syntax error"));
+    }
+
+    #[test]
+    fn stale_query_completed_from_a_previous_connection_is_dropped() {
+        let (mut screen, _rx) = screen();
+
+        screen.update(Action::Connected {
+            connection: connection(),
+            engine: fake_engine(QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+            }),
+            schema: Ok(Vec::new()),
+        });
+        assert!(screen.engine.is_some());
+
+        // A reply from a query submitted before the `Connected` above (epoch 0)
+        // arrives after the connect finished (which bumped epoch to 1). It
+        // must be dropped rather than overwriting the freshly connected engine
+        // and result state.
+        screen.update(Action::QueryCompleted {
+            engine: fake_engine(QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+            }),
+            result: QueryResult::Table {
+                columns: vec!["stale".to_string()],
+                rows: vec![vec!["should-not-appear".to_string()]],
+            },
+            epoch: 0,
+        });
+
+        assert!(
+            screen.engine.is_some(),
+            "the connected engine must still be present, not overwritten by the stale reply"
+        );
+        assert_eq!(
+            screen.results.last_result, None,
+            "a stale reply must not populate results"
+        );
     }
 
     fn sidebar_focused_screen_with_schema() -> QueryScreenComponent {
