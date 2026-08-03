@@ -4,19 +4,25 @@ Tradar is a single Cargo crate with layered modules, structured so that the boun
 
 ```
 src/
-  main.rs         — the event loop: crossterm input -> App transitions -> query_engine/driver calls
-  tui/            — ratatui views/widgets: draw(frame, &App), pure rendering
-  app/            — App/Screen: synchronous state machine (no I/O, no ratatui, fully unit-tested)
-  query_engine/   — takes a query string, hands it to the active driver, tracks history
+  main.rs                 — the event loop: crossterm input -> Component actions -> query_engine/driver calls
+  action.rs               — the Action enum defining all possible state transitions
+  components/             — ratatui components (each implements Component trait)
+    mod.rs                — Component trait; RootComponent composes ConnectionPickerComponent and QueryScreenComponent
+    connection_picker.rs  — ConnectionPickerComponent
+    query_screen.rs       — QueryScreenComponent (composes QueryEditorComponent, ResultsComponent, SchemaSidebarComponent)
+    query_editor.rs       — QueryEditorComponent
+    results.rs            — ResultsComponent
+    schema_sidebar.rs     — SchemaSidebarComponent
+  query_engine/           — takes a query string, hands it to the active driver, tracks history
   drivers/
-    mod.rs        — the Driver trait (connect, list_schema, execute, ...)
+    mod.rs                — the Driver trait (connect, list_schema, execute, ...)
     postgres/
     sqlite/
     elasticsearch/
     redis/
     mongo/
-  storage/        — saved connections as TOML (via the `directories` crate for the config path)
-  config/         — reserved for app config loading; not used yet
+  storage/                — saved connections as TOML (via the `directories` crate for the config path)
+  config/                 — reserved for app config loading; not used yet
 ```
 
 ## The `Driver` trait
@@ -48,9 +54,10 @@ pub enum QueryResult {
 This is the rule that keeps drivers pluggable, and it's enforced everywhere, not just at the top level:
 
 - Code under `drivers/*` implements `Driver` and depends on nothing else in the app.
-- Code in `app`, `tui`, and `query_engine` depends only on the `Driver` trait — never on `drivers::postgres`, `drivers::sqlite`, or any other concrete driver module.
+- Code in `components/`, `action.rs`, and `query_engine` depends only on the `Driver` trait — never on `drivers::postgres`, `drivers::sqlite`, or any other concrete driver module.
+- `main.rs` is the only place that constructs a concrete driver (in `Action::ConnectRequested`) or calls a concrete driver helper (in `Action::ExportCurl`).
 
-Adding a new database means adding a new module under `drivers/` that implements `Driver`. It should never require changes to `app`, `tui`, or `query_engine`.
+Adding a new database means adding a new module under `drivers/` that implements `Driver`. It should never require changes to `components/`, `action.rs`, or `query_engine`.
 
 ## Current state
 

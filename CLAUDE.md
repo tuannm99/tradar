@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tradar's name is a portmanteau of the author's name (tuannm) + "radar" — not related to trading, despite the surface reading. The project briefly went through a rename to "Rowdy" before reverting back to `tradar`; don't propose renaming it again.
 
-The crate is a runnable walking skeleton: `cargo run` connects to a real PostgreSQL or SQLite database (via `Driver` implementations in `src/drivers/postgres` and `src/drivers/sqlite`), runs queries through `query_engine`, and renders a connection picker + query/results screen via `tui`, driven by `app`'s state machine and wired together in `main.rs`. There's no interactive "add connection" UI yet — saved connections are read from a TOML file (`src/storage/mod.rs`) that has to be edited by hand. Schema browsing is wired into the TUI as a sidebar on the query screen (loads on connect, `Tab` to focus, `Enter` to insert a name into the query). Multi-tab editing, syntax highlighting, and general export (beyond Elasticsearch's curl export) are not built yet. The full v1 scope and architecture rationale live in `docs/superpowers/specs/2026-08-01-tradar-v1-design.md` — read it before adding new modules.
+The crate is a runnable walking skeleton: `cargo run` connects to a real PostgreSQL or SQLite database (via `Driver` implementations in `src/drivers/postgres` and `src/drivers/sqlite`), runs queries through `query_engine`, and renders a connection picker + query/results screen, driven by the `Component`/`Action` architecture (`RootComponent` composing the screen components, wired together via the `mpsc` event loop in `main.rs`). There's no interactive "add connection" UI yet — saved connections are read from a TOML file (`src/storage/mod.rs`) that has to be edited by hand. Schema browsing is wired into the TUI as a sidebar on the query screen (loads on connect, `Tab` to focus, `Enter` to insert a name into the query). Multi-tab editing, syntax highlighting, and general export (beyond Elasticsearch's curl export) are not built yet. The full v1 scope and architecture rationale live in `docs/superpowers/specs/2026-08-01-tradar-v1-design.md` — read it before adding new modules.
 
 ## What Tradar is
 
@@ -29,7 +29,7 @@ The Postgres driver's tests (`src/drivers/postgres/mod.rs`) spin up a real Postg
 
 ## Architecture
 
-See `docs/architecture.md` for the full module layout and the `Driver` trait contract. The rule that matters most for any change: code under `drivers/*` only implements `Driver` and depends on nothing else in the app; code in `app`, `tui`, and `query_engine` depends only on the `Driver` trait, never on a concrete driver module (`drivers::postgres`, `drivers::sqlite`, etc.). This is what lets new databases be added without touching core logic.
+See `docs/architecture.md` for the full module layout and the `Driver` trait contract. The rule that matters most for any change: code under `drivers/*` only implements `Driver` and depends on nothing else in the app; code in `components/`, `action.rs`, and `query_engine` depends only on the `Driver` trait, never on a concrete driver module (`drivers::postgres`, `drivers::sqlite`, etc.). This is what lets new databases be added without touching core logic.
 
 Other standing principles from the design spec:
 
