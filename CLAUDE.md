@@ -36,7 +36,7 @@ Other standing principles from the design spec:
 - Prefer interfaces over concrete implementations; reuse shared UI components whenever possible.
 - Keyboard-first, terminal-first — every feature must work without a mouse; keep startup fast and memory usage low.
 - Support large result sets efficiently — virtual scrolling/pagination, avoid loading unnecessary data into memory.
-- Unit tests for core logic (`app`, `query_engine`), integration tests per driver.
+- Unit tests for core logic (`components`, `query_engine`), integration tests per driver.
 - Update documentation whenever behavior changes.
 
 ## Current dependencies
