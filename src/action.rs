@@ -13,13 +13,20 @@ use crate::storage::SavedConnection;
 
 pub enum Action {
     Quit,
-    ConnectRequested(SavedConnection),
+    ConnectRequested {
+        connection: SavedConnection,
+        epoch: u64,
+    },
     Connected {
         connection: SavedConnection,
         engine: QueryEngine,
         schema: Result<Vec<SchemaInfo>, String>,
+        epoch: u64,
     },
-    ConnectFailed(String),
+    ConnectFailed {
+        error: String,
+        epoch: u64,
+    },
     ToggleFocus,
     SchemaMoveUp,
     SchemaMoveDown,

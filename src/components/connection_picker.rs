@@ -15,6 +15,7 @@ pub struct ConnectionPickerComponent {
     pub connections: Vec<SavedConnection>,
     pub selected: usize,
     pub last_error: Option<String>,
+    pub connect_epoch: u64,
 }
 
 impl ConnectionPickerComponent {
@@ -23,6 +24,7 @@ impl ConnectionPickerComponent {
             connections,
             selected: 0,
             last_error: None,
+            connect_epoch: 0,
         }
     }
 
@@ -49,17 +51,20 @@ impl Component for ConnectionPickerComponent {
                 self.move_selection_up();
                 None
             }
-            KeyCode::Enter => self
-                .connections
-                .get(self.selected)
-                .cloned()
-                .map(Action::ConnectRequested),
+            KeyCode::Enter => {
+                let connection = self.connections.get(self.selected).cloned()?;
+                self.connect_epoch += 1;
+                Some(Action::ConnectRequested {
+                    connection,
+                    epoch: self.connect_epoch,
+                })
+            }
             _ => None,
         }
     }
 
     fn update(&mut self, action: Action) -> Option<Action> {
-        if let Action::ConnectFailed(error) = action {
+        if let Action::ConnectFailed { error, .. } = action {
             self.last_error = Some(error);
         }
         None
@@ -177,8 +182,9 @@ mod tests {
         let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         match action {
-            Some(Action::ConnectRequested(connection)) => {
+            Some(Action::ConnectRequested { connection, epoch }) => {
                 assert_eq!(connection.name, "local-postgres");
+                assert_eq!(epoch, 1);
             }
             other => panic!(
                 "expected ConnectRequested, got a different action or none: {}",
@@ -188,10 +194,37 @@ mod tests {
     }
 
     #[test]
+    fn enter_bumps_the_connect_epoch_on_every_request() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+
+        let first = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let second = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let Some(Action::ConnectRequested {
+            epoch: first_epoch, ..
+        }) = first
+        else {
+            panic!("expected ConnectRequested");
+        };
+        let Some(Action::ConnectRequested {
+            epoch: second_epoch,
+            ..
+        }) = second
+        else {
+            panic!("expected ConnectRequested");
+        };
+        assert_eq!(first_epoch, 1);
+        assert_eq!(second_epoch, 2);
+    }
+
+    #[test]
     fn connect_failed_sets_the_last_error() {
         let mut picker = ConnectionPickerComponent::new(connections());
 
-        let next = picker.update(Action::ConnectFailed("connection refused".to_string()));
+        let next = picker.update(Action::ConnectFailed {
+            error: "connection refused".to_string(),
+            epoch: 1,
+        });
 
         assert_eq!(picker.last_error.as_deref(), Some("connection refused"));
         assert!(next.is_none());
@@ -214,7 +247,10 @@ mod tests {
     #[test]
     fn draw_shows_a_connection_error() {
         let mut picker = ConnectionPickerComponent::new(connections());
-        picker.update(Action::ConnectFailed("connection refused".to_string()));
+        picker.update(Action::ConnectFailed {
+            error: "connection refused".to_string(),
+            epoch: 1,
+        });
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 

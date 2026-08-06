@@ -92,8 +92,8 @@ async fn run(
         while let Ok(action) = action_rx.try_recv() {
             dirty = true;
             match action {
-                Action::ConnectRequested(connection) => {
-                    spawn_connect(action_tx.clone(), connection);
+                Action::ConnectRequested { connection, epoch } => {
+                    spawn_connect(action_tx.clone(), connection, epoch);
                 }
                 Action::ExportCurl { connection, query } => {
                     export_curl(&connection, &query);
@@ -113,7 +113,11 @@ async fn run(
     Ok(())
 }
 
-fn spawn_connect(action_tx: mpsc::UnboundedSender<Action>, connection: SavedConnection) {
+fn spawn_connect(
+    action_tx: mpsc::UnboundedSender<Action>,
+    connection: SavedConnection,
+    epoch: u64,
+) {
     tokio::spawn(async move {
         let mut driver: Box<dyn Driver> = match connection.driver {
             DriverKind::Sqlite => Box::new(SqliteDriver::new(&connection.target)),
@@ -130,10 +134,14 @@ fn spawn_connect(action_tx: mpsc::UnboundedSender<Action>, connection: SavedConn
                     connection,
                     engine,
                     schema,
+                    epoch,
                 });
             }
             Err(e) => {
-                let _ = action_tx.send(Action::ConnectFailed(e.to_string()));
+                let _ = action_tx.send(Action::ConnectFailed {
+                    error: e.to_string(),
+                    epoch,
+                });
             }
         }
     });

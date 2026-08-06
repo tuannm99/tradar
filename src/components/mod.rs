@@ -50,9 +50,20 @@ impl Component for RootComponent {
             self.should_quit = true;
             return None;
         }
-        if matches!(action, Action::Connected { .. }) {
+        if let Action::Connected { epoch, .. } = &action {
+            if *epoch != self.connection_picker.connect_epoch {
+                // A reply from a connect attempt that's been superseded by a
+                // newer one -- drop it instead of silently switching the
+                // active connection back.
+                return None;
+            }
             self.query_screen.update(action);
             self.screen = Screen::Query;
+            return None;
+        }
+        if let Action::ConnectFailed { epoch, .. } = &action
+            && *epoch != self.connection_picker.connect_epoch
+        {
             return None;
         }
         if matches!(action, Action::BackToPicker) {
@@ -155,6 +166,7 @@ mod tests {
             connection: connection.clone(),
             engine: QueryEngine::new(Box::new(FakeDriver)),
             schema: Ok(Vec::new()),
+            epoch: 0,
         });
 
         assert_eq!(root.screen, Screen::Query);
@@ -168,6 +180,7 @@ mod tests {
             connection: connections()[0].clone(),
             engine: QueryEngine::new(Box::new(FakeDriver)),
             schema: Ok(Vec::new()),
+            epoch: 0,
         });
 
         root.update(Action::BackToPicker);
@@ -180,11 +193,91 @@ mod tests {
     fn connect_failed_while_on_the_picker_sets_its_error() {
         let (mut root, _rx) = root();
 
-        root.update(Action::ConnectFailed("connection refused".to_string()));
+        root.update(Action::ConnectFailed {
+            error: "connection refused".to_string(),
+            epoch: 0,
+        });
 
         assert_eq!(
             root.connection_picker.last_error.as_deref(),
             Some("connection refused")
+        );
+    }
+
+    #[test]
+    fn a_stale_connected_from_a_superseded_connect_attempt_is_ignored() {
+        let (mut root, _rx) = root();
+        let conn_a = connections()[0].clone();
+        let conn_b = connections()[1].clone();
+
+        // Connect to A, then connect to B before A resolves -- mirrors the
+        // real race: both connect attempts are in flight at once.
+        let request_a = root
+            .connection_picker
+            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        root.connection_picker
+            .handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        let request_b = root
+            .connection_picker
+            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let Some(Action::ConnectRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected ConnectRequested for A");
+        };
+        let Some(Action::ConnectRequested { epoch: epoch_b, .. }) = request_b else {
+            panic!("expected ConnectRequested for B");
+        };
+
+        // B resolves first.
+        root.update(Action::Connected {
+            connection: conn_b.clone(),
+            engine: QueryEngine::new(Box::new(FakeDriver)),
+            schema: Ok(Vec::new()),
+            epoch: epoch_b,
+        });
+        assert_eq!(root.query_screen.active_connection, Some(conn_b.clone()));
+
+        // A's stale reply arrives after -- it must not override B.
+        root.update(Action::Connected {
+            connection: conn_a,
+            engine: QueryEngine::new(Box::new(FakeDriver)),
+            schema: Ok(Vec::new()),
+            epoch: epoch_a,
+        });
+
+        assert_eq!(root.screen, Screen::Query);
+        assert_eq!(
+            root.query_screen.active_connection,
+            Some(conn_b),
+            "a stale Connected for a superseded connect attempt must not silently \
+             switch the active connection back"
+        );
+    }
+
+    #[test]
+    fn a_stale_connect_failed_from_a_superseded_connect_attempt_is_ignored() {
+        let (mut root, _rx) = root();
+
+        let request_a = root
+            .connection_picker
+            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        root.connection_picker
+            .handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        root.connection_picker
+            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let Some(Action::ConnectRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected ConnectRequested for A");
+        };
+
+        root.update(Action::ConnectFailed {
+            error: "connection refused".to_string(),
+            epoch: epoch_a,
+        });
+
+        assert_eq!(
+            root.connection_picker.last_error, None,
+            "a stale ConnectFailed for a superseded connect attempt must not surface an error"
         );
     }
 

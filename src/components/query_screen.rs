@@ -95,6 +95,7 @@ impl Component for QueryScreenComponent {
                 connection,
                 engine,
                 schema,
+                ..
             } => {
                 self.active_connection = Some(connection);
                 self.engine = Some(engine);
@@ -327,6 +328,7 @@ mod tests {
                 rows: vec![],
             }),
             schema: Ok(schema()),
+            epoch: 0,
         });
 
         assert_eq!(screen.active_connection, Some(connection()));
@@ -345,6 +347,7 @@ mod tests {
                 rows: vec![],
             }),
             schema: Err("scan failed".to_string()),
+            epoch: 0,
         });
 
         assert_eq!(
@@ -363,6 +366,7 @@ mod tests {
                 rows: vec![],
             }),
             schema: Ok(schema()),
+            epoch: 0,
         });
         screen.focus = Focus::Sidebar;
 
@@ -384,6 +388,7 @@ mod tests {
                 rows: vec![vec!["1".to_string()]],
             }),
             schema: Ok(Vec::new()),
+            epoch: 0,
         });
         screen.query_editor.push_char('x');
 
@@ -462,6 +467,7 @@ mod tests {
                 rows: vec![],
             }),
             schema: Ok(Vec::new()),
+            epoch: 0,
         });
         assert!(screen.engine.is_some());
 
