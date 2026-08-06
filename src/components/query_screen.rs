@@ -5,7 +5,8 @@
 //! because it only touches the `Driver` trait via `QueryEngine`, never a
 //! concrete driver module.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use edtui::EditorMode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc::UnboundedSender;
@@ -57,6 +58,11 @@ impl QueryScreenComponent {
 impl Component for QueryScreenComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         match code {
+            KeyCode::Esc if self.query_editor.state.mode != EditorMode::Normal => {
+                self.query_editor
+                    .forward_key(KeyEvent::new(code, modifiers));
+                None
+            }
             KeyCode::Esc => Some(Action::BackToPicker),
             KeyCode::Tab => Some(Action::ToggleFocus),
             KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => self
@@ -64,7 +70,7 @@ impl Component for QueryScreenComponent {
                 .clone()
                 .map(|connection| Action::ExportCurl {
                     connection,
-                    query: self.query_editor.query_input.clone(),
+                    query: self.query_editor.text(),
                 }),
             _ if is_submit(code, modifiers) => Some(Action::SubmitQuery),
             _ if self.focus == Focus::Sidebar => match code {
@@ -73,19 +79,11 @@ impl Component for QueryScreenComponent {
                 KeyCode::Enter => Some(Action::InsertSchemaSelection),
                 _ => None,
             },
-            KeyCode::Enter => {
-                self.query_editor.push_char('\n');
+            _ => {
+                self.query_editor
+                    .forward_key(KeyEvent::new(code, modifiers));
                 None
             }
-            KeyCode::Backspace => {
-                self.query_editor.backspace();
-                None
-            }
-            KeyCode::Char(c) => {
-                self.query_editor.push_char(c);
-                None
-            }
-            _ => None,
         }
     }
 
@@ -132,14 +130,14 @@ impl Component for QueryScreenComponent {
             Action::InsertSchemaSelection => {
                 if let Some(name) = self.schema_sidebar.selected_name() {
                     let name = name.to_string();
-                    self.query_editor.query_input.push_str(&name);
+                    self.query_editor.insert_at_cursor(&name);
                     self.focus = Focus::Editor;
                 }
                 None
             }
             Action::SubmitQuery => {
                 let engine = self.engine.take()?;
-                let query = self.query_editor.query_input.clone();
+                let query = self.query_editor.text();
                 let tx = self.action_tx.clone();
                 let epoch = self.epoch;
                 tokio::spawn(async move {
@@ -202,7 +200,7 @@ impl Component for QueryScreenComponent {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .constraints([Constraint::Length(6), Constraint::Min(1)])
             .split(outer[1]);
 
         let connection_name = self
@@ -288,18 +286,33 @@ mod tests {
         assert_eq!(screen.focus, Focus::Editor);
     }
 
+    fn type_chars(screen: &mut QueryScreenComponent, chars: &str) {
+        for c in chars.chars() {
+            screen
+                .query_editor
+                .forward_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
     #[test]
-    fn insert_schema_selection_appends_the_selected_name_and_returns_focus_to_editor() {
+    fn insert_schema_selection_inserts_the_selected_name_at_the_cursor() {
         let (mut screen, _rx) = screen();
         screen.schema_sidebar.set_schema(schema());
         screen.schema_sidebar.move_down();
+        // Type "ab" then leave Insert mode -- vim leaves the cursor sitting
+        // on the last-typed character ("b"), so the inserted name must land
+        // between "a" and "b", not appended at the buffer's end.
+        type_chars(&mut screen, "iab");
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         screen.focus = Focus::Sidebar;
-        screen.query_editor.push_char('x');
 
         screen.update(Action::InsertSchemaSelection);
 
-        assert_eq!(screen.query_editor.query_input, "xorders");
+        assert_eq!(screen.query_editor.text(), "aordersb");
         assert_eq!(screen.focus, Focus::Editor);
+        assert_eq!(screen.query_editor.state.mode, EditorMode::Insert);
     }
 
     #[test]
@@ -309,7 +322,7 @@ mod tests {
 
         screen.update(Action::InsertSchemaSelection);
 
-        assert_eq!(screen.query_editor.query_input, "");
+        assert_eq!(screen.query_editor.text(), "");
         assert_eq!(
             screen.focus,
             Focus::Sidebar,
@@ -390,7 +403,7 @@ mod tests {
             schema: Ok(Vec::new()),
             epoch: 0,
         });
-        screen.query_editor.push_char('x');
+        screen.query_editor.insert_at_cursor("x");
 
         screen.update(Action::SubmitQuery);
         assert!(
@@ -509,23 +522,23 @@ mod tests {
     #[test]
     fn ctrl_enter_runs_the_query_instead_of_inserting_the_schema_selection_when_sidebar_focused() {
         let mut screen = sidebar_focused_screen_with_schema();
-        screen.query_editor.push_char('x');
+        screen.query_editor.insert_at_cursor("x");
 
         let action = screen.handle_key_event(KeyCode::Enter, KeyModifiers::CONTROL);
 
         assert!(matches!(action, Some(Action::SubmitQuery)));
-        assert_eq!(screen.query_editor.query_input, "x");
+        assert_eq!(screen.query_editor.text(), "x");
     }
 
     #[test]
     fn f5_runs_the_query_instead_of_being_swallowed_by_the_sidebar_guard() {
         let mut screen = sidebar_focused_screen_with_schema();
-        screen.query_editor.push_char('x');
+        screen.query_editor.insert_at_cursor("x");
 
         let action = screen.handle_key_event(KeyCode::F(5), KeyModifiers::NONE);
 
         assert!(matches!(action, Some(Action::SubmitQuery)));
-        assert_eq!(screen.query_editor.query_input, "x");
+        assert_eq!(screen.query_editor.text(), "x");
     }
 
     #[test]
@@ -567,10 +580,64 @@ mod tests {
     }
 
     #[test]
+    fn esc_in_insert_mode_returns_to_normal_mode_instead_of_the_picker() {
+        let (mut screen, _rx) = screen();
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        assert_eq!(screen.query_editor.state.mode, EditorMode::Insert);
+
+        let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(
+            action.is_none(),
+            "Esc must be consumed by the editor, not bubble to BackToPicker"
+        );
+        assert_eq!(screen.query_editor.state.mode, EditorMode::Normal);
+    }
+
+    #[test]
+    fn esc_in_normal_mode_returns_back_to_picker_even_after_leaving_insert_mode() {
+        let (mut screen, _rx) = screen();
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(screen.query_editor.state.mode, EditorMode::Normal);
+
+        let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(matches!(action, Some(Action::BackToPicker)));
+    }
+
+    #[test]
+    fn ctrl_y_exports_curl_even_while_the_sidebar_has_focus() {
+        let mut screen = sidebar_focused_screen_with_schema();
+        screen.active_connection = Some(connection());
+        screen.query_editor.insert_at_cursor("select 1");
+
+        let action = screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::CONTROL);
+
+        match action {
+            Some(Action::ExportCurl {
+                connection: c,
+                query,
+            }) => {
+                assert_eq!(c, connection());
+                assert_eq!(query, "select 1");
+            }
+            other => panic!(
+                "expected ExportCurl, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+    }
+
+    #[test]
     fn draw_shows_active_connection_and_input() {
         let (mut screen, _rx) = screen();
         screen.active_connection = Some(connection());
-        screen.query_editor.push_char('x');
+        screen.query_editor.insert_at_cursor("x");
         let backend = TestBackend::new(64, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 

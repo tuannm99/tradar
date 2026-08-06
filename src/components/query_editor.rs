@@ -1,44 +1,63 @@
-//! The query input box. Not a `Component` — driven entirely by
-//! `QueryScreenComponent`. `query_input` will change representation
-//! (to a vim-modal `edtui` editor) in a later sub-project; this
-//! sub-project keeps it an unmodified `String`.
-
+use crossterm::event::KeyEvent;
+use edtui::actions::InsertChar;
+use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Lines};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders};
 
-#[derive(Default)]
 pub struct QueryEditorComponent {
-    pub query_input: String,
+    pub state: EditorState,
+    event_handler: EditorEventHandler,
+}
+
+impl Default for QueryEditorComponent {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl QueryEditorComponent {
     pub fn new() -> Self {
         Self {
-            query_input: String::new(),
+            state: EditorState::new(Lines::default()),
+            event_handler: EditorEventHandler::default(),
         }
     }
 
-    pub fn push_char(&mut self, c: char) {
-        self.query_input.push(c);
+    pub fn text(&self) -> String {
+        self.state
+            .lines
+            .iter_row()
+            .map(|row| row.iter().collect::<String>())
+            .collect::<Vec<String>>()
+            .join("\n")
     }
 
-    pub fn backspace(&mut self) {
-        self.query_input.pop();
+    pub fn insert_at_cursor(&mut self, text: &str) {
+        for c in text.chars() {
+            self.state.execute(InsertChar(c));
+        }
+        self.state.mode = EditorMode::Insert;
+    }
+
+    pub fn forward_key(&mut self, key: KeyEvent) {
+        self.event_handler.on_key_event(key, &mut self.state);
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, connection_name: &str) {
-        let input = Paragraph::new(self.query_input.as_str()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Query — {connection_name}")),
-        );
-        frame.render_widget(input, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Query — {connection_name}"));
+        let view = EditorView::new(&mut self.state)
+            .theme(EditorTheme::default().block(block))
+            .wrap(true);
+        frame.render_widget(view, area);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -50,31 +69,46 @@ mod tests {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
     }
 
-    #[test]
-    fn push_char_and_backspace_edit_the_query_input() {
-        let mut editor = QueryEditorComponent::new();
-
-        editor.push_char('a');
-        editor.push_char('b');
-        assert_eq!(editor.query_input, "ab");
-
-        editor.backspace();
-        assert_eq!(editor.query_input, "a");
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     #[test]
-    fn backspace_on_empty_input_does_nothing() {
+    fn typing_in_insert_mode_updates_the_text() {
         let mut editor = QueryEditorComponent::new();
 
-        editor.backspace();
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('a')));
+        editor.forward_key(key(KeyCode::Char('b')));
 
-        assert_eq!(editor.query_input, "");
+        assert_eq!(editor.text(), "ab");
+    }
+
+    #[test]
+    fn backspace_in_insert_mode_removes_the_last_character() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        editor.forward_key(key(KeyCode::Backspace));
+
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn insert_at_cursor_inserts_text_and_switches_to_insert_mode() {
+        let mut editor = QueryEditorComponent::new();
+
+        editor.insert_at_cursor("users");
+
+        assert_eq!(editor.text(), "users");
+        assert_eq!(editor.state.mode, EditorMode::Insert);
     }
 
     #[test]
     fn draw_shows_the_connection_name_and_input() {
         let mut editor = QueryEditorComponent::new();
-        editor.push_char('x');
+        editor.insert_at_cursor("x");
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 
