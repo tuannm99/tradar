@@ -49,6 +49,7 @@ Other standing principles from the design spec:
 - `directories` — platform-appropriate config path for the saved-connections file
 - `serde` / `serde_json` — serialization
 - `anyhow` — error handling
+- `base64` — encodes yanked results text for the OSC52 clipboard escape sequence (`src/main.rs`'s `yank_to_clipboard`)
 - Dev-only: `tempfile` (driver/storage tests use real temp files, not mocks), `testcontainers-modules` (spins up a real Postgres for driver tests)
 
 Present but not yet used by any code: `reqwest` (planned for Elasticsearch's REST API), `clap`, `thiserror`, `tracing`/`tracing-subscriber`.
