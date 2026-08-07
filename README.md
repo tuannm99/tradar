@@ -1,29 +1,29 @@
 # Tradar
 
-Tradar is a terminal-first database exploration and query tool (TUI), in the spirit of [LazyGit](https://github.com/jesseduffield/lazygit) or [k9s](https://k9scli.io/) — but for databases. The name is a portmanteau of the author's name (tuannm) and "radar".
+Tradar là một công cụ khám phá và truy vấn database chạy trong terminal (TUI), theo tinh thần của [LazyGit](https://github.com/jesseduffield/lazygit) hay [k9s](https://k9scli.io/) — nhưng dành cho database. Tên là ghép từ tên tác giả (tuannm) và "radar".
 
-It gives you a single, keyboard-driven interface for connecting to, browsing, and querying different databases, so you stop context-switching between native CLI clients. Tradar doesn't invent its own query language: you write real SQL against SQL databases, real Mongo Shell JavaScript against MongoDB, and real Query DSL against Elasticsearch.
+Nó cho bạn một giao diện duy nhất, điều khiển bằng bàn phím, để kết nối, browse, và query các database khác nhau, để bạn không phải context-switch giữa nhiều native CLI client. Tradar không tự bịa ra ngôn ngữ query riêng: bạn viết SQL thật với database SQL, Mongo Shell JavaScript thật với MongoDB, và Query DSL thật với Elasticsearch.
 
-## Status
+## Trạng thái
 
-Pre-alpha, but runnable: `tradar` connects to a real PostgreSQL, SQLite, MongoDB, Elasticsearch, or Redis instance, runs queries, and shows results in the terminal — connection picker → query screen → results, all keyboard-driven. The query editor is multi-line: plain `Enter` inserts a newline, and `Ctrl+Enter` (or `F5`, since not every terminal reports Ctrl+Enter distinctly) runs the query. On an Elasticsearch connection, `Ctrl+Y` writes the current request as a `curl` command to `./tradar-query.sh` in the working directory. There's no interactive "add connection" screen yet, so saved connections must be added by hand to the TOML file at the path `tradar` prints when none exist (see `src/storage/mod.rs`). The query screen has a schema sidebar (`Tab` to focus it, `↑`/`↓` or `j`/`k` to move, `Enter` to insert the selected table/collection/index/key name into the query) that loads automatically on connect. Multi-tab editing and general export (beyond Elasticsearch's curl export) are not built yet. See `docs/architecture.md` for the shape of the system, including each driver's query language scope.
+Pre-alpha, nhưng chạy được: `tradar` kết nối tới một instance PostgreSQL, SQLite, MongoDB, Elasticsearch, hoặc Redis thật, chạy query, và hiện kết quả trong terminal — connection picker → query screen → results, toàn bộ điều khiển bằng bàn phím. Query editor hỗ trợ nhiều dòng: `Enter` thường chèn một dòng mới, còn `Ctrl+Enter` (hoặc `F5`, vì không phải terminal nào cũng báo Ctrl+Enter riêng biệt) chạy query. Trên kết nối Elasticsearch, `Ctrl+Y` ghi request hiện tại thành lệnh `curl` vào `./tradar-query.sh` trong thư mục làm việc. Chưa có màn hình "add connection" tương tác, nên saved connection phải được thêm bằng tay vào file TOML tại đường dẫn `tradar` in ra khi chưa có connection nào (xem `crates/tradar-core/src/storage/mod.rs`). Query screen có một schema sidebar (`Tab` để focus, `↑`/`↓` hoặc `j`/`k` để di chuyển, `Enter` để chèn tên table/collection/index/key được chọn vào query) tự động load khi connect. Multi-tab editing và export tổng quát (ngoài curl export của Elasticsearch) chưa được xây dựng. Xem `docs/architecture.md` để biết hình dạng hệ thống, gồm cả phạm vi ngôn ngữ query của từng driver.
 
-## Databases
+## Database
 
-**v1 target:** PostgreSQL, SQLite, MongoDB, Elasticsearch, Redis — each a `Driver` implementation with its own execution model:
+**Mục tiêu v1:** PostgreSQL, SQLite, MongoDB, Elasticsearch, Redis — mỗi cái là một implementation `Driver` với execution model riêng:
 
-- **PostgreSQL / SQLite** — real SQL, tabular results.
-- **MongoDB** — a minimal shell-subset parser for `db.<collection>.<method>(<json-args>)` (`find`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`); not a real JS engine.
-- **Elasticsearch** — a Kibana Dev Tools-style console: type `METHOD /path` plus an optional JSON body and it's sent to the cluster as-is, not limited to the Search API.
-- **Redis** — one command line per execution, naive whitespace parsing; `HGETALL` and `ZRANGE`/`ZREVRANGE ... WITHSCORES` get type-aware JSON formatting, everything else uses a generic RESP-to-JSON conversion.
+- **PostgreSQL / SQLite** — SQL thật, kết quả dạng bảng.
+- **MongoDB** — một parser tối giản cho `db.<collection>.<method>(<json-args>)` (`find`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`); không phải JS engine thật.
+- **Elasticsearch** — một console kiểu Kibana Dev Tools: gõ `METHOD /path` cộng một JSON body tuỳ chọn, gửi thẳng tới cluster, không giới hạn ở Search API.
+- **Redis** — một dòng lệnh mỗi lần chạy, parse thô theo khoảng trắng; `HGETALL` và `ZRANGE`/`ZREVRANGE ... WITHSCORES` được format JSON nhận biết kiểu, mọi lệnh khác dùng chuyển đổi RESP-to-JSON tổng quát.
 
-**Planned:** MySQL, MariaDB, ClickHouse
+**Dự kiến:** MySQL, MariaDB, ClickHouse
 
-New database support is added as a `Driver` implementation without touching the rest of the application — see `docs/architecture.md`.
+Hỗ trợ database mới được thêm dưới dạng một implementation `Driver`, không đụng tới phần còn lại của ứng dụng — xem `docs/architecture.md`.
 
 ## Saved connections
 
-There's no interactive "add connection" screen yet, so connections are added by hand to the TOML file at the path `tradar` prints when none exist (see `src/storage/mod.rs`). Each entry is a `[[connections]]` table with a `name`, a `driver` (the lowercase `DriverKind` name), and a `target` whose format depends on the driver:
+Chưa có màn hình "add connection" tương tác, nên connection được thêm bằng tay vào file TOML tại đường dẫn `tradar` in ra khi chưa có connection nào (xem `crates/tradar-core/src/storage/mod.rs`). Mỗi entry là một table `[[connections]]` với `name`, `driver` (tên `DriverKind` viết thường), và `target` mà định dạng tuỳ theo driver:
 
 ```toml
 [[connections]]
@@ -52,22 +52,22 @@ driver = "mongo"
 target = "mongodb://localhost:27017/mydb"
 ```
 
-MongoDB's `target` must include a database path (`/mydb` above) — `MongoDriver::connect()` errors with "connection string must include a default database" if it's omitted.
+`target` của MongoDB phải kèm theo một database path (`/mydb` ở trên) — `MongoDriver::connect()` báo lỗi "connection string must include a default database" nếu thiếu.
 
-## Philosophy
+## Triết lý
 
-- **Keyboard-first.** Every feature works without a mouse.
-- **Terminal-first.** Fast startup, low memory usage, no browser or Electron shell.
-- **Native query languages.** SQL for SQL databases, Mongo Shell JS for MongoDB, Query DSL for Elasticsearch — not a custom unified language.
-- **Database-agnostic core.** Business logic never depends on a specific database; every driver is isolated behind one shared interface.
+- **Keyboard-first.** Mọi tính năng hoạt động được mà không cần chuột.
+- **Terminal-first.** Khởi động nhanh, ít tốn bộ nhớ, không cần trình duyệt hay shell Electron.
+- **Ngôn ngữ query gốc.** SQL cho database SQL, Mongo Shell JS cho MongoDB, Query DSL cho Elasticsearch — không phải một ngôn ngữ hợp nhất tự bịa ra.
+- **Core không phụ thuộc database cụ thể.** Business logic không bao giờ phụ thuộc một database cụ thể; mỗi driver được cách ly sau một interface dùng chung.
 
-## Building
+## Build
 
-Requires Rust (edition 2024).
+Cần Rust (edition 2024).
 
 ```bash
 cargo build   # build
-cargo run     # run
+cargo run     # chạy
 cargo test    # test
 cargo clippy  # lint
 cargo fmt     # format
