@@ -14,16 +14,18 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use tradar::action::{Action, Component};
-use tradar::components::RootComponent;
-use tradar::drivers::Driver;
-use tradar::drivers::elasticsearch::{self, ElasticsearchDriver};
-use tradar::drivers::mongo::MongoDriver;
-use tradar::drivers::postgres::PostgresDriver;
-use tradar::drivers::redis::RedisDriver;
-use tradar::drivers::sqlite::SqliteDriver;
-use tradar::query_engine::QueryEngine;
-use tradar::storage::{ConnectionStore, DriverKind, SavedConnection, default_connections_path};
+use tradar_app::action::{Action, Component};
+use tradar_app::components::RootComponent;
+use tradar_app::drivers::Driver;
+use tradar_app::drivers::elasticsearch::{self, ElasticsearchDriver};
+use tradar_app::drivers::mongo::MongoDriver;
+use tradar_app::drivers::postgres::PostgresDriver;
+use tradar_app::drivers::redis::RedisDriver;
+use tradar_app::drivers::sqlite::SqliteDriver;
+use tradar_app::query_engine::QueryEngine;
+use tradar_core::storage::{
+    ConnectionStore, DriverKind, SavedConnection, default_connections_path,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -7,9 +7,10 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
+use tradar_core::storage::SavedConnection;
+
 use crate::drivers::{QueryResult, SchemaInfo};
 use crate::query_engine::QueryEngine;
-use crate::storage::SavedConnection;
 
 pub enum Action {
     Quit,

@@ -1,31 +1,4 @@
-[package]
-name = "tradar"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-ratatui = "0.30"
-crossterm = "0.29"
-reqwest = { version = "0.12", features = ["json"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-directories = "6"
-thiserror = "2"
-anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = "0.3"
-async-trait = "0.1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres"] }
-toml = "0.8"
-redis = { version = "1", features = ["tokio-comp"] }
-mongodb = { version = "3", features = ["bson-3"] }
-bson = { version = "3.1", features = ["serde_json-1"] }
-futures-util = "0.3"
-edtui = { version = "0.11.6", default-features = false }
-base64 = "0.22"
-
-[dev-dependencies]
-tempfile = "3"
-testcontainers-modules = { version = "0.11", features = ["postgres", "elastic_search", "redis", "mongo"] }
+[workspace]
+resolver = "3"
+members = ["crates/tradar-core", "crates/tradar-app"]
+default-members = ["crates/tradar-app"]

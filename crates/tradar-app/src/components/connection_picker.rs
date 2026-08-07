@@ -8,8 +8,9 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
+use tradar_core::storage::SavedConnection;
+
 use crate::action::{Action, Component};
-use crate::storage::SavedConnection;
 
 pub struct ConnectionPickerComponent {
     pub connections: Vec<SavedConnection>,
@@ -163,8 +164,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
 
+    use tradar_core::storage::DriverKind;
+
     use super::*;
-    use crate::storage::DriverKind;
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()

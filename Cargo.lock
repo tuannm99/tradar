@@ -4440,7 +4440,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tradar"
+name = "tradar-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4449,7 +4449,6 @@ dependencies = [
  "bson 3.1.0",
  "clap",
  "crossterm",
- "directories",
  "edtui",
  "futures-util",
  "mongodb",
@@ -4463,9 +4462,20 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.19",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
+ "tradar-core",
+]
+
+[[package]]
+name = "tradar-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

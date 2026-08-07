@@ -8,10 +8,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::UnboundedSender;
 
+use tradar_core::storage::SavedConnection;
+
 use crate::action::{Action, Component};
 use crate::components::connection_picker::ConnectionPickerComponent;
 use crate::components::query_screen::QueryScreenComponent;
-use crate::storage::SavedConnection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -96,10 +97,11 @@ mod tests {
     use async_trait::async_trait;
     use tokio::sync::mpsc;
 
+    use tradar_core::storage::DriverKind;
+
     use super::*;
     use crate::drivers::{Driver, QueryResult, SchemaInfo};
     use crate::query_engine::QueryEngine;
-    use crate::storage::DriverKind;
 
     struct FakeDriver;
 

@@ -11,12 +11,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
+use tradar_core::storage::SavedConnection;
+
 use crate::action::{Action, Component};
 use crate::components::query_editor::QueryEditorComponent;
 use crate::components::results::ResultsComponent;
 use crate::components::schema_sidebar::SchemaSidebarComponent;
 use crate::query_engine::QueryEngine;
-use crate::storage::SavedConnection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -308,9 +309,10 @@ mod tests {
     use ratatui::buffer::Buffer;
     use tokio::sync::mpsc;
 
+    use tradar_core::storage::DriverKind;
+
     use super::*;
     use crate::drivers::{Driver, QueryResult, SchemaInfo};
-    use crate::storage::DriverKind;
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
