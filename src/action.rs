@@ -35,6 +35,15 @@ pub enum Action {
     SchemaHalfPageUp,
     SchemaHalfPageDown,
     InsertSchemaSelection,
+    ResultsMoveUp,
+    ResultsMoveDown,
+    ResultsMoveTop,
+    ResultsMoveBottom,
+    ResultsHalfPageUp,
+    ResultsHalfPageDown,
+    Yank {
+        text: String,
+    },
     SubmitQuery,
     QueryCompleted {
         engine: QueryEngine,

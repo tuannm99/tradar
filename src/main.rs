@@ -1,5 +1,6 @@
-use std::io;
+use std::io::{self, Write};
 
+use base64::Engine;
 use crossterm::event::{
     self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
@@ -98,6 +99,9 @@ async fn run(
                 Action::ExportCurl { connection, query } => {
                     export_curl(&connection, &query);
                 }
+                Action::Yank { text } => {
+                    yank_to_clipboard(&text);
+                }
                 other => {
                     if let Some(next) = root.update(other) {
                         let _ = action_tx.send(next);
@@ -145,6 +149,19 @@ fn spawn_connect(
             }
         }
     });
+}
+
+/// Copies `text` to the system clipboard via an OSC52 escape sequence,
+/// which the terminal emulator itself intercepts -- no clipboard crate
+/// needed, and it works through SSH/tmux as long as the terminal supports
+/// OSC52 (most modern ones do: iTerm2, kitty, Alacritty, WezTerm, Windows
+/// Terminal, ...).
+fn yank_to_clipboard(text: &str) {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let sequence = format!("\x1b]52;c;{encoded}\x07");
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(sequence.as_bytes());
+    let _ = stdout.flush();
 }
 
 fn export_curl(connection: &SavedConnection, query: &str) {

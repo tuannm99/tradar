@@ -21,6 +21,7 @@ use crate::storage::SavedConnection;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Editor,
+    Results,
     Sidebar,
 }
 
@@ -79,25 +80,48 @@ impl Component for QueryScreenComponent {
             KeyCode::Char('g') if self.focus == Focus::Sidebar && had_pending_g => {
                 Some(Action::SchemaMoveTop)
             }
-            KeyCode::Char('g') if self.focus == Focus::Sidebar => {
+            KeyCode::Char('g') if self.focus == Focus::Results && had_pending_g => {
+                Some(Action::ResultsMoveTop)
+            }
+            KeyCode::Char('g') if self.focus == Focus::Sidebar || self.focus == Focus::Results => {
                 self.pending_g = true;
                 None
             }
             KeyCode::Char('G') if self.focus == Focus::Sidebar => Some(Action::SchemaMoveBottom),
+            KeyCode::Char('G') if self.focus == Focus::Results => Some(Action::ResultsMoveBottom),
             KeyCode::Char('d')
                 if self.focus == Focus::Sidebar && modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 Some(Action::SchemaHalfPageDown)
+            }
+            KeyCode::Char('d')
+                if self.focus == Focus::Results && modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Some(Action::ResultsHalfPageDown)
             }
             KeyCode::Char('u')
                 if self.focus == Focus::Sidebar && modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 Some(Action::SchemaHalfPageUp)
             }
+            KeyCode::Char('u')
+                if self.focus == Focus::Results && modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Some(Action::ResultsHalfPageUp)
+            }
             _ if self.focus == Focus::Sidebar => match code {
                 KeyCode::Down | KeyCode::Char('j') => Some(Action::SchemaMoveDown),
                 KeyCode::Up | KeyCode::Char('k') => Some(Action::SchemaMoveUp),
                 KeyCode::Enter => Some(Action::InsertSchemaSelection),
+                _ => None,
+            },
+            _ if self.focus == Focus::Results => match code {
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ResultsMoveDown),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ResultsMoveUp),
+                KeyCode::Char('y') => self
+                    .results
+                    .selected_text()
+                    .map(|text| Action::Yank { text }),
                 _ => None,
             },
             _ => {
@@ -135,7 +159,8 @@ impl Component for QueryScreenComponent {
             }
             Action::ToggleFocus => {
                 self.focus = match self.focus {
-                    Focus::Editor => Focus::Sidebar,
+                    Focus::Editor => Focus::Results,
+                    Focus::Results => Focus::Sidebar,
                     Focus::Sidebar => Focus::Editor,
                 };
                 None
@@ -162,6 +187,30 @@ impl Component for QueryScreenComponent {
             }
             Action::SchemaHalfPageUp => {
                 self.schema_sidebar.move_half_page_up();
+                None
+            }
+            Action::ResultsMoveDown => {
+                self.results.move_down();
+                None
+            }
+            Action::ResultsMoveUp => {
+                self.results.move_up();
+                None
+            }
+            Action::ResultsMoveTop => {
+                self.results.move_to_top();
+                None
+            }
+            Action::ResultsMoveBottom => {
+                self.results.move_to_bottom();
+                None
+            }
+            Action::ResultsHalfPageDown => {
+                self.results.move_half_page_down();
+                None
+            }
+            Action::ResultsHalfPageUp => {
+                self.results.move_half_page_up();
                 None
             }
             Action::InsertSchemaSelection => {
@@ -246,7 +295,8 @@ impl Component for QueryScreenComponent {
             .map(|c| c.name.as_str())
             .unwrap_or("");
         self.query_editor.draw(frame, chunks[0], connection_name);
-        self.results.draw(frame, chunks[1]);
+        self.results
+            .draw(frame, chunks[1], self.focus == Focus::Results);
     }
 }
 
@@ -312,9 +362,12 @@ mod tests {
     }
 
     #[test]
-    fn toggle_focus_flips_between_editor_and_sidebar() {
+    fn toggle_focus_cycles_editor_results_sidebar() {
         let (mut screen, _rx) = screen();
         assert_eq!(screen.focus, Focus::Editor);
+
+        screen.update(Action::ToggleFocus);
+        assert_eq!(screen.focus, Focus::Results);
 
         screen.update(Action::ToggleFocus);
         assert_eq!(screen.focus, Focus::Sidebar);
