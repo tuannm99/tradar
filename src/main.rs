@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "No saved connections found. Add one to {} and re-run tradar.\n\
              (There's no interactive \"add connection\" screen yet -- see \
-             docs/superpowers/specs/2026-08-01-tradar-v1-design.md.)",
+             docs/architecture.md.)",
             connections_path.display()
         );
         return Ok(());

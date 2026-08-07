@@ -16,6 +16,8 @@ pub struct ConnectionPickerComponent {
     pub selected: usize,
     pub last_error: Option<String>,
     pub connect_epoch: u64,
+    pending_g: bool,
+    visible_height: usize,
 }
 
 impl ConnectionPickerComponent {
@@ -25,22 +27,48 @@ impl ConnectionPickerComponent {
             selected: 0,
             last_error: None,
             connect_epoch: 0,
+            pending_g: false,
+            visible_height: 0,
         }
+    }
+
+    fn move_selection_down_by(&mut self, delta: usize) {
+        if self.connections.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + delta).min(self.connections.len() - 1);
+    }
+
+    fn move_selection_up_by(&mut self, delta: usize) {
+        self.selected = self.selected.saturating_sub(delta);
     }
 
     fn move_selection_down(&mut self) {
-        if self.selected + 1 < self.connections.len() {
-            self.selected += 1;
-        }
+        self.move_selection_down_by(1);
     }
 
     fn move_selection_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.move_selection_up_by(1);
+    }
+
+    fn move_selection_to_top(&mut self) {
+        self.selected = 0;
+    }
+
+    fn move_selection_to_bottom(&mut self) {
+        self.selected = self.connections.len().saturating_sub(1);
+    }
+
+    /// Half the last-rendered visible row count, minimum 1 -- matches vim's
+    /// `Ctrl+d`/`Ctrl+u`. Falls back to 1 before the first `draw()`.
+    fn half_page(&self) -> usize {
+        (self.visible_height / 2).max(1)
     }
 }
 
 impl Component for ConnectionPickerComponent {
-    fn handle_key_event(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> Option<Action> {
+    fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let had_pending_g = std::mem::take(&mut self.pending_g);
         match code {
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Down | KeyCode::Char('j') => {
@@ -49,6 +77,28 @@ impl Component for ConnectionPickerComponent {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_selection_up();
+                None
+            }
+            KeyCode::Char('g') if had_pending_g => {
+                self.move_selection_to_top();
+                None
+            }
+            KeyCode::Char('g') => {
+                self.pending_g = true;
+                None
+            }
+            KeyCode::Char('G') => {
+                self.move_selection_to_bottom();
+                None
+            }
+            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let step = self.half_page();
+                self.move_selection_down_by(step);
+                None
+            }
+            KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let step = self.half_page();
+                self.move_selection_up_by(step);
                 None
             }
             KeyCode::Enter => {
@@ -89,6 +139,7 @@ impl Component for ConnectionPickerComponent {
             List::new(items).block(Block::default().borders(Borders::ALL).title("Connections"));
 
         let Some(error) = &self.last_error else {
+            self.visible_height = area.height.saturating_sub(2) as usize;
             frame.render_widget(list, area);
             return;
         };
@@ -97,6 +148,7 @@ impl Component for ConnectionPickerComponent {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(3)])
             .split(area);
+        self.visible_height = chunks[0].height.saturating_sub(2) as usize;
         frame.render_widget(list, chunks[0]);
 
         let error_box = Paragraph::new(error.as_str())
@@ -163,6 +215,79 @@ mod tests {
 
         picker.handle_key_event(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(picker.selected, 0, "should stop at zero, not go negative");
+    }
+
+    #[test]
+    fn gg_moves_to_the_top() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(picker.selected, 1);
+
+        picker.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn a_single_g_does_not_move_the_selection() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+
+        picker.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+
+        assert_eq!(
+            picker.selected, 1,
+            "a lone 'g' should not move anything yet"
+        );
+    }
+
+    #[test]
+    fn g_followed_by_a_different_key_cancels_the_pending_g() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+
+        picker.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Char('k'), KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+
+        assert_eq!(
+            picker.selected, 0,
+            "the second 'g' here starts a fresh pair, not a leftover one"
+        );
+    }
+
+    #[test]
+    fn shift_g_moves_to_the_bottom() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+
+        picker.handle_key_event(KeyCode::Char('G'), KeyModifiers::NONE);
+
+        assert_eq!(picker.selected, 1);
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_scroll_by_half_the_visible_height() {
+        let mut picker = ConnectionPickerComponent::new(vec![
+            connections()[0].clone(),
+            connections()[1].clone(),
+            connections()[0].clone(),
+            connections()[1].clone(),
+            connections()[0].clone(),
+            connections()[1].clone(),
+        ]);
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+        // 12-row area minus 2 border rows = 10 visible rows -> half page = 5.
+
+        picker.handle_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(picker.selected, 5, "should clamp to the last connection");
+
+        picker.handle_key_event(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]

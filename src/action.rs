@@ -30,6 +30,10 @@ pub enum Action {
     ToggleFocus,
     SchemaMoveUp,
     SchemaMoveDown,
+    SchemaMoveTop,
+    SchemaMoveBottom,
+    SchemaHalfPageUp,
+    SchemaHalfPageDown,
     InsertSchemaSelection,
     SubmitQuery,
     QueryCompleted {

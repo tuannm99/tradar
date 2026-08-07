@@ -13,6 +13,7 @@ pub struct SchemaSidebarComponent {
     pub schema: Vec<SchemaInfo>,
     pub schema_selected: usize,
     pub schema_error: Option<String>,
+    visible_height: usize,
 }
 
 impl Default for SchemaSidebarComponent {
@@ -27,6 +28,7 @@ impl SchemaSidebarComponent {
             schema: Vec::new(),
             schema_selected: 0,
             schema_error: None,
+            visible_height: 0,
         }
     }
 
@@ -40,14 +42,47 @@ impl SchemaSidebarComponent {
         self.schema_error = Some(error);
     }
 
-    pub fn move_down(&mut self) {
-        if self.schema_selected + 1 < self.schema.len() {
-            self.schema_selected += 1;
+    fn move_down_by(&mut self, delta: usize) {
+        if self.schema.is_empty() {
+            return;
         }
+        self.schema_selected = (self.schema_selected + delta).min(self.schema.len() - 1);
+    }
+
+    fn move_up_by(&mut self, delta: usize) {
+        self.schema_selected = self.schema_selected.saturating_sub(delta);
+    }
+
+    pub fn move_down(&mut self) {
+        self.move_down_by(1);
     }
 
     pub fn move_up(&mut self) {
-        self.schema_selected = self.schema_selected.saturating_sub(1);
+        self.move_up_by(1);
+    }
+
+    pub fn move_to_top(&mut self) {
+        self.schema_selected = 0;
+    }
+
+    pub fn move_to_bottom(&mut self) {
+        self.schema_selected = self.schema.len().saturating_sub(1);
+    }
+
+    /// Half the last-rendered visible row count, minimum 1 -- matches vim's
+    /// `Ctrl+d`/`Ctrl+u`. Falls back to 1 before the first `draw()`.
+    fn half_page(&self) -> usize {
+        (self.visible_height / 2).max(1)
+    }
+
+    pub fn move_half_page_down(&mut self) {
+        let step = self.half_page();
+        self.move_down_by(step);
+    }
+
+    pub fn move_half_page_up(&mut self) {
+        let step = self.half_page();
+        self.move_up_by(step);
     }
 
     pub fn selected_name(&self) -> Option<&str> {
@@ -81,6 +116,7 @@ impl SchemaSidebarComponent {
         };
 
         let Some(error) = &self.schema_error else {
+            self.visible_height = area.height.saturating_sub(2) as usize;
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).title(title))
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -92,6 +128,7 @@ impl SchemaSidebarComponent {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(7)])
             .split(area);
+        self.visible_height = chunks[0].height.saturating_sub(2) as usize;
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
@@ -183,6 +220,73 @@ mod tests {
             sidebar.schema_selected, 0,
             "should stop at zero, not go negative"
         );
+    }
+
+    #[test]
+    fn move_to_top_jumps_straight_to_the_first_item() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema());
+        sidebar.move_down();
+
+        sidebar.move_to_top();
+
+        assert_eq!(sidebar.schema_selected, 0);
+    }
+
+    #[test]
+    fn move_to_bottom_jumps_straight_to_the_last_item() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema());
+
+        sidebar.move_to_bottom();
+
+        assert_eq!(sidebar.schema_selected, 1);
+    }
+
+    #[test]
+    fn move_to_bottom_on_an_empty_schema_stays_at_zero() {
+        let mut sidebar = SchemaSidebarComponent::new();
+
+        sidebar.move_to_bottom();
+
+        assert_eq!(sidebar.schema_selected, 0);
+    }
+
+    #[test]
+    fn half_page_scroll_moves_by_half_the_visible_rows() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(vec![
+            SchemaInfo {
+                name: "a".to_string(),
+            },
+            SchemaInfo {
+                name: "b".to_string(),
+            },
+            SchemaInfo {
+                name: "c".to_string(),
+            },
+            SchemaInfo {
+                name: "d".to_string(),
+            },
+            SchemaInfo {
+                name: "e".to_string(),
+            },
+            SchemaInfo {
+                name: "f".to_string(),
+            },
+        ]);
+        let backend = TestBackend::new(26, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar.draw(frame, Rect::new(0, 0, 26, 12), false))
+            .unwrap();
+        // 12-row area minus 2 border rows = 10 visible rows -> half page = 5.
+
+        sidebar.move_half_page_down();
+        assert_eq!(sidebar.schema_selected, 5, "should clamp to the last item");
+
+        sidebar.move_half_page_up();
+        assert_eq!(sidebar.schema_selected, 0);
     }
 
     #[test]

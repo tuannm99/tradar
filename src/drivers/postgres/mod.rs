@@ -1,9 +1,17 @@
 //! PostgreSQL driver. Not yet implemented — connection, schema
 //! introspection, and query execution land in a later plan.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
-use sqlx::postgres::PgRow;
+use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
+
+/// How long to wait for the initial connection before giving up. sqlx's own
+/// default (`PgPool::connect`'s `acquire_timeout`) is 30s, which against an
+/// unreachable host makes the TUI look hung rather than reporting a fast,
+/// clear connection error.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 use crate::drivers::{Driver, QueryResult, SchemaInfo};
 
@@ -24,7 +32,12 @@ impl PostgresDriver {
 #[async_trait]
 impl Driver for PostgresDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
-        self.pool = Some(PgPool::connect(&self.connection_string).await?);
+        self.pool = Some(
+            PgPoolOptions::new()
+                .acquire_timeout(CONNECT_TIMEOUT)
+                .connect(&self.connection_string)
+                .await?,
+        );
         Ok(())
     }
 
@@ -82,6 +95,22 @@ mod tests {
     use super::*;
     use testcontainers_modules::postgres::Postgres;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    #[tokio::test]
+    async fn connect_fails_quickly_against_an_unreachable_host() {
+        // Port 1 is reserved and never has a Postgres server listening -- no
+        // Docker/testcontainers needed, connection is refused immediately at
+        // the OS level. This is a regression test for PgPool::connect()'s
+        // default 30s acquire_timeout, which made a bad connection target
+        // look identical to a hung UI.
+        let mut driver = PostgresDriver::new("postgres://user:pass@127.0.0.1:1/db");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), driver.connect())
+            .await
+            .expect("connect() should fail well within 10s, not hang");
+
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn connect_succeeds_for_a_running_postgres() {

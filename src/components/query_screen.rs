@@ -33,6 +33,7 @@ pub struct QueryScreenComponent {
     pub engine: Option<QueryEngine>,
     action_tx: UnboundedSender<Action>,
     epoch: u64,
+    pending_g: bool,
 }
 
 fn is_submit(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -51,12 +52,14 @@ impl QueryScreenComponent {
             engine: None,
             action_tx,
             epoch: 0,
+            pending_g: false,
         }
     }
 }
 
 impl Component for QueryScreenComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let had_pending_g = std::mem::take(&mut self.pending_g);
         match code {
             KeyCode::Esc if self.query_editor.state.mode != EditorMode::Normal => {
                 self.query_editor
@@ -73,6 +76,24 @@ impl Component for QueryScreenComponent {
                     query: self.query_editor.text(),
                 }),
             _ if is_submit(code, modifiers) => Some(Action::SubmitQuery),
+            KeyCode::Char('g') if self.focus == Focus::Sidebar && had_pending_g => {
+                Some(Action::SchemaMoveTop)
+            }
+            KeyCode::Char('g') if self.focus == Focus::Sidebar => {
+                self.pending_g = true;
+                None
+            }
+            KeyCode::Char('G') if self.focus == Focus::Sidebar => Some(Action::SchemaMoveBottom),
+            KeyCode::Char('d')
+                if self.focus == Focus::Sidebar && modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Some(Action::SchemaHalfPageDown)
+            }
+            KeyCode::Char('u')
+                if self.focus == Focus::Sidebar && modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Some(Action::SchemaHalfPageUp)
+            }
             _ if self.focus == Focus::Sidebar => match code {
                 KeyCode::Down | KeyCode::Char('j') => Some(Action::SchemaMoveDown),
                 KeyCode::Up | KeyCode::Char('k') => Some(Action::SchemaMoveUp),
@@ -125,6 +146,22 @@ impl Component for QueryScreenComponent {
             }
             Action::SchemaMoveUp => {
                 self.schema_sidebar.move_up();
+                None
+            }
+            Action::SchemaMoveTop => {
+                self.schema_sidebar.move_to_top();
+                None
+            }
+            Action::SchemaMoveBottom => {
+                self.schema_sidebar.move_to_bottom();
+                None
+            }
+            Action::SchemaHalfPageDown => {
+                self.schema_sidebar.move_half_page_down();
+                None
+            }
+            Action::SchemaHalfPageUp => {
+                self.schema_sidebar.move_half_page_up();
                 None
             }
             Action::InsertSchemaSelection => {
@@ -539,6 +576,52 @@ mod tests {
 
         assert!(matches!(action, Some(Action::SubmitQuery)));
         assert_eq!(screen.query_editor.text(), "x");
+    }
+
+    #[test]
+    fn gg_returns_schema_move_top_when_sidebar_focused() {
+        let mut screen = sidebar_focused_screen_with_schema();
+
+        let first = screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert!(first.is_none(), "a lone 'g' should not act yet");
+
+        let second = screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert!(matches!(second, Some(Action::SchemaMoveTop)));
+    }
+
+    #[test]
+    fn shift_g_returns_schema_move_bottom_when_sidebar_focused() {
+        let mut screen = sidebar_focused_screen_with_schema();
+
+        let action = screen.handle_key_event(KeyCode::Char('G'), KeyModifiers::NONE);
+
+        assert!(matches!(action, Some(Action::SchemaMoveBottom)));
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_return_schema_half_page_actions_when_sidebar_focused() {
+        let mut screen = sidebar_focused_screen_with_schema();
+
+        let down = screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(matches!(down, Some(Action::SchemaHalfPageDown)));
+
+        let up = screen.handle_key_event(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(matches!(up, Some(Action::SchemaHalfPageUp)));
+    }
+
+    #[test]
+    fn g_is_forwarded_to_the_editor_instead_of_the_sidebar_when_editor_focused() {
+        let (mut screen, _rx) = screen();
+        assert_eq!(screen.focus, Focus::Editor);
+
+        let first = screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+        let second = screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+
+        assert!(first.is_none());
+        assert!(
+            second.is_none(),
+            "editor-focused 'g'/'gg' is edtui's own vim handling, not a schema action"
+        );
     }
 
     #[test]
