@@ -1,4 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/tradar-core", "crates/tradar-app"]
+members = [
+  "crates/tradar-core",
+  "crates/tradar-connector-api",
+  "crates/tradar-query-workbench",
+  "crates/connectors/tradar-postgres",
+  "crates/connectors/tradar-sqlite",
+  "crates/connectors/tradar-elasticsearch",
+  "crates/connectors/tradar-redis",
+  "crates/connectors/tradar-mongo",
+  "crates/tradar-app",
+]
 default-members = ["crates/tradar-app"]

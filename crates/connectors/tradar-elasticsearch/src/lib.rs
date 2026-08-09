@@ -1,24 +1,31 @@
-//! Elasticsearch driver, modeled on Kibana's Dev Tools console: the query
-//! input is a `METHOD /path` line plus an optional JSON body, sent to the
-//! cluster as-is rather than limited to the Search API.
+//! Elasticsearch connector, modeled on Kibana's Dev Tools console: the
+//! query input is a `METHOD /path` line plus an optional JSON body, sent to
+//! the cluster as-is rather than limited to the Search API. Exposes only
+//! `connector()` -- everything else here is this crate's own business.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::drivers::{Driver, QueryResult, SchemaInfo};
+use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
+use tradar_core::capability::Capability;
+use tradar_core::storage::SavedConnection;
+use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_engine::QueryEngine;
 
-pub struct ElasticsearchDriver {
+struct ElasticsearchDriver {
     base_url: String,
 }
 
 impl ElasticsearchDriver {
-    pub fn new(base_url: &str) -> Self {
+    fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
 }
 
-pub fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
+fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
     let mut lines = query.lines();
     let first = lines.next()?.trim();
     let mut parts = first.splitn(2, char::is_whitespace);
@@ -45,7 +52,7 @@ fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', r"'\''")
 }
 
-pub fn to_curl(base_url: &str, query: &str) -> Option<String> {
+fn to_curl(base_url: &str, query: &str) -> Option<String> {
     let (method, path, body) = parse_query(query)?;
     let base_url = base_url.trim_end_matches('/');
     let url = format!("{base_url}/{}", path.trim_start_matches('/'));
@@ -61,7 +68,7 @@ pub fn to_curl(base_url: &str, query: &str) -> Option<String> {
 }
 
 #[async_trait]
-impl Driver for ElasticsearchDriver {
+impl QueryDriver for ElasticsearchDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let response = reqwest::get(format!("{}/", self.base_url)).await?;
         if !response.status().is_success() {
@@ -112,6 +119,38 @@ impl Driver for ElasticsearchDriver {
         let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
         Ok(QueryResult::Documents(vec![json]))
     }
+
+    fn export_curl(&self, query: &str) -> Option<String> {
+        to_curl(&self.base_url, query)
+    }
+}
+
+const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
+    id: "elasticsearch",
+    display_name: "Elasticsearch",
+    icon: "🔍",
+    capabilities: &[Capability::Query, Capability::Schema, Capability::Export],
+};
+
+struct ElasticsearchConnector;
+
+#[async_trait]
+impl Connector for ElasticsearchConnector {
+    fn descriptor(&self) -> &ConnectorDescriptor {
+        &DESCRIPTOR
+    }
+
+    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
+        let mut driver = ElasticsearchDriver::new(&connection.target);
+        driver.connect().await?;
+        let driver: Arc<dyn QueryDriver> = Arc::new(driver);
+        let schema = driver.list_schema().await.map_err(|e| e.to_string());
+        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
+    }
+}
+
+pub fn connector() -> Box<dyn Connector> {
+    Box::new(ElasticsearchConnector)
 }
 
 #[cfg(test)]

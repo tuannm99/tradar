@@ -1,6 +1,7 @@
-use std::io::{self, Write};
+use std::collections::HashMap;
+use std::io;
+use std::sync::Arc;
 
-use base64::Engine;
 use crossterm::event::{
     self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
@@ -14,18 +15,46 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use tradar_app::action::{Action, Component};
 use tradar_app::components::RootComponent;
-use tradar_app::drivers::Driver;
-use tradar_app::drivers::elasticsearch::{self, ElasticsearchDriver};
-use tradar_app::drivers::mongo::MongoDriver;
-use tradar_app::drivers::postgres::PostgresDriver;
-use tradar_app::drivers::redis::RedisDriver;
-use tradar_app::drivers::sqlite::SqliteDriver;
-use tradar_app::query_engine::QueryEngine;
-use tradar_core::storage::{
-    ConnectionStore, DriverKind, SavedConnection, default_connections_path,
-};
+use tradar_connector_api::{Connector, Session};
+use tradar_core::action::{Action, Component};
+use tradar_core::storage::{ConnectionStore, SavedConnection, default_connections_path};
+
+/// Every connector compiled into this binary. Adding a connector means
+/// adding a dependency line in `Cargo.toml` and a line here -- nothing else
+/// in the workspace needs to change (see "Registry" in
+/// docs/architecture.md).
+fn registry() -> HashMap<String, Box<dyn Connector>> {
+    let connectors: Vec<Box<dyn Connector>> = vec![
+        tradar_postgres::connector(),
+        tradar_sqlite::connector(),
+        tradar_elasticsearch::connector(),
+        tradar_redis::connector(),
+        tradar_mongo::connector(),
+    ];
+    connectors
+        .into_iter()
+        .map(|c| (c.descriptor().id.to_string(), c))
+        .collect()
+}
+
+/// The result of a connect attempt, carried across a `tokio::spawn`
+/// boundary. Deliberately *not* `Action::Opened` itself: a `Screen`
+/// (`Box<dyn Component>`) can hold non-`Send` state (`edtui`'s
+/// `EditorState` holds an `Rc`-based clipboard), so it must be built with
+/// `Session::build_screen` on this single-threaded event loop, never inside
+/// a spawned task. `Session` itself is `Send + Sync` and crosses fine.
+enum ConnectOutcome {
+    Opened {
+        connection: SavedConnection,
+        session: Box<dyn Session>,
+        epoch: u64,
+    },
+    Failed {
+        error: String,
+        epoch: u64,
+    },
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,8 +72,10 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let registry = Arc::new(registry());
     let (action_tx, action_rx) = mpsc::unbounded_channel();
-    let mut root = RootComponent::new(connections, action_tx.clone());
+    let (connect_tx, connect_rx) = mpsc::unbounded_channel();
+    let mut root = RootComponent::new(connections);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -59,7 +90,16 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, &mut root, action_tx, action_rx).await;
+    let result = run(
+        &mut terminal,
+        &mut root,
+        registry,
+        action_tx,
+        action_rx,
+        connect_tx,
+        connect_rx,
+    )
+    .await;
 
     if keyboard_enhancement {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
@@ -74,35 +114,27 @@ async fn main() -> anyhow::Result<()> {
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     root: &mut RootComponent,
+    registry: Arc<HashMap<String, Box<dyn Connector>>>,
     action_tx: mpsc::UnboundedSender<Action>,
     mut action_rx: mpsc::UnboundedReceiver<Action>,
+    connect_tx: mpsc::UnboundedSender<ConnectOutcome>,
+    mut connect_rx: mpsc::UnboundedReceiver<ConnectOutcome>,
 ) -> anyhow::Result<()> {
     terminal.draw(|frame| root.draw(frame, frame.area()))?;
 
     while !root.should_quit {
-        let mut dirty = false;
-
-        if event::poll(std::time::Duration::from_millis(50))? {
-            dirty = true;
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                && let Some(action) = root.handle_key_event(key.code, key.modifiers)
-            {
-                let _ = action_tx.send(action);
-            }
+        if event::poll(std::time::Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && let Some(action) = root.handle_key_event(key.code, key.modifiers)
+        {
+            let _ = action_tx.send(action);
         }
 
         while let Ok(action) = action_rx.try_recv() {
-            dirty = true;
             match action {
-                Action::ConnectRequested { connection, epoch } => {
-                    spawn_connect(action_tx.clone(), connection, epoch);
-                }
-                Action::ExportCurl { connection, query } => {
-                    export_curl(&connection, &query);
-                }
-                Action::Yank { text } => {
-                    yank_to_clipboard(&text);
+                Action::OpenRequested { connection, epoch } => {
+                    spawn_connect(registry.clone(), connect_tx.clone(), connection, epoch);
                 }
                 other => {
                     if let Some(next) = root.update(other) {
@@ -112,7 +144,33 @@ async fn run(
             }
         }
 
-        if dirty && !root.should_quit {
+        while let Ok(outcome) = connect_rx.try_recv() {
+            match outcome {
+                ConnectOutcome::Opened {
+                    connection,
+                    session,
+                    epoch,
+                } => {
+                    let screen = session.build_screen(action_tx.clone());
+                    root.update(Action::Opened {
+                        connection,
+                        screen,
+                        epoch,
+                    });
+                }
+                ConnectOutcome::Failed { error, epoch } => {
+                    root.update(Action::OpenFailed { error, epoch });
+                }
+            }
+        }
+
+        // Drains whatever the active screen's `Session` has queued up (e.g.
+        // a completed query) -- see "Screen không bao giờ làm IO" in
+        // docs/architecture.md. Always redrawn afterwards, since a tick can
+        // change state with no accompanying key press or channel message.
+        root.tick();
+
+        if !root.should_quit {
             terminal.draw(|frame| root.draw(frame, frame.area()))?;
         }
     }
@@ -120,59 +178,36 @@ async fn run(
 }
 
 fn spawn_connect(
-    action_tx: mpsc::UnboundedSender<Action>,
+    registry: Arc<HashMap<String, Box<dyn Connector>>>,
+    connect_tx: mpsc::UnboundedSender<ConnectOutcome>,
     connection: SavedConnection,
     epoch: u64,
 ) {
     tokio::spawn(async move {
-        let mut driver: Box<dyn Driver> = match connection.driver {
-            DriverKind::Sqlite => Box::new(SqliteDriver::new(&connection.target)),
-            DriverKind::Postgres => Box::new(PostgresDriver::new(&connection.target)),
-            DriverKind::Elasticsearch => Box::new(ElasticsearchDriver::new(&connection.target)),
-            DriverKind::Redis => Box::new(RedisDriver::new(&connection.target)),
-            DriverKind::Mongo => Box::new(MongoDriver::new(&connection.target)),
+        let Some(connector) = registry.get(&connection.driver) else {
+            let _ = connect_tx.send(ConnectOutcome::Failed {
+                error: format!(
+                    "unknown connector '{}': not compiled into this build",
+                    connection.driver
+                ),
+                epoch,
+            });
+            return;
         };
-        match driver.connect().await {
-            Ok(()) => {
-                let engine = QueryEngine::new(driver);
-                let schema = engine.list_schema().await.map_err(|e| e.to_string());
-                let _ = action_tx.send(Action::Connected {
+        match connector.connect(connection.clone()).await {
+            Ok(session) => {
+                let _ = connect_tx.send(ConnectOutcome::Opened {
                     connection,
-                    engine,
-                    schema,
+                    session,
                     epoch,
                 });
             }
             Err(e) => {
-                let _ = action_tx.send(Action::ConnectFailed {
+                let _ = connect_tx.send(ConnectOutcome::Failed {
                     error: e.to_string(),
                     epoch,
                 });
             }
         }
     });
-}
-
-/// Copies `text` to the system clipboard via an OSC52 escape sequence,
-/// which the terminal emulator itself intercepts -- no clipboard crate
-/// needed, and it works through SSH/tmux as long as the terminal supports
-/// OSC52 (most modern ones do: iTerm2, kitty, Alacritty, WezTerm, Windows
-/// Terminal, ...).
-fn yank_to_clipboard(text: &str) {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
-    let sequence = format!("\x1b]52;c;{encoded}\x07");
-    let mut stdout = io::stdout();
-    let _ = stdout.write_all(sequence.as_bytes());
-    let _ = stdout.flush();
-}
-
-fn export_curl(connection: &SavedConnection, query: &str) {
-    if connection.driver != DriverKind::Elasticsearch {
-        return;
-    }
-    let Some(curl) = elasticsearch::to_curl(&connection.target, query) else {
-        return;
-    };
-    let script = format!("#!/usr/bin/env bash\n{curl}\n");
-    let _ = std::fs::write("./tradar-query.sh", script);
 }

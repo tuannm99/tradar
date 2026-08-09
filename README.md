@@ -10,7 +10,7 @@ Pre-alpha, nhưng chạy được: `tradar` kết nối tới một instance Pos
 
 ## Database
 
-**Mục tiêu v1:** PostgreSQL, SQLite, MongoDB, Elasticsearch, Redis — mỗi cái là một implementation `Driver` với execution model riêng:
+**Mục tiêu v1:** PostgreSQL, SQLite, MongoDB, Elasticsearch, Redis — mỗi cái là một connector crate riêng (implementation `QueryDriver` + `Connector`) với execution model riêng:
 
 - **PostgreSQL / SQLite** — SQL thật, kết quả dạng bảng.
 - **MongoDB** — một parser tối giản cho `db.<collection>.<method>(<json-args>)` (`find`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`); không phải JS engine thật.
@@ -19,11 +19,11 @@ Pre-alpha, nhưng chạy được: `tradar` kết nối tới một instance Pos
 
 **Dự kiến:** MySQL, MariaDB, ClickHouse
 
-Hỗ trợ database mới được thêm dưới dạng một implementation `Driver`, không đụng tới phần còn lại của ứng dụng — xem `docs/architecture.md`.
+Hỗ trợ database mới được thêm dưới dạng một connector crate mới (`QueryDriver` + `Connector`), không đụng tới phần còn lại của ứng dụng — xem `docs/architecture.md`.
 
 ## Saved connections
 
-Chưa có màn hình "add connection" tương tác, nên connection được thêm bằng tay vào file TOML tại đường dẫn `tradar` in ra khi chưa có connection nào (xem `crates/tradar-core/src/storage/mod.rs`). Mỗi entry là một table `[[connections]]` với `name`, `driver` (tên `DriverKind` viết thường), và `target` mà định dạng tuỳ theo driver:
+Chưa có màn hình "add connection" tương tác, nên connection được thêm bằng tay vào file TOML tại đường dẫn `tradar` in ra khi chưa có connection nào (xem `crates/tradar-core/src/storage/mod.rs`). Mỗi entry là một table `[[connections]]` với `name`, `driver` (một connector id, xem `ConnectorDescriptor::id` của từng connector crate dưới `crates/connectors/`), và `target` mà định dạng tuỳ theo driver:
 
 ```toml
 [[connections]]

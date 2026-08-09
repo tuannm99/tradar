@@ -4444,26 +4444,32 @@ name = "tradar-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "base64",
- "bson 3.1.0",
  "clap",
  "crossterm",
- "edtui",
- "futures-util",
- "mongodb",
  "ratatui",
- "redis",
- "reqwest",
  "serde",
  "serde_json",
- "sqlx",
- "tempfile",
- "testcontainers-modules",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tradar-connector-api",
+ "tradar-core",
+ "tradar-elasticsearch",
+ "tradar-mongo",
+ "tradar-postgres",
+ "tradar-query-workbench",
+ "tradar-redis",
+ "tradar-sqlite",
+]
+
+[[package]]
+name = "tradar-connector-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
  "tradar-core",
 ]
 
@@ -4472,10 +4478,103 @@ name = "tradar-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossterm",
  "directories",
+ "ratatui",
  "serde",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "tradar-elasticsearch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest",
+ "serde_json",
+ "testcontainers-modules",
+ "tokio",
+ "tradar-connector-api",
+ "tradar-core",
+ "tradar-query-workbench",
+]
+
+[[package]]
+name = "tradar-mongo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bson 3.1.0",
+ "futures-util",
+ "mongodb",
+ "serde_json",
+ "testcontainers-modules",
+ "tokio",
+ "tradar-connector-api",
+ "tradar-core",
+ "tradar-query-workbench",
+]
+
+[[package]]
+name = "tradar-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "sqlx",
+ "testcontainers-modules",
+ "tokio",
+ "tradar-connector-api",
+ "tradar-core",
+ "tradar-query-workbench",
+]
+
+[[package]]
+name = "tradar-query-workbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "crossterm",
+ "edtui",
+ "ratatui",
+ "serde_json",
+ "tokio",
+ "tradar-connector-api",
+ "tradar-core",
+]
+
+[[package]]
+name = "tradar-redis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "redis",
+ "serde_json",
+ "testcontainers-modules",
+ "tokio",
+ "tradar-connector-api",
+ "tradar-core",
+ "tradar-query-workbench",
+]
+
+[[package]]
+name = "tradar-sqlite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tradar-connector-api",
+ "tradar-core",
+ "tradar-query-workbench",
 ]
 
 [[package]]

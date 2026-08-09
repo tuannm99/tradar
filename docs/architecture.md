@@ -1,53 +1,57 @@
 # Architecture
 
-Tài liệu này gồm hai phần: kiến trúc đang triển khai hiện tại, và kiến trúc mục tiêu mà dự án đang migrate tới (một Cargo workspace với pipeline `Connector → Session → Screen`) để các hệ thống không có hình dạng "query" — message broker, hệ thống watch/inspect trạng thái sống, v.v. — có thể được thêm vào mà không phải đổi hình dạng core code. Migration đã bắt đầu: việc tách workspace/crate (bước 1 của kiến trúc mục tiêu, thuần cơ học) đã xong trước; `Action`, `Component`, `Driver`, và mọi thứ khác vẫn giữ nguyên hình dạng hiện tại cho tới các bước sau, mô tả ở "Target architecture" bên dưới.
+Tài liệu này gồm hai phần: kiến trúc đang triển khai hiện tại, và kiến trúc mục tiêu ban đầu (một Cargo workspace với pipeline `Connector → Session → Screen`) để các hệ thống không có hình dạng "query" — message broker, hệ thống watch/inspect trạng thái sống, v.v. — có thể được thêm vào mà không phải đổi hình dạng core code. **Cập nhật 2026-08-10: cả 4 bước migration đã xong** (bước 1: tách workspace, 2026-08-08; bước 2 + đầu bước 3: tách `tradar-query-workbench` + thu hẹp `Action` + thêm `Connector`/`Session`/`Capability`, 2026-08-09, gộp vì phụ thuộc vòng nhau; bước 4: tách 5 driver thành connector crate riêng + `SavedConnection.driver` sang `String` id + registry, 2026-08-10). Phần "Kiến trúc mục tiêu" bên dưới giờ mô tả đúng những gì đã dựng cho 5 connector dạng query hiện có; nó vẫn còn là "mục tiêu" đúng nghĩa cho các hệ thống không có hình dạng query (Kafka, Kubernetes, SSH, ...) — chưa có connector nào trong nhóm đó được thêm vào.
 
 ## Triển khai hiện tại
 
-Tradar là một Cargo workspace gồm hai crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate. `tradar-core` không phụ thuộc vào `tradar-app`; `tradar-app` phụ thuộc vào `tradar-core`.
+Tradar là một Cargo workspace gồm mười crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới.
 
 ```
 Cargo.toml                    [workspace], default-members = ["crates/tradar-app"]
 crates/
   tradar-core/
     src/
-      storage/               — saved connections dạng TOML (dùng crate `directories` để lấy config path)
+      action.rs               — enum Action đóng (5 variant) + trait Component (có tick() mặc định no-op)
+      capability.rs           — enum Capability
+      storage/                — saved connections dạng TOML (dùng crate `directories` để lấy config path); driver: String (connector id)
       config/                — chỗ dành sẵn cho việc load app config; chưa dùng
+  tradar-connector-api/
+    src/lib.rs                — trait Connector, trait Session, struct ConnectorDescriptor
+  tradar-query-workbench/
+    src/
+      query_driver.rs         — trait QueryDriver (connect, list_schema, execute, export_curl) + SchemaInfo/QueryResult
+      query_engine.rs         — QueryEngine: nhận một chuỗi query, giao cho QueryDriver đang active, lưu lịch sử; implement Session
+      components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/schema_sidebar.rs (struct state+draw thuần, do QueryScreenComponent compose)
+  connectors/
+    tradar-postgres/  tradar-sqlite/  tradar-elasticsearch/  tradar-redis/  tradar-mongo/
+      src/lib.rs               — mỗi crate: struct driver (private, implement QueryDriver) + struct XConnector (private, implement Connector)
+                                    + `pub fn connector() -> Box<dyn Connector>` (constructor export duy nhất ra ngoài crate)
   tradar-app/                 [[bin]] name = "tradar"
     src/
-      main.rs                 — event loop: crossterm input -> Component actions -> gọi query_engine/driver
-      action.rs               — enum Action định nghĩa toàn bộ state transition có thể xảy ra, và trait Component
-      components/             — các component ratatui; RootComponent, ConnectionPickerComponent, và QueryScreenComponent implement trait Component từ action.rs, còn query_editor.rs, results.rs, schema_sidebar.rs chỉ là struct state+draw thuần, được QueryScreenComponent compose lại chứ không tự implement Component
-        mod.rs                — RootComponent compose ConnectionPickerComponent và QueryScreenComponent
+      main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 5 connector(); event loop:
+                                    crossterm input -> Component actions -> spawn Connector::connect -> Session -> Screen
+      components/
+        mod.rs                — RootComponent: ScreenSlot::ConnectionPicker | Active(Box<dyn Component>)
         connection_picker.rs  — ConnectionPickerComponent
-        query_screen.rs       — QueryScreenComponent (compose QueryEditorComponent, ResultsComponent, SchemaSidebarComponent)
-        query_editor.rs       — QueryEditorComponent
-        results.rs            — ResultsComponent
-        schema_sidebar.rs     — SchemaSidebarComponent
-      query_engine/           — nhận một chuỗi query, giao cho driver đang active, lưu lịch sử
-      drivers/
-        mod.rs                — trait Driver (connect, list_schema, execute, ...)
-        postgres/
-        sqlite/
-        elasticsearch/
-        redis/
-        mongo/
 ```
 
-`storage` và `config` là hai module duy nhất không phụ thuộc gì khác trong app, đó là lý do chúng được chuyển vào `tradar-core` trước tiên — `action.rs` vẫn kéo trực tiếp `QueryEngine` và các kiểu của driver, nên nó còn ở lại `tradar-app` cho tới khi bước 3 của kiến trúc mục tiêu (bên dưới) tách nó xuống còn `Action` đóng với 5 variant.
+`Action`/`Component` nằm ở `tradar-core` (đóng, 5 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 5 nhưng không chứa code driver nào.
 
-### Trait `Driver`
+### Trait `QueryDriver`
 
-Mỗi database backend implement chung một trait, định nghĩa ở `crates/tradar-app/src/drivers/mod.rs`:
+Mỗi database backend dạng query implement chung một trait, định nghĩa ở `crates/tradar-query-workbench/src/query_driver.rs` (đổi tên từ `Driver` — tên cũ mơ hồ sau khi "connector" trở thành thuật ngữ chung cho mọi loại hệ thống, kể cả loại không có hình dạng query):
 
 ```rust
 #[async_trait]
-pub trait Driver: Send + Sync {
+pub trait QueryDriver: Send + Sync {
     async fn connect(&mut self) -> anyhow::Result<()>;
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>>;
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult>;
+    fn export_curl(&self, _query: &str) -> Option<String> { None }
 }
 ```
+
+`export_curl` thay cho `Action::ExportCurl` cũ (một variant trong enum dùng chung mà chỉ Elasticsearch implement, buộc `main.rs` phải special-case theo `DriverKind`) — mặc định `None` ("không hỗ trợ export"), chỉ `ElasticsearchDriver` (trong `tradar-elasticsearch`) override. Curl export giờ nằm gọn trong crate của riêng Elasticsearch (`QueryScreenComponent` chỉ gọi `self.engine.export_curl(query)`, không biết gì về ES) — mức cô lập cuối cùng đã đạt được, không còn "chờ bước 4" như ghi chú trước đây.
 
 `SchemaInfo` và `QueryResult` là các shape đã chuẩn hoá mà phần còn lại của app render ra — driver có trách nhiệm dịch kết quả gốc của database sang các kiểu này. `QueryResult` là enum, không phải một struct duy nhất, vì kết quả dạng bảng (SQL) và kết quả dạng document (MongoDB, Elasticsearch, Redis) không cùng shape:
 
@@ -70,29 +74,29 @@ Postgres và SQLite chấp nhận SQL tuỳ ý. Ba driver còn lại chỉ chấ
 
 ### Quy tắc cách ly (isolation rule)
 
-Đây là quy tắc giữ cho driver pluggable, và được áp dụng ở mọi nơi, không chỉ ở top level:
+Đây là quy tắc giữ cho driver pluggable, và được áp dụng ở mọi nơi, không chỉ ở top level — giờ được Cargo enforce, không chỉ quy ước:
 
-- Code trong `drivers/*` chỉ implement `Driver` và không phụ thuộc gì khác trong app.
-- Code trong `components/`, `action.rs`, và `query_engine` chỉ phụ thuộc trait `Driver` — không bao giờ phụ thuộc `drivers::postgres`, `drivers::sqlite`, hay bất kỳ module driver cụ thể nào khác.
-- `main.rs` là nơi duy nhất tạo một driver cụ thể (trong `Action::ConnectRequested`) hoặc gọi một helper của driver cụ thể (trong `Action::ExportCurl`).
+- Code trong mỗi crate connector (`crates/connectors/tradar-*`) chỉ implement `QueryDriver` (từ `tradar-query-workbench`) và `Connector`/`Session` (từ `tradar-connector-api`); struct driver/connector cụ thể không `pub` ra ngoài crate, chỉ `pub fn connector()` được export.
+- Code trong `tradar-query-workbench` (components, `query_engine`) chỉ phụ thuộc trait `QueryDriver` — không bao giờ phụ thuộc một connector crate cụ thể nào (thật ra không *thể* phụ thuộc — mỗi connector crate phụ thuộc `tradar-query-workbench`, không phải ngược lại, nên một cycle sẽ chặn ngay ở compile time nếu vi phạm).
+- `tradar-app/src/main.rs` là nơi duy nhất biết toàn bộ tập connector (hàm `registry()` gọi `connector()` của cả 5 crate) — không connector crate nào phụ thuộc connector crate khác hay phụ thuộc `tradar-app`.
 
-Thêm một database mới nghĩa là thêm một module mới dưới `drivers/` implement `Driver`. Việc này không bao giờ được yêu cầu sửa `components/`, `action.rs`, hay `query_engine`.
+Thêm một database mới nghĩa là: tạo một crate connector mới dưới `crates/connectors/` implement `QueryDriver` + `Connector`/`Session` + export `connector()`, thêm một dòng dependency vào `tradar-app/Cargo.toml`, và một dòng trong `registry()`. Việc này không bao giờ được yêu cầu sửa `tradar-query-workbench`, `tradar-connector-api`, `tradar-core`, hay bất kỳ connector crate nào khác.
 
 ### Trạng thái hiện tại
 
-Walking skeleton v1 chạy được từ đầu đến cuối: `tradar` load các saved connection từ `storage`, kết nối qua `Driver` được chọn (Postgres, SQLite, Elasticsearch, Redis, hoặc MongoDB, tất cả đều implement đầy đủ chạy được với backend thật), và chạy các query gõ vào query editor của `QueryScreenComponent` thông qua `query_engine`, render kết quả hoặc lỗi thật.
+Walking skeleton v1 chạy được từ đầu đến cuối: `tradar` load các saved connection từ `storage`, dựng registry từ 5 connector crate, kết nối qua `Connector` tương ứng với connector id đã chọn (Postgres, SQLite, Elasticsearch, Redis, hoặc MongoDB, tất cả đều implement đầy đủ chạy được với backend thật), và chạy các query gõ vào query editor của `QueryScreenComponent` thông qua `QueryEngine`, render kết quả hoặc lỗi thật.
 
 Những phần còn mỏng/thiếu đáng chú ý:
 
 - Chưa có màn hình "add connection" tương tác — connection được thêm bằng cách sửa tay file TOML.
-- `Driver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng schema sidebar trên query screen (tự load khi connect; `Tab` để focus, `Enter` để chèn tên được chọn vào query).
+- `QueryDriver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng schema sidebar trên query screen (tự load khi connect; `Tab` để focus, `Enter` để chèn tên được chọn vào query).
 - `config/` là module placeholder rỗng; cấu hình app ngoài file connections chưa tồn tại.
 
 ## Kiến trúc mục tiêu: connector pluggable
 
-Cả năm driver hiện tại dùng chung một shape: `connect → list_schema → execute(query) -> Table | Documents`, được enforce bởi trait `Driver` duy nhất và UI `QueryScreenComponent` duy nhất ở trên. Shape đó không khớp với các hệ thống Tradar dự định hỗ trợ tiếp theo — message broker (Kafka, RabbitMQ), hệ thống watch/inspect trạng thái sống (Kubernetes, Docker, Prometheus), và công cụ dạng remote-shell (SSH). Kafka/RabbitMQ không phải "gửi một chuỗi query, nhận về rows" — chúng là browse-topic/queue, tail message theo thời gian thực, publish một message. Cassandra (CQL) là ngoại lệ: nó khớp shape query nên có thể tái dùng UI hiện tại.
+Cả năm driver hiện tại dùng chung một shape: `connect → list_schema → execute(query) -> Table | Documents`, được enforce bởi trait `QueryDriver` duy nhất và UI `QueryScreenComponent` duy nhất ở trên. Shape đó không khớp với các hệ thống Tradar dự định hỗ trợ tiếp theo — message broker (Kafka, RabbitMQ), hệ thống watch/inspect trạng thái sống (Kubernetes, Docker, Prometheus), và công cụ dạng remote-shell (SSH). Kafka/RabbitMQ không phải "gửi một chuỗi query, nhận về rows" — chúng là browse-topic/queue, tail message theo thời gian thực, publish một message. Cassandra (CQL) là ngoại lệ: nó khớp shape query nên có thể tái dùng UI hiện tại.
 
-Phần sau định nghĩa shape mục tiêu mà các hệ thống trên sẽ được xây dựng vào. **Đây chỉ là kiến trúc — chưa có code nào được di chuyển.** Migration là một refactor xuyên suốt (đụng tới cả năm driver hiện có, `RootComponent`, `main.rs`, và `storage`), dự định thực hiện theo từng bước — dựng workspace và các crate core trước, rồi migrate từng driver một — không phải một thay đổi lớn duy nhất.
+Phần sau định nghĩa shape mà toàn bộ 5 connector dạng query hiện có (Postgres, SQLite, Elasticsearch, Redis, MongoDB) đã được xây theo, và là shape các hệ thống không phải query (Kafka, Kubernetes, SSH, ...) sẽ được xây vào khi chúng thực sự được lên kế hoạch. Xem "Triển khai hiện tại" ở trên để biết layout thật hiện có.
 
 ### Các quyết định
 
@@ -113,12 +117,13 @@ crates/
                                     (SPI dành cho connector — xem "Vì sao tách khỏi tradar-core" bên dưới)
   tradar-query-workbench/        — QueryScreenComponent, ResultsComponent, SchemaSidebarComponent, QueryEditorComponent,
                                     QueryEngine (implement Session), trait QueryDriver, SchemaInfo/QueryResult
-                                    (là components/query_screen.rs et al. hôm nay, chuyển nguyên khối — không phải code mới)
   connectors/
     tradar-postgres/  tradar-sqlite/  tradar-mongo/  tradar-elasticsearch/  tradar-redis/
     (tương lai) tradar-kafka/, tradar-rabbitmq/, tradar-cassandra/
-  tradar-app/ (binary crate)     — main.rs, RootComponent, ConnectionPickerComponent, connector registry
+  tradar-app/ (binary crate)     — main.rs (registry + event loop), RootComponent, ConnectionPickerComponent
 ```
+
+Toàn bộ layout trên đã dựng đúng như mô tả kể từ 2026-08-10. `tradar-query-workbench` là bản chuyển gần như nguyên khối từ `components/query_screen.rs` et al. trước migration -- một vài chỗ đổi hình dạng cho khớp `Session`, xem "Sai khác khi triển khai thật" ở mục "Screen không bao giờ làm IO" bên dưới. Nhóm connector tương lai (`tradar-kafka/`, ...) vẫn chưa tồn tại — chưa có hệ thống không-phải-query nào được lên kế hoạch cụ thể.
 
 `tradar-query-workbench` đặt tên là "workbench", không phải "ui" — nó gói cả editor, execution, và history cho các connector dạng query, không chỉ là widget.
 
@@ -186,6 +191,8 @@ Giới hạn này quan trọng khi một connector thực sự là một firehos
 
 Một ngoại lệ: lần **connect đầu tiên**, vì Session chưa tồn tại để spawn nó. `main.rs` của `tradar-app` tự spawn lời gọi `Connector::connect(...).await` (hậu duệ của `spawn_connect` hiện tại); một khi resolve thành một Session, mọi việc spawn task tiếp theo cho connection đó là việc của Session.
 
+**Phát hiện khi triển khai thật (2026-08-09), không nằm trong đặc tả gốc ở trên:** task connect này không được phép tự dựng `Screen` (`Box<dyn Component>`) rồi gửi thẳng qua `action_tx` như đường ống `Action::Opened` phía trên gợi ý. `Component` không (và không thể) được ràng buộc `Send`, vì `QueryEditorComponent` giữ `edtui::EditorState`, bên trong có `Rc<RefCell<dyn ClipboardTrait>>` — không `Send`. Một future `tokio::spawn` thì bắt buộc `Send`, nên nếu future đó tạo và giữ một `Box<dyn Component>` (dù chỉ để gửi đi ngay), toàn bộ future bị compiler từ chối. Cách giải quyết trong `crates/tradar-app/src/main.rs`: một enum nội bộ `ConnectOutcome` (không phải `Action`, không đi qua `tradar-core`) mang `Box<dyn Session>` (đã `Send + Sync` sẵn) từ task `spawn_connect` về qua một channel riêng; event loop (chạy trên một task/thread duy nhất, không `spawn`) mới gọi `session.build_screen(action_tx.clone())` để dựng `Screen`, rồi mới bọc kết quả vào `Action::Opened` đưa cho `RootComponent::update`. Nói cách khác: `Box<dyn Session>` băng qua ranh giới `tokio::spawn`, `Box<dyn Component>` thì không bao giờ.
+
 ### ConnectorDescriptor và Capability
 
 ```rust
@@ -211,14 +218,15 @@ Cho phép một connection picker hay một screen suy luận về việc một 
 
 ### Registry
 
-- `SavedConnection.driver` đổi từ enum đóng `DriverKind` thành một `String` connector id (vd `"postgres"`, `"kafka"`), match với `ConnectorDescriptor::id`. Không `tradar-core` lẫn connector crate nào cần liệt kê toàn bộ danh sách connector.
-- Mỗi connector crate export một constructor, vd `pub fn connector() -> Box<dyn Connector>`.
-- `main.rs` của `tradar-app` là nơi duy nhất biết toàn bộ tập connector: nó dựng một `HashMap<String, Box<dyn Connector>>` lúc khởi động bằng cách gọi constructor của từng connector crate. Thêm một connector nghĩa là thêm một dòng dependency trong `Cargo.toml` và một dòng đăng ký trong `main.rs` — không đổi `tradar-core`, `tradar-connector-api`, `tradar-query-workbench`, hay bất kỳ connector crate nào khác.
-- Một `connection.driver` id không match là lỗi runtime hiển thị cho người dùng (vd `"unknown connector 'kafka': not compiled into this build"`), không phải lỗi compile-time do enum không exhaustive.
+**Đã dựng (2026-08-10).** `SavedConnection.driver` (`tradar-core::storage`) là một `String` connector id (vd `"postgres"`, `"sqlite"`), không còn enum đóng `DriverKind` — file `connections.toml` trên đĩa không đổi format, vì `DriverKind` vốn đã serialize thành cùng chuỗi thường này (`#[serde(rename_all = "lowercase")]`).
+
+- Mỗi connector crate export đúng một hàm `pub fn connector() -> Box<dyn Connector>`, mọi thứ khác trong crate (struct driver, struct connector) không `pub`.
+- `crates/tradar-app/src/main.rs`'s `registry()` là nơi duy nhất biết toàn bộ tập connector: gọi `connector()` của cả 5 crate, dựng `HashMap<String, Box<dyn Connector>>` (key lấy từ `descriptor().id`) một lần lúc khởi động, bọc trong `Arc` để clone rẻ vào mỗi task connect. Thêm một connector nghĩa là thêm một dòng dependency trong `tradar-app/Cargo.toml` và một dòng trong `registry()` — không đổi `tradar-core`, `tradar-connector-api`, `tradar-query-workbench`, hay bất kỳ connector crate nào khác.
+- Một `connection.driver` id không match trong registry là lỗi runtime hiển thị cho người dùng qua `Action::OpenFailed` (`"unknown connector '{id}': not compiled into this build"`), không phải lỗi compile-time — kiểm tra trong `spawn_connect`.
 
 ### RootComponent và Action
 
-Field cố định `query_screen: QueryScreenComponent` của `RootComponent` trở thành:
+**Đã dựng (2026-08-09).** Field cố định `query_screen: QueryScreenComponent` của `RootComponent` trở thành:
 
 ```rust
 enum ScreenSlot {
@@ -241,7 +249,7 @@ pub enum Action {
 
 Enum này đóng và giữ đóng — không connector nào thêm variant, vì message nội bộ của connector không bao giờ băng qua ranh giới này. `tradar-core` không cần biết `QueryEngine`, `SchemaInfo`, hay bất kỳ kiểu riêng của connector nào là gì nữa; `Opened` chỉ mang theo Screen đã dựng sẵn. `SavedConnection`/`ConnectionStore` giữ nguyên tên hiện tại — "một cách đã lưu để tới một target" vẫn đúng kể cả với SSH/Docker/Kubernetes.
 
-**Tác dụng phụ:** `Action::ExportCurl` hiện tại là một variant trong enum dùng chung mà chỉ Elasticsearch implement, buộc `main.rs` phải special-case nó. Dưới model mới, curl export trở thành `session.export_curl(query)` — một lời gọi đồng bộ xử lý hoàn toàn bên trong Session/Screen riêng của `tradar-elasticsearch` — loại bỏ một chỗ rò rỉ logic riêng của connector vào code dùng chung vốn đã tồn tại từ trước.
+**Tác dụng phụ:** `Action::ExportCurl` (variant trong enum dùng chung mà chỉ Elasticsearch implement, buộc `main.rs` phải special-case nó) đã bị loại bỏ khỏi `Action`. Thay vào đó: `QueryDriver::export_curl(&self, query) -> Option<String>` (mặc định `None`) trong `tradar-query-workbench`, chỉ `ElasticsearchDriver` (sống trong crate riêng `tradar-elasticsearch`) override; `QueryScreenComponent` gọi `self.engine.export_curl(query)` khi `Ctrl+Y` mà không biết Elasticsearch là gì. Logic curl-export giờ nằm gọn trong đúng một crate, không rò rỉ vào `Action`/`main.rs`/`tradar-query-workbench` — mức cô lập đã dự tính ban đầu.
 
 ### Bức tranh tổng thể
 

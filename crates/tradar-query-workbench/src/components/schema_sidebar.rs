@@ -7,7 +7,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::drivers::SchemaInfo;
+use crate::query_driver::SchemaInfo;
 
 pub struct SchemaSidebarComponent {
     pub schema: Vec<SchemaInfo>,
@@ -151,7 +151,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
-    use crate::drivers::SchemaInfo;
+    use crate::query_driver::SchemaInfo;
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()

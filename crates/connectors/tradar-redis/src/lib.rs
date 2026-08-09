@@ -1,19 +1,25 @@
-//! Redis driver: one command line per execution, naive whitespace parsing.
-//! Most replies get a generic RESP-to-JSON conversion; HGETALL and
-//! ZRANGE/ZREVRANGE ... WITHSCORES get type-aware formatting so their
-//! flat arrays don't lose the field/value or member/score pairing.
+//! Redis connector: one command line per execution, naive whitespace
+//! parsing. Most replies get a generic RESP-to-JSON conversion; HGETALL and
+//! ZRANGE/ZREVRANGE ... WITHSCORES get type-aware formatting so their flat
+//! arrays don't lose the field/value or member/score pairing.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::drivers::{Driver, QueryResult, SchemaInfo};
+use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
+use tradar_core::capability::Capability;
+use tradar_core::storage::SavedConnection;
+use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_engine::QueryEngine;
 
-pub struct RedisDriver {
+struct RedisDriver {
     url: String,
     connection: Option<redis::aio::MultiplexedConnection>,
 }
 
 impl RedisDriver {
-    pub fn new(url: &str) -> Self {
+    fn new(url: &str) -> Self {
         Self {
             url: url.to_string(),
             connection: None,
@@ -22,7 +28,7 @@ impl RedisDriver {
 }
 
 #[async_trait]
-impl Driver for RedisDriver {
+impl QueryDriver for RedisDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let client = redis::Client::open(self.url.as_str())?;
         self.connection = Some(client.get_multiplexed_async_connection().await?);
@@ -142,6 +148,34 @@ fn value_to_json(value: &redis::Value) -> serde_json::Value {
         redis::Value::VerbatimString { text, .. } => serde_json::Value::String(text.clone()),
         _ => serde_json::Value::Null,
     }
+}
+
+const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
+    id: "redis",
+    display_name: "Redis",
+    icon: "📕",
+    capabilities: &[Capability::Query, Capability::Schema],
+};
+
+struct RedisConnector;
+
+#[async_trait]
+impl Connector for RedisConnector {
+    fn descriptor(&self) -> &ConnectorDescriptor {
+        &DESCRIPTOR
+    }
+
+    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
+        let mut driver = RedisDriver::new(&connection.target);
+        driver.connect().await?;
+        let driver: Arc<dyn QueryDriver> = Arc::new(driver);
+        let schema = driver.list_schema().await.map_err(|e| e.to_string());
+        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
+    }
+}
+
+pub fn connector() -> Box<dyn Connector> {
+    Box::new(RedisConnector)
 }
 
 #[cfg(test)]

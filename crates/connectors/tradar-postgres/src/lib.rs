@@ -1,11 +1,19 @@
-//! PostgreSQL driver. Not yet implemented — connection, schema
-//! introspection, and query execution land in a later plan.
+//! PostgreSQL connector: implements `QueryDriver` directly against `sqlx`,
+//! and exposes it to `tradar-app` only through `connector()` -- nothing
+//! else in this crate is `pub`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
+
+use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
+use tradar_core::capability::Capability;
+use tradar_core::storage::SavedConnection;
+use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_engine::QueryEngine;
 
 /// How long to wait for the initial connection before giving up. sqlx's own
 /// default (`PgPool::connect`'s `acquire_timeout`) is 30s, which against an
@@ -13,15 +21,13 @@ use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
 /// clear connection error.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-use crate::drivers::{Driver, QueryResult, SchemaInfo};
-
-pub struct PostgresDriver {
+struct PostgresDriver {
     connection_string: String,
     pool: Option<PgPool>,
 }
 
 impl PostgresDriver {
-    pub fn new(connection_string: &str) -> Self {
+    fn new(connection_string: &str) -> Self {
         Self {
             connection_string: connection_string.to_string(),
             pool: None,
@@ -30,7 +36,7 @@ impl PostgresDriver {
 }
 
 #[async_trait]
-impl Driver for PostgresDriver {
+impl QueryDriver for PostgresDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         self.pool = Some(
             PgPoolOptions::new()
@@ -88,6 +94,34 @@ fn stringify_column(row: &PgRow, index: usize) -> String {
         _ => row.try_get::<String, _>(index),
     }
     .unwrap_or_else(|_| "NULL".to_string())
+}
+
+const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
+    id: "postgres",
+    display_name: "PostgreSQL",
+    icon: "🐘",
+    capabilities: &[Capability::Query, Capability::Schema, Capability::Export],
+};
+
+struct PostgresConnector;
+
+#[async_trait]
+impl Connector for PostgresConnector {
+    fn descriptor(&self) -> &ConnectorDescriptor {
+        &DESCRIPTOR
+    }
+
+    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
+        let mut driver = PostgresDriver::new(&connection.target);
+        driver.connect().await?;
+        let driver: Arc<dyn QueryDriver> = Arc::new(driver);
+        let schema = driver.list_schema().await.map_err(|e| e.to_string());
+        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
+    }
+}
+
+pub fn connector() -> Box<dyn Connector> {
+    Box::new(PostgresConnector)
 }
 
 #[cfg(test)]

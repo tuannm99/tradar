@@ -1,7 +1,6 @@
 //! The results/error pane on the query screen. Owns no keys of its own —
 //! driven entirely by `QueryScreenComponent` calling `set_result`/`set_error`
-//! in reaction to `Action::QueryCompleted`/`Action::QueryFailed`, and its
-//! movement/yank methods in reaction to the `Action::Results*` family.
+//! and its movement/yank methods directly from key handling.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -9,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use crate::drivers::QueryResult;
+use crate::query_driver::QueryResult;
 
 #[derive(Default)]
 pub struct ResultsComponent {
@@ -195,7 +194,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
-    use crate::drivers::QueryResult;
+    use crate::query_driver::QueryResult;
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()

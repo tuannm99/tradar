@@ -1,19 +1,25 @@
-//! SQLite driver. Not yet implemented — connection, schema
-//! introspection, and query execution land in a later plan.
+//! SQLite connector: implements `QueryDriver` directly against `sqlx`, and
+//! exposes it to `tradar-app` only through `connector()` -- nothing else in
+//! this crate is `pub`, so the driver's internals stay this crate's own
+//! business, not something the rest of the app can reach into.
 
 use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
 
-use crate::drivers::{Driver, QueryResult, SchemaInfo};
+use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
+use tradar_core::capability::Capability;
+use tradar_core::storage::SavedConnection;
+use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_engine::QueryEngine;
 
-pub struct SqliteDriver {
+struct SqliteDriver {
     path: String,
     pool: Option<SqlitePool>,
 }
 
 impl SqliteDriver {
-    pub fn new(path: &str) -> Self {
+    fn new(path: &str) -> Self {
         Self {
             path: path.to_string(),
             pool: None,
@@ -22,7 +28,7 @@ impl SqliteDriver {
 }
 
 #[async_trait]
-impl Driver for SqliteDriver {
+impl QueryDriver for SqliteDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let options = SqliteConnectOptions::new()
             .filename(&self.path)
@@ -74,6 +80,34 @@ fn stringify_column(row: &SqliteRow, index: usize) -> String {
         _ => row.try_get::<String, _>(index),
     }
     .unwrap_or_else(|_| "NULL".to_string())
+}
+
+const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
+    id: "sqlite",
+    display_name: "SQLite",
+    icon: "🗄",
+    capabilities: &[Capability::Query, Capability::Schema, Capability::Export],
+};
+
+struct SqliteConnector;
+
+#[async_trait]
+impl Connector for SqliteConnector {
+    fn descriptor(&self) -> &ConnectorDescriptor {
+        &DESCRIPTOR
+    }
+
+    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
+        let mut driver = SqliteDriver::new(&connection.target);
+        driver.connect().await?;
+        let driver: std::sync::Arc<dyn QueryDriver> = std::sync::Arc::new(driver);
+        let schema = driver.list_schema().await.map_err(|e| e.to_string());
+        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
+    }
+}
+
+pub fn connector() -> Box<dyn Connector> {
+    Box::new(SqliteConnector)
 }
 
 #[cfg(test)]

@@ -1,15 +1,27 @@
-//! MongoDB driver: a minimal shell-subset parser for the literal shape
+//! MongoDB connector: a minimal shell-subset parser for the literal shape
 //! `db.<collection>.<method>(<json-args>)`, not a real JS engine. Anything
 //! outside that shape — chained methods, `$where`, arbitrary expressions —
 //! is rejected with a clear error rather than guessed at.
 
-pub struct ParsedQuery {
-    pub collection: String,
-    pub method: String,
-    pub args: Vec<serde_json::Value>,
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures_util::TryStreamExt;
+use mongodb::bson::{Bson, Document};
+
+use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
+use tradar_core::capability::Capability;
+use tradar_core::storage::SavedConnection;
+use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_engine::QueryEngine;
+
+struct ParsedQuery {
+    collection: String,
+    method: String,
+    args: Vec<serde_json::Value>,
 }
 
-pub fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
+fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
     let query = query.trim();
     let rest = query.strip_prefix("db.").ok_or_else(|| {
         anyhow::anyhow!("expected a query starting with \"db.<collection>.<method>(...)\"")
@@ -69,19 +81,13 @@ fn split_top_level_args(text: &str) -> anyhow::Result<Vec<&str>> {
     Ok(args)
 }
 
-use async_trait::async_trait;
-use futures_util::TryStreamExt;
-use mongodb::bson::{Bson, Document};
-
-use crate::drivers::{Driver, QueryResult, SchemaInfo};
-
-pub struct MongoDriver {
+struct MongoDriver {
     uri: String,
     client: Option<mongodb::Client>,
 }
 
 impl MongoDriver {
-    pub fn new(uri: &str) -> Self {
+    fn new(uri: &str) -> Self {
         Self {
             uri: uri.to_string(),
             client: None,
@@ -100,7 +106,7 @@ impl MongoDriver {
 }
 
 #[async_trait]
-impl Driver for MongoDriver {
+impl QueryDriver for MongoDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let client = mongodb::Client::with_uri_str(&self.uri).await?;
         let db = client
@@ -236,6 +242,34 @@ fn json_to_document(value: serde_json::Value) -> anyhow::Result<Document> {
     bson.as_document()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("expected a JSON object"))
+}
+
+const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
+    id: "mongo",
+    display_name: "MongoDB",
+    icon: "🍃",
+    capabilities: &[Capability::Query, Capability::Schema],
+};
+
+struct MongoConnector;
+
+#[async_trait]
+impl Connector for MongoConnector {
+    fn descriptor(&self) -> &ConnectorDescriptor {
+        &DESCRIPTOR
+    }
+
+    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
+        let mut driver = MongoDriver::new(&connection.target);
+        driver.connect().await?;
+        let driver: Arc<dyn QueryDriver> = Arc::new(driver);
+        let schema = driver.list_schema().await.map_err(|e| e.to_string());
+        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
+    }
+}
+
+pub fn connector() -> Box<dyn Connector> {
+    Box::new(MongoConnector)
 }
 
 #[cfg(test)]

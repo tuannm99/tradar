@@ -1,38 +1,34 @@
 //! The component tree: `RootComponent` switches between the connection
-//! picker and the query screen, routing keys and actions to whichever is
-//! active. This module — like every file under `components/` — must
-//! never depend on a concrete driver module; only `main.rs` may.
+//! picker and whatever `Screen` a connector's `Session` builds, routing
+//! keys/actions/ticks to whichever is active. This module — like every
+//! file under `components/` — must never depend on a concrete driver
+//! module; only `main.rs` and `connectors.rs` may.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use tokio::sync::mpsc::UnboundedSender;
 
+use tradar_core::action::{Action, Component};
 use tradar_core::storage::SavedConnection;
 
-use crate::action::{Action, Component};
 use crate::components::connection_picker::ConnectionPickerComponent;
-use crate::components::query_screen::QueryScreenComponent;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen {
+pub enum ScreenSlot {
     ConnectionPicker,
-    Query,
+    Active(Box<dyn Component>),
 }
 
 pub struct RootComponent {
-    pub screen: Screen,
+    pub screen: ScreenSlot,
     pub connection_picker: ConnectionPickerComponent,
-    pub query_screen: QueryScreenComponent,
     pub should_quit: bool,
 }
 
 impl RootComponent {
-    pub fn new(connections: Vec<SavedConnection>, action_tx: UnboundedSender<Action>) -> Self {
+    pub fn new(connections: Vec<SavedConnection>) -> Self {
         Self {
-            screen: Screen::ConnectionPicker,
+            screen: ScreenSlot::ConnectionPicker,
             connection_picker: ConnectionPickerComponent::new(connections),
-            query_screen: QueryScreenComponent::new(action_tx),
             should_quit: false,
         }
     }
@@ -40,118 +36,120 @@ impl RootComponent {
 
 impl Component for RootComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
-        match self.screen {
-            Screen::ConnectionPicker => self.connection_picker.handle_key_event(code, modifiers),
-            Screen::Query => self.query_screen.handle_key_event(code, modifiers),
+        match &mut self.screen {
+            ScreenSlot::ConnectionPicker => {
+                self.connection_picker.handle_key_event(code, modifiers)
+            }
+            ScreenSlot::Active(screen) => screen.handle_key_event(code, modifiers),
         }
     }
 
     fn update(&mut self, action: Action) -> Option<Action> {
-        if matches!(action, Action::Quit) {
-            self.should_quit = true;
-            return None;
-        }
-        if let Action::Connected { epoch, .. } = &action {
-            if *epoch != self.connection_picker.connect_epoch {
+        match action {
+            Action::Quit => {
+                self.should_quit = true;
+                None
+            }
+            Action::Opened { screen, epoch, .. } => {
                 // A reply from a connect attempt that's been superseded by a
                 // newer one -- drop it instead of silently switching the
-                // active connection back.
-                return None;
+                // active screen back.
+                if epoch == self.connection_picker.connect_epoch {
+                    self.screen = ScreenSlot::Active(screen);
+                }
+                None
             }
-            self.query_screen.update(action);
-            self.screen = Screen::Query;
-            return None;
+            Action::OpenFailed { error, epoch } => {
+                if epoch == self.connection_picker.connect_epoch {
+                    self.connection_picker
+                        .update(Action::OpenFailed { error, epoch });
+                }
+                None
+            }
+            Action::BackToPicker => {
+                self.screen = ScreenSlot::ConnectionPicker;
+                None
+            }
+            other => match &mut self.screen {
+                ScreenSlot::ConnectionPicker => self.connection_picker.update(other),
+                ScreenSlot::Active(screen) => screen.update(other),
+            },
         }
-        if let Action::ConnectFailed { epoch, .. } = &action
-            && *epoch != self.connection_picker.connect_epoch
-        {
-            return None;
-        }
-        if matches!(action, Action::BackToPicker) {
-            self.query_screen.update(action);
-            self.screen = Screen::ConnectionPicker;
-            return None;
-        }
-        match self.screen {
-            Screen::ConnectionPicker => self.connection_picker.update(action),
-            Screen::Query => self.query_screen.update(action),
+    }
+
+    fn tick(&mut self) {
+        if let ScreenSlot::Active(screen) = &mut self.screen {
+            screen.tick();
         }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        match self.screen {
-            Screen::ConnectionPicker => self.connection_picker.draw(frame, area),
-            Screen::Query => self.query_screen.draw(frame, area),
+        match &mut self.screen {
+            ScreenSlot::ConnectionPicker => self.connection_picker.draw(frame, area),
+            ScreenSlot::Active(screen) => screen.draw(frame, area),
         }
     }
 }
 
 pub mod connection_picker;
-pub mod query_editor;
-pub mod query_screen;
-pub mod results;
-pub mod schema_sidebar;
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-    use tokio::sync::mpsc;
-
-    use tradar_core::storage::DriverKind;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     use super::*;
-    use crate::drivers::{Driver, QueryResult, SchemaInfo};
-    use crate::query_engine::QueryEngine;
 
-    struct FakeDriver;
+    struct FakeScreen {
+        dropped: Rc<Cell<bool>>,
+    }
 
-    #[async_trait]
-    impl Driver for FakeDriver {
-        async fn connect(&mut self) -> anyhow::Result<()> {
-            Ok(())
+    impl Drop for FakeScreen {
+        fn drop(&mut self) {
+            self.dropped.set(true);
         }
-        async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
-            Ok(Vec::new())
+    }
+
+    impl Component for FakeScreen {
+        fn handle_key_event(&mut self, _code: KeyCode, _modifiers: KeyModifiers) -> Option<Action> {
+            None
         }
-        async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
-            Ok(QueryResult::Table {
-                columns: vec![],
-                rows: vec![],
-            })
+        fn update(&mut self, _action: Action) -> Option<Action> {
+            None
         }
+        fn draw(&mut self, _frame: &mut Frame, _area: Rect) {}
     }
 
     fn connections() -> Vec<SavedConnection> {
         vec![
             SavedConnection {
                 name: "local-sqlite".to_string(),
-                driver: DriverKind::Sqlite,
+                driver: "sqlite".to_string(),
                 target: "test.db".to_string(),
             },
             SavedConnection {
                 name: "local-postgres".to_string(),
-                driver: DriverKind::Postgres,
+                driver: "postgres".to_string(),
                 target: "postgres://localhost/test".to_string(),
             },
         ]
     }
 
-    fn root() -> (RootComponent, mpsc::UnboundedReceiver<Action>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (RootComponent::new(connections(), tx), rx)
+    fn root() -> RootComponent {
+        RootComponent::new(connections())
     }
 
     #[test]
     fn starts_on_the_connection_picker_with_nothing_selected() {
-        let (root, _rx) = root();
+        let root = root();
 
-        assert_eq!(root.screen, Screen::ConnectionPicker);
+        assert!(matches!(root.screen, ScreenSlot::ConnectionPicker));
         assert_eq!(root.connection_picker.selected, 0);
     }
 
     #[test]
     fn quit_sets_should_quit() {
-        let (mut root, _rx) = root();
+        let mut root = root();
 
         assert!(!root.should_quit);
         root.update(Action::Quit);
@@ -160,42 +158,41 @@ mod tests {
     }
 
     #[test]
-    fn connected_switches_to_the_query_screen() {
-        let (mut root, _rx) = root();
+    fn opened_switches_to_the_active_screen() {
+        let mut root = root();
         let connection = connections()[1].clone();
+        let dropped = Rc::new(Cell::new(false));
 
-        root.update(Action::Connected {
-            connection: connection.clone(),
-            engine: QueryEngine::new(Box::new(FakeDriver)),
-            schema: Ok(Vec::new()),
+        root.update(Action::Opened {
+            connection,
+            screen: Box::new(FakeScreen { dropped }),
             epoch: 0,
         });
 
-        assert_eq!(root.screen, Screen::Query);
-        assert_eq!(root.query_screen.active_connection, Some(connection));
+        assert!(matches!(root.screen, ScreenSlot::Active(_)));
     }
 
     #[test]
     fn back_to_picker_returns_to_the_connection_picker() {
-        let (mut root, _rx) = root();
-        root.update(Action::Connected {
+        let mut root = root();
+        root.update(Action::Opened {
             connection: connections()[0].clone(),
-            engine: QueryEngine::new(Box::new(FakeDriver)),
-            schema: Ok(Vec::new()),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
             epoch: 0,
         });
 
         root.update(Action::BackToPicker);
 
-        assert_eq!(root.screen, Screen::ConnectionPicker);
-        assert_eq!(root.query_screen.active_connection, None);
+        assert!(matches!(root.screen, ScreenSlot::ConnectionPicker));
     }
 
     #[test]
-    fn connect_failed_while_on_the_picker_sets_its_error() {
-        let (mut root, _rx) = root();
+    fn open_failed_while_on_the_picker_sets_its_error() {
+        let mut root = root();
 
-        root.update(Action::ConnectFailed {
+        root.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: 0,
         });
@@ -207,8 +204,8 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_connected_from_a_superseded_connect_attempt_is_ignored() {
-        let (mut root, _rx) = root();
+    fn a_stale_opened_from_a_superseded_connect_attempt_is_ignored() {
+        let mut root = root();
         let conn_a = connections()[0].clone();
         let conn_b = connections()[1].clone();
 
@@ -223,42 +220,50 @@ mod tests {
             .connection_picker
             .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
-        let Some(Action::ConnectRequested { epoch: epoch_a, .. }) = request_a else {
-            panic!("expected ConnectRequested for A");
+        let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected OpenRequested for A");
         };
-        let Some(Action::ConnectRequested { epoch: epoch_b, .. }) = request_b else {
-            panic!("expected ConnectRequested for B");
+        let Some(Action::OpenRequested { epoch: epoch_b, .. }) = request_b else {
+            panic!("expected OpenRequested for B");
         };
+
+        let dropped_a = Rc::new(Cell::new(false));
+        let dropped_b = Rc::new(Cell::new(false));
 
         // B resolves first.
-        root.update(Action::Connected {
-            connection: conn_b.clone(),
-            engine: QueryEngine::new(Box::new(FakeDriver)),
-            schema: Ok(Vec::new()),
+        root.update(Action::Opened {
+            connection: conn_b,
+            screen: Box::new(FakeScreen {
+                dropped: dropped_b.clone(),
+            }),
             epoch: epoch_b,
         });
-        assert_eq!(root.query_screen.active_connection, Some(conn_b.clone()));
+        assert!(matches!(root.screen, ScreenSlot::Active(_)));
 
         // A's stale reply arrives after -- it must not override B.
-        root.update(Action::Connected {
+        root.update(Action::Opened {
             connection: conn_a,
-            engine: QueryEngine::new(Box::new(FakeDriver)),
-            schema: Ok(Vec::new()),
+            screen: Box::new(FakeScreen {
+                dropped: dropped_a.clone(),
+            }),
             epoch: epoch_a,
         });
 
-        assert_eq!(root.screen, Screen::Query);
-        assert_eq!(
-            root.query_screen.active_connection,
-            Some(conn_b),
-            "a stale Connected for a superseded connect attempt must not silently \
-             switch the active connection back"
+        assert!(matches!(root.screen, ScreenSlot::Active(_)));
+        assert!(
+            dropped_a.get(),
+            "a stale Opened for a superseded connect attempt must be dropped immediately, \
+             never installed"
+        );
+        assert!(
+            !dropped_b.get(),
+            "the active (B) screen must not be replaced by a stale reply"
         );
     }
 
     #[test]
-    fn a_stale_connect_failed_from_a_superseded_connect_attempt_is_ignored() {
-        let (mut root, _rx) = root();
+    fn a_stale_open_failed_from_a_superseded_connect_attempt_is_ignored() {
+        let mut root = root();
 
         let request_a = root
             .connection_picker
@@ -268,24 +273,24 @@ mod tests {
         root.connection_picker
             .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
-        let Some(Action::ConnectRequested { epoch: epoch_a, .. }) = request_a else {
-            panic!("expected ConnectRequested for A");
+        let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected OpenRequested for A");
         };
 
-        root.update(Action::ConnectFailed {
+        root.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: epoch_a,
         });
 
         assert_eq!(
             root.connection_picker.last_error, None,
-            "a stale ConnectFailed for a superseded connect attempt must not surface an error"
+            "a stale OpenFailed for a superseded connect attempt must not surface an error"
         );
     }
 
     #[test]
     fn handle_key_event_routes_to_the_active_screen() {
-        let (mut root, _rx) = root();
+        let mut root = root();
 
         let action = root.handle_key_event(
             crossterm::event::KeyCode::Char('q'),

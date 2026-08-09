@@ -1,0 +1,17 @@
+[package]
+name = "tradar-query-workbench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tradar-core = { path = "../tradar-core" }
+tradar-connector-api = { path = "../tradar-connector-api" }
+
+tokio = { version = "1", features = ["sync", "rt", "macros", "rt-multi-thread"] }
+ratatui = "0.30"
+crossterm = "0.29"
+edtui = { version = "0.11.6", default-features = false }
+async-trait = "0.1"
+anyhow = "1"
+serde_json = "1"
+base64 = "0.22"

@@ -8,9 +8,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
+use tradar_core::action::{Action, Component};
 use tradar_core::storage::SavedConnection;
-
-use crate::action::{Action, Component};
 
 pub struct ConnectionPickerComponent {
     pub connections: Vec<SavedConnection>,
@@ -105,7 +104,7 @@ impl Component for ConnectionPickerComponent {
             KeyCode::Enter => {
                 let connection = self.connections.get(self.selected).cloned()?;
                 self.connect_epoch += 1;
-                Some(Action::ConnectRequested {
+                Some(Action::OpenRequested {
                     connection,
                     epoch: self.connect_epoch,
                 })
@@ -115,7 +114,7 @@ impl Component for ConnectionPickerComponent {
     }
 
     fn update(&mut self, action: Action) -> Option<Action> {
-        if let Action::ConnectFailed { error, .. } = action {
+        if let Action::OpenFailed { error, .. } = action {
             self.last_error = Some(error);
         }
         None
@@ -164,8 +163,6 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
 
-    use tradar_core::storage::DriverKind;
-
     use super::*;
 
     fn buffer_text(buffer: &Buffer) -> String {
@@ -176,12 +173,12 @@ mod tests {
         vec![
             SavedConnection {
                 name: "local-sqlite".to_string(),
-                driver: DriverKind::Sqlite,
+                driver: "sqlite".to_string(),
                 target: "test.db".to_string(),
             },
             SavedConnection {
                 name: "local-postgres".to_string(),
-                driver: DriverKind::Postgres,
+                driver: "postgres".to_string(),
                 target: "postgres://localhost/test".to_string(),
             },
         ]
@@ -309,12 +306,12 @@ mod tests {
         let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         match action {
-            Some(Action::ConnectRequested { connection, epoch }) => {
+            Some(Action::OpenRequested { connection, epoch }) => {
                 assert_eq!(connection.name, "local-postgres");
                 assert_eq!(epoch, 1);
             }
             other => panic!(
-                "expected ConnectRequested, got a different action or none: {}",
+                "expected OpenRequested, got a different action or none: {}",
                 if other.is_some() { "Some(_)" } else { "None" }
             ),
         }
@@ -327,18 +324,18 @@ mod tests {
         let first = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
         let second = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
-        let Some(Action::ConnectRequested {
+        let Some(Action::OpenRequested {
             epoch: first_epoch, ..
         }) = first
         else {
-            panic!("expected ConnectRequested");
+            panic!("expected OpenRequested");
         };
-        let Some(Action::ConnectRequested {
+        let Some(Action::OpenRequested {
             epoch: second_epoch,
             ..
         }) = second
         else {
-            panic!("expected ConnectRequested");
+            panic!("expected OpenRequested");
         };
         assert_eq!(first_epoch, 1);
         assert_eq!(second_epoch, 2);
@@ -348,7 +345,7 @@ mod tests {
     fn connect_failed_sets_the_last_error() {
         let mut picker = ConnectionPickerComponent::new(connections());
 
-        let next = picker.update(Action::ConnectFailed {
+        let next = picker.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: 1,
         });
@@ -374,7 +371,7 @@ mod tests {
     #[test]
     fn draw_shows_a_connection_error() {
         let mut picker = ConnectionPickerComponent::new(connections());
-        picker.update(Action::ConnectFailed {
+        picker.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: 1,
         });

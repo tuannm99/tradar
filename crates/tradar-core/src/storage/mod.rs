@@ -8,18 +8,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub name: String,
-    pub driver: DriverKind,
+    /// A connector id (e.g. `"postgres"`, `"sqlite"`), matched at runtime
+    /// against `ConnectorDescriptor::id` -- see the "Registry" section in
+    /// docs/architecture.md. Not a closed enum: `tradar-core` has no
+    /// business knowing the full set of connectors compiled into a given
+    /// build.
+    pub driver: String,
     pub target: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DriverKind {
-    Postgres,
-    Sqlite,
-    Elasticsearch,
-    Redis,
-    Mongo,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -93,7 +88,7 @@ mod tests {
         let store = ConnectionStore::at(dir.path().join("connections.toml"));
         let connection = SavedConnection {
             name: "local".to_string(),
-            driver: DriverKind::Sqlite,
+            driver: "sqlite".to_string(),
             target: "test.db".to_string(),
         };
 
