@@ -18,6 +18,7 @@ use tradar_core::action::{Action, Component};
 use tradar_core::storage::SavedConnection;
 
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
+use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::QueryEditorComponent;
 use crate::components::results::ResultsComponent;
 use crate::components::schema_sidebar::SchemaSidebarComponent;
@@ -39,6 +40,7 @@ pub struct QueryScreenComponent {
     pending_g: bool,
     prompt: Option<FilePromptComponent>,
     last_path: Option<String>,
+    history_picker: Option<HistoryPickerComponent>,
 }
 
 fn is_submit(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -85,6 +87,7 @@ impl QueryScreenComponent {
             pending_g: false,
             prompt: None,
             last_path: None,
+            history_picker: None,
         }
     }
 
@@ -106,6 +109,14 @@ impl QueryScreenComponent {
             kind,
             self.last_path.as_deref().unwrap_or(""),
         ));
+    }
+
+    fn open_history(&mut self) {
+        if self.engine.history().is_empty() {
+            return;
+        }
+        let entries = self.engine.history().iter().rev().cloned().collect();
+        self.history_picker = Some(HistoryPickerComponent::new(entries));
     }
 
     fn handle_prompt_confirmed(&mut self, path: String) {
@@ -173,6 +184,19 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        if let Some(history_picker) = self.history_picker.as_mut() {
+            match history_picker.handle_key_event(code) {
+                Some(HistoryOutcome::Cancelled) => self.history_picker = None,
+                Some(HistoryOutcome::Selected(query)) => {
+                    self.query_editor.set_text(&query);
+                    self.focus = Focus::Editor;
+                    self.history_picker = None;
+                }
+                None => {}
+            }
+            return None;
+        }
+
         let had_pending_g = std::mem::take(&mut self.pending_g);
         match code {
             KeyCode::Esc if self.query_editor.state.mode != EditorMode::Normal => {
@@ -187,6 +211,10 @@ impl Component for QueryScreenComponent {
             }
             KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_prompt(PromptKind::Open);
+                None
+            }
+            KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_history();
                 None
             }
             KeyCode::Tab => {
@@ -331,6 +359,12 @@ impl Component for QueryScreenComponent {
             let popup = centered_rect(60, 20, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             prompt.draw(frame, popup);
+        }
+
+        if let Some(history_picker) = &self.history_picker {
+            let popup = centered_rect(70, 60, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            history_picker.draw(frame, popup);
         }
     }
 }
@@ -700,6 +734,67 @@ mod tests {
 
         let prompt = screen.prompt.as_ref().expect("prompt stays open on error");
         assert!(prompt.error.is_some());
+    }
+
+    async fn submit_and_settle(screen: &mut QueryScreenComponent, query: &str) {
+        screen.query_editor.set_text(query);
+        screen.handle_key_event(KeyCode::F(5), KeyModifiers::NONE);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if !screen.engine.is_pending() {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_r_opens_history_with_the_most_recent_query_selected() {
+        let (mut screen, _rx) = screen();
+        submit_and_settle(&mut screen, "select 1").await;
+        submit_and_settle(&mut screen, "select 2").await;
+
+        screen.handle_key_event(KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+        let picker = screen.history_picker.as_ref().expect("history should open");
+        assert_eq!(picker.selected_entry(), Some("select 2"));
+    }
+
+    #[tokio::test]
+    async fn ctrl_r_on_empty_history_is_a_no_op() {
+        let (mut screen, _rx) = screen();
+
+        screen.handle_key_event(KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+        assert!(screen.history_picker.is_none());
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_history_entry_loads_it_into_the_editor() {
+        let (mut screen, _rx) = screen();
+        submit_and_settle(&mut screen, "select 1").await;
+        submit_and_settle(&mut screen, "select 2").await;
+        screen.handle_key_event(KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+        screen.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.history_picker.is_none());
+        assert_eq!(screen.query_editor.text(), "select 1");
+        assert_eq!(screen.focus, Focus::Editor);
+    }
+
+    #[tokio::test]
+    async fn esc_cancels_history_without_touching_the_editor() {
+        let (mut screen, _rx) = screen();
+        submit_and_settle(&mut screen, "select 1").await;
+        screen.query_editor.set_text("unsaved edit");
+        screen.handle_key_event(KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.history_picker.is_none());
+        assert_eq!(screen.query_editor.text(), "unsaved edit");
     }
 
     #[test]
