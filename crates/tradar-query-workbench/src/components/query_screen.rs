@@ -17,6 +17,7 @@ use tradar_connector_api::Session;
 use tradar_core::action::{Action, Component};
 use tradar_core::storage::SavedConnection;
 
+use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::query_editor::QueryEditorComponent;
 use crate::components::results::ResultsComponent;
 use crate::components::schema_sidebar::SchemaSidebarComponent;
@@ -36,6 +37,8 @@ pub struct QueryScreenComponent {
     pub results: ResultsComponent,
     engine: QueryEngine,
     pending_g: bool,
+    prompt: Option<FilePromptComponent>,
+    last_path: Option<String>,
 }
 
 fn is_submit(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -80,6 +83,8 @@ impl QueryScreenComponent {
             results: ResultsComponent::new(),
             engine,
             pending_g: false,
+            prompt: None,
+            last_path: None,
         }
     }
 
@@ -95,10 +100,79 @@ impl QueryScreenComponent {
         let script = format!("#!/usr/bin/env bash\n{curl}\n");
         let _ = std::fs::write("./tradar-query.sh", script);
     }
+
+    fn open_prompt(&mut self, kind: PromptKind) {
+        self.prompt = Some(FilePromptComponent::new(
+            kind,
+            self.last_path.as_deref().unwrap_or(""),
+        ));
+    }
+
+    fn handle_prompt_confirmed(&mut self, path: String) {
+        let trimmed = path.trim().to_string();
+        if trimmed.is_empty() {
+            if let Some(prompt) = &mut self.prompt {
+                prompt.error = Some("path must not be empty".to_string());
+            }
+            return;
+        }
+        let Some(kind) = self.prompt.as_ref().map(|p| p.kind) else {
+            return;
+        };
+        let result = match kind {
+            PromptKind::Save => {
+                std::fs::write(&trimmed, self.query_editor.text()).map_err(|e| e.to_string())
+            }
+            PromptKind::Open => std::fs::read_to_string(&trimmed)
+                .map(|content| self.query_editor.set_text(&content))
+                .map_err(|e| e.to_string()),
+        };
+        match result {
+            Ok(()) => {
+                self.last_path = Some(trimmed);
+                self.prompt = None;
+            }
+            Err(e) => {
+                if let Some(prompt) = &mut self.prompt {
+                    prompt.error = Some(e);
+                }
+            }
+        }
+    }
+}
+
+/// A centered floating rect, used to draw the save/open file prompt on top
+/// of the rest of the screen.
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 impl Component for QueryScreenComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        if let Some(prompt) = self.prompt.as_mut() {
+            match prompt.handle_key_event(code, modifiers) {
+                Some(PromptOutcome::Cancelled) => self.prompt = None,
+                Some(PromptOutcome::Confirmed(path)) => self.handle_prompt_confirmed(path),
+                None => {}
+            }
+            return None;
+        }
+
         let had_pending_g = std::mem::take(&mut self.pending_g);
         match code {
             KeyCode::Esc if self.query_editor.state.mode != EditorMode::Normal => {
@@ -107,6 +181,14 @@ impl Component for QueryScreenComponent {
                 None
             }
             KeyCode::Esc => Some(Action::BackToPicker),
+            KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_prompt(PromptKind::Save);
+                None
+            }
+            KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_prompt(PromptKind::Open);
+                None
+            }
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Focus::Editor => Focus::Results,
@@ -244,6 +326,12 @@ impl Component for QueryScreenComponent {
         self.query_editor.draw(frame, chunks[0], &connection_name);
         self.results
             .draw(frame, chunks[1], self.focus == Focus::Results);
+
+        if let Some(prompt) = &self.prompt {
+            let popup = centered_rect(60, 20, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            prompt.draw(frame, popup);
+        }
     }
 }
 
@@ -522,6 +610,96 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(screen.query_editor.text(), "select 1");
+    }
+
+    #[test]
+    fn ctrl_s_opens_a_save_prompt_prefilled_with_the_current_text() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.insert_at_cursor("select 1");
+
+        screen.handle_key_event(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+        let prompt = screen.prompt.as_ref().expect("prompt should be open");
+        assert_eq!(prompt.kind, PromptKind::Save);
+        // The editor content stays untouched while the prompt only holds the
+        // (empty, on a first save) target path.
+        assert_eq!(screen.query_editor.text(), "select 1");
+    }
+
+    #[test]
+    fn typing_a_path_and_enter_saves_the_editor_text_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("query.sql");
+        let (mut screen, _rx) = screen();
+        screen.query_editor.insert_at_cursor("select 1");
+
+        screen.handle_key_event(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        for c in path.to_str().unwrap().chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(
+            screen.prompt.is_none(),
+            "a successful save closes the prompt"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "select 1");
+        assert_eq!(screen.last_path.as_deref(), path.to_str());
+    }
+
+    #[test]
+    fn esc_cancels_the_save_prompt_without_touching_the_editor() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.insert_at_cursor("select 1");
+        screen.handle_key_event(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.prompt.is_none());
+        assert_eq!(screen.query_editor.text(), "select 1");
+    }
+
+    #[test]
+    fn confirming_an_empty_path_keeps_the_prompt_open_with_an_error() {
+        let (mut screen, _rx) = screen();
+        screen.handle_key_event(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let prompt = screen.prompt.as_ref().expect("prompt stays open on error");
+        assert!(prompt.error.is_some());
+    }
+
+    #[test]
+    fn ctrl_o_loads_a_file_into_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("query.sql");
+        std::fs::write(&path, "select * from users").unwrap();
+        let (mut screen, _rx) = screen();
+        screen.query_editor.insert_at_cursor("stale content");
+
+        screen.handle_key_event(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        for c in path.to_str().unwrap().chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.prompt.is_none());
+        assert_eq!(screen.query_editor.text(), "select * from users");
+    }
+
+    #[test]
+    fn opening_a_missing_file_keeps_the_prompt_open_with_an_error() {
+        let (mut screen, _rx) = screen();
+        screen.handle_key_event(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        for c in "/does/not/exist.sql".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let prompt = screen.prompt.as_ref().expect("prompt stays open on error");
+        assert!(prompt.error.is_some());
     }
 
     #[test]

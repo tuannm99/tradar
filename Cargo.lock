@@ -4543,6 +4543,7 @@ dependencies = [
  "edtui",
  "ratatui",
  "serde_json",
+ "tempfile",
  "tokio",
  "tradar-connector-api",
  "tradar-core",

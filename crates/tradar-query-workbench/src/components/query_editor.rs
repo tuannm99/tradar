@@ -40,6 +40,11 @@ impl QueryEditorComponent {
         self.state.mode = EditorMode::Insert;
     }
 
+    /// Replaces the whole buffer, e.g. after loading a file from disk.
+    pub fn set_text(&mut self, text: &str) {
+        self.state = EditorState::new(Lines::from(text));
+    }
+
     pub fn forward_key(&mut self, key: KeyEvent) {
         self.event_handler.on_key_event(key, &mut self.state);
     }
@@ -103,6 +108,16 @@ mod tests {
 
         assert_eq!(editor.text(), "users");
         assert_eq!(editor.state.mode, EditorMode::Insert);
+    }
+
+    #[test]
+    fn set_text_replaces_the_whole_buffer() {
+        let mut editor = QueryEditorComponent::new();
+        editor.insert_at_cursor("old");
+
+        editor.set_text("select 1\nfrom users");
+
+        assert_eq!(editor.text(), "select 1\nfrom users");
     }
 
     #[test]

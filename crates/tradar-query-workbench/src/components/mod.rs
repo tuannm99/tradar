@@ -1,3 +1,4 @@
+pub mod file_prompt;
 pub mod query_editor;
 pub mod query_screen;
 pub mod results;
