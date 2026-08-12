@@ -15,11 +15,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use tradar_core::vim_list;
+
+use crate::sql_highlight;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorMode {
@@ -27,8 +29,19 @@ pub enum EditorMode {
     Insert,
 }
 
+/// Which tree-sitter grammar (if any) to highlight the buffer with. Set
+/// once by `QueryScreenComponent` based on the active connection's driver
+/// id -- `QueryEditorComponent` itself has no notion of connectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    #[default]
+    PlainText,
+    Sql,
+}
+
 pub struct QueryEditorComponent {
     pub mode: EditorMode,
+    dialect: Dialect,
     lines: Vec<Vec<char>>,
     cursor_row: usize,
     cursor_col: usize,
@@ -48,6 +61,7 @@ impl QueryEditorComponent {
     pub fn new() -> Self {
         Self {
             mode: EditorMode::Normal,
+            dialect: Dialect::PlainText,
             lines: vec![Vec::new()],
             cursor_row: 0,
             cursor_col: 0,
@@ -56,6 +70,10 @@ impl QueryEditorComponent {
             scroll: 0,
             visible_height: 0,
         }
+    }
+
+    pub fn set_dialect(&mut self, dialect: Dialect) {
+        self.dialect = dialect;
     }
 
     pub fn text(&self) -> String {
@@ -264,25 +282,41 @@ impl QueryEditorComponent {
         }
     }
 
-    fn render_line(&self, line: &[char], row: usize) -> Line<'static> {
-        if row != self.cursor_row {
-            return Line::from(line.iter().collect::<String>());
+    /// One `Color` per line, indexed the same as `self.lines` -- `None` in
+    /// `Dialect::PlainText`, or if highlighting the current buffer failed
+    /// (falls back to unstyled text either way).
+    fn line_colors(&self) -> Option<Vec<Vec<Color>>> {
+        if self.dialect != Dialect::Sql {
+            return None;
         }
+        let text = self.text();
+        let mut colors = sql_highlight::char_colors(&text)?.into_iter();
+        let mut result = Vec::with_capacity(self.lines.len());
+        for (i, line) in self.lines.iter().enumerate() {
+            result.push(colors.by_ref().take(line.len()).collect());
+            if i + 1 < self.lines.len() {
+                colors.next(); // the '\n' joining this line to the next
+            }
+        }
+        Some(result)
+    }
+
+    fn render_line(&self, line: &[char], row: usize, colors: Option<&[Color]>) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = line
             .iter()
             .enumerate()
             .map(|(col, &c)| {
-                if col == self.cursor_col {
-                    Span::styled(
-                        c.to_string(),
-                        Style::default().add_modifier(Modifier::REVERSED),
-                    )
-                } else {
-                    Span::raw(c.to_string())
+                let mut style = Style::default();
+                if let Some(color) = colors.and_then(|c| c.get(col)) {
+                    style = style.fg(*color);
                 }
+                if row == self.cursor_row && col == self.cursor_col {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                Span::styled(c.to_string(), style)
             })
             .collect();
-        if self.cursor_col >= line.len() {
+        if row == self.cursor_row && self.cursor_col >= line.len() {
             // Insert-mode cursor sitting just past the last character (or
             // on an empty line) -- still needs a visible cell.
             spans.push(Span::styled(
@@ -305,13 +339,18 @@ impl QueryEditorComponent {
         self.visible_height = text_height as usize;
         self.scroll_into_view();
 
+        let line_colors = self.line_colors();
         let lines: Vec<Line> = self
             .lines
             .iter()
             .skip(self.scroll)
             .take(text_height as usize)
             .enumerate()
-            .map(|(i, line)| self.render_line(line, self.scroll + i))
+            .map(|(i, line)| {
+                let row = self.scroll + i;
+                let colors = line_colors.as_ref().map(|lc| lc[row].as_slice());
+                self.render_line(line, row, colors)
+            })
             .collect();
         let text_area = Rect {
             x: inner.x,

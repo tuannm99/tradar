@@ -18,7 +18,7 @@ use tradar_core::storage::SavedConnection;
 
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
-use crate::components::query_editor::{EditorMode, QueryEditorComponent};
+use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
 use crate::components::schema_sidebar::SchemaSidebarComponent;
 use crate::query_engine::{QueryEngine, QueryOutcome};
@@ -77,10 +77,18 @@ impl QueryScreenComponent {
         // consistent state regardless of how it was constructed).
         engine.tick();
 
+        let mut query_editor = QueryEditorComponent::new();
+        // Only Postgres/SQLite speak real SQL -- Mongo/Elasticsearch/Redis
+        // use their own hand-rolled query shapes with no tree-sitter
+        // grammar to match, so they stay plain text.
+        if matches!(engine.connection().driver.as_str(), "postgres" | "sqlite") {
+            query_editor.set_dialect(Dialect::Sql);
+        }
+
         Self {
             focus: Focus::Editor,
             schema_sidebar,
-            query_editor: QueryEditorComponent::new(),
+            query_editor,
             results: ResultsComponent::new(),
             engine,
             pending_g: false,
