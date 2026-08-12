@@ -6,9 +6,13 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::style::Style;
+use ratatui::text::Span;
+use ratatui::widgets::{List, ListItem, ListState};
 
+use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
+use tradar_core::theme::theme;
+use tradar_core::ui;
 use tradar_core::vim_list;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +24,7 @@ pub enum HistoryOutcome {
 pub struct HistoryPickerComponent {
     entries: Vec<String>,
     selected: usize,
-    pending_g: bool,
+    pending: Option<KeyPress>,
     visible_height: usize,
 }
 
@@ -31,7 +35,7 @@ impl HistoryPickerComponent {
         Self {
             entries,
             selected: 0,
-            pending_g: false,
+            pending: None,
             visible_height: 0,
         }
     }
@@ -45,7 +49,14 @@ impl HistoryPickerComponent {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<HistoryOutcome> {
-        if let Some(mv) = vim_list::recognize(code, modifiers, &mut self.pending_g) {
+        let key = KeyPress::new(code, modifiers);
+        let Resolution::Command(command) =
+            keymap().resolve_in(&[Context::Prompt, Context::List], &mut self.pending, key)
+        else {
+            return None;
+        };
+
+        if let Some(mv) = command.as_vim_move() {
             vim_list::apply(
                 mv,
                 &mut self.selected,
@@ -54,9 +65,10 @@ impl HistoryPickerComponent {
             );
             return None;
         }
-        match code {
-            KeyCode::Esc => Some(HistoryOutcome::Cancelled),
-            KeyCode::Enter => self
+
+        match command {
+            Command::Cancel => Some(HistoryOutcome::Cancelled),
+            Command::Confirm => self
                 .selected_entry()
                 .map(|entry| HistoryOutcome::Selected(entry.to_string())),
             _ => None,
@@ -64,10 +76,16 @@ impl HistoryPickerComponent {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let theme = theme();
         let items: Vec<ListItem> = self
             .entries
             .iter()
-            .map(|entry| ListItem::new(entry.replace('\n', " ⏎ ")))
+            .map(|entry| {
+                ListItem::new(Span::styled(
+                    format!(" {}", entry.replace('\n', " ⏎ ")),
+                    Style::default().fg(theme.text),
+                ))
+            })
             .collect();
 
         let mut state = ListState::default();
@@ -76,13 +94,18 @@ impl HistoryPickerComponent {
         }
 
         self.visible_height = area.height.saturating_sub(2) as usize;
+        let confirm = keymap()
+            .binding_for(Context::Prompt, Command::Confirm)
+            .unwrap_or_default();
+        let cancel = keymap()
+            .binding_for(Context::Prompt, Command::Cancel)
+            .unwrap_or_default();
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("History (Enter=load, Esc=cancel)"),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            .block(ui::panel(
+                &format!("History — {confirm} load, {cancel} cancel"),
+                true,
+            ))
+            .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, area, &mut state);
     }
 }

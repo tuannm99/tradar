@@ -5,9 +5,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
+use tradar_core::theme::theme;
+use tradar_core::ui;
 use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::QueryResult;
@@ -58,33 +60,35 @@ impl ResultsComponent {
     /// For `Documents` `visible_height`-based half-page scrolling is an
     /// approximation (items can span multiple rows), same tradeoff as the
     /// row-count-based scrolling in `SchemaSidebarComponent`.
-    fn apply(&mut self, mv: VimMove) {
+    /// `pub` because `QueryScreenComponent` resolves the key (it owns
+    /// focus) and hands the movement down.
+    pub fn apply_move(&mut self, mv: VimMove) {
         let count = self.item_count();
         vim_list::apply(mv, &mut self.selected, count, self.visible_height);
     }
 
     pub fn move_down(&mut self) {
-        self.apply(VimMove::Down);
+        self.apply_move(VimMove::Down);
     }
 
     pub fn move_up(&mut self) {
-        self.apply(VimMove::Up);
+        self.apply_move(VimMove::Up);
     }
 
     pub fn move_to_top(&mut self) {
-        self.apply(VimMove::Top);
+        self.apply_move(VimMove::Top);
     }
 
     pub fn move_to_bottom(&mut self) {
-        self.apply(VimMove::Bottom);
+        self.apply_move(VimMove::Bottom);
     }
 
     pub fn move_half_page_down(&mut self) {
-        self.apply(VimMove::HalfPageDown);
+        self.apply_move(VimMove::HalfPageDown);
     }
 
     pub fn move_half_page_up(&mut self) {
-        self.apply(VimMove::HalfPageUp);
+        self.apply_move(VimMove::HalfPageUp);
     }
 
     /// Plain-text form of the currently selected row/document, ready to
@@ -101,18 +105,31 @@ impl ResultsComponent {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
-        let title = if focused {
-            "Results [focused]"
-        } else {
-            "Results"
+        let theme = theme();
+        // The row count belongs in the title: it's the first thing anyone
+        // wants to know about a result, and it costs no extra space.
+        let title = match (&self.last_error, &self.last_result) {
+            (Some(_), _) => "Results — error".to_string(),
+            (None, Some(QueryResult::Table { rows, .. })) => format!("Results ({} rows)", rows.len()),
+            (None, Some(QueryResult::Documents(docs))) => {
+                format!("Results ({} documents)", docs.len())
+            }
+            (None, None) => "Results".to_string(),
         };
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = ui::panel(&title, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         if let Some(error) = &self.last_error {
             self.visible_height = 0;
-            frame.render_widget(Paragraph::new(error.as_str()), inner);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    error.as_str(),
+                    Style::default().fg(theme.error),
+                ))
+                .wrap(Wrap { trim: true }),
+                inner,
+            );
             return;
         }
 
@@ -131,8 +148,11 @@ impl ResultsComponent {
                         .constraints([Constraint::Length(1), Constraint::Min(0)])
                         .split(inner);
                     frame.render_widget(
-                        Paragraph::new(columns.join(" | "))
-                            .style(Style::default().add_modifier(Modifier::BOLD)),
+                        Paragraph::new(columns.join("  ")).style(
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         chunks[0],
                     );
                     chunks[1]
@@ -141,14 +161,18 @@ impl ResultsComponent {
 
                 let items: Vec<ListItem> = rows
                     .iter()
-                    .map(|row| ListItem::new(row.join(" | ")))
+                    .map(|row| {
+                        ListItem::new(Span::styled(
+                            row.join("  "),
+                            Style::default().fg(theme.text),
+                        ))
+                    })
                     .collect();
                 let mut state = ListState::default();
                 if !rows.is_empty() {
                     state.select(Some(self.selected));
                 }
-                let list = List::new(items)
-                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+                let list = List::new(items).highlight_style(ui::selection_style());
                 frame.render_stateful_widget(list, list_area, &mut state);
             }
             QueryResult::Documents(docs) => {
@@ -170,8 +194,7 @@ impl ResultsComponent {
                 if !docs.is_empty() {
                     state.select(Some(self.selected));
                 }
-                let list = List::new(items)
-                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+                let list = List::new(items).highlight_style(ui::selection_style());
                 frame.render_stateful_widget(list, inner, &mut state);
             }
         }

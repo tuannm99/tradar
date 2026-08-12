@@ -37,6 +37,10 @@ pub enum Action {
         tab: usize,
     },
     BackToPicker,
+    /// Raise the key-bindings overlay. Like `Quit`, this is a property of
+    /// the app shell rather than of any connector -- `RootComponent` owns
+    /// the overlay, so a screen that wants it just says so.
+    ShowHelp,
 }
 
 pub trait Component {

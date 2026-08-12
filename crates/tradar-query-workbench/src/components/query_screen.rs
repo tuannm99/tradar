@@ -14,7 +14,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use tradar_connector_api::Session;
 use tradar_core::action::{Action, Component};
+use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::SavedConnection;
+use tradar_core::ui;
 
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
@@ -36,15 +38,11 @@ pub struct QueryScreenComponent {
     pub query_editor: QueryEditorComponent,
     pub results: ResultsComponent,
     engine: QueryEngine,
-    pending_g: bool,
+    /// Half-finished two-key binding (the first `g` of `gg`).
+    pending: Option<KeyPress>,
     prompt: Option<FilePromptComponent>,
     last_path: Option<String>,
     history_picker: Option<HistoryPickerComponent>,
-}
-
-fn is_submit(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    matches!(code, KeyCode::F(5))
-        || (code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL))
 }
 
 /// Copies `text` to the system clipboard via an OSC52 escape sequence,
@@ -91,7 +89,7 @@ impl QueryScreenComponent {
             query_editor,
             results: ResultsComponent::new(),
             engine,
-            pending_g: false,
+            pending: None,
             prompt: None,
             last_path: None,
             history_picker: None,
@@ -124,6 +122,17 @@ impl QueryScreenComponent {
         }
         let entries = self.engine.history().iter().rev().cloned().collect();
         self.history_picker = Some(HistoryPickerComponent::new(entries));
+    }
+
+    /// Hands a key the screen doesn't claim to the editor -- but only when
+    /// the editor has focus, since a list pane swallowing an unbound key is
+    /// better than it silently editing the query behind the user's back.
+    fn forward_to_editor(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        if self.focus == Focus::Editor {
+            self.query_editor
+                .forward_key(KeyEvent::new(code, modifiers));
+        }
+        None
     }
 
     fn handle_prompt_confirmed(&mut self, path: String) {
@@ -159,25 +168,14 @@ impl QueryScreenComponent {
     }
 }
 
-/// A centered floating rect, used to draw the save/open file prompt on top
-/// of the rest of the screen.
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
+/// The pane a command needs focused to make sense. `None` for commands that
+/// work from anywhere on this screen.
+fn required_focus(command: Command) -> Option<Focus> {
+    match command {
+        Command::Yank => Some(Focus::Results),
+        Command::InsertName => Some(Focus::Sidebar),
+        _ => None,
+    }
 }
 
 impl Component for QueryScreenComponent {
@@ -204,130 +202,101 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
-        let had_pending_g = std::mem::take(&mut self.pending_g);
-        match code {
-            KeyCode::Esc if self.query_editor.mode != EditorMode::Normal => {
-                self.query_editor
-                    .forward_key(KeyEvent::new(code, modifiers));
-                None
+        // `Esc` belongs to the editor while it's in a mode it can leave
+        // (Insert), and only means "back to the picker" from Normal mode.
+        // Checked before the keymap so a user rebinding `back` can't
+        // accidentally trap themselves in Insert mode.
+        if code == KeyCode::Esc
+            && self.focus == Focus::Editor
+            && self.query_editor.mode != EditorMode::Normal
+        {
+            self.query_editor
+                .forward_key(KeyEvent::new(code, modifiers));
+            return None;
+        }
+
+        // While typing, a plain character is text -- never a command. Only
+        // modified keys (`ctrl-s`, `f5`) reach the keymap from Insert mode,
+        // which is what keeps a binding like `?` from being un-typeable.
+        if self.focus == Focus::Editor
+            && self.query_editor.mode == EditorMode::Insert
+            && matches!(code, KeyCode::Char(_))
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.query_editor
+                .forward_key(KeyEvent::new(code, modifiers));
+            return None;
+        }
+
+        // List navigation applies only when a list actually has focus;
+        // with the editor focused those same keys are the editor's own vim
+        // motions.
+        let contexts: &[Context] = match self.focus {
+            Focus::Editor => &[Context::QueryScreen],
+            Focus::Results | Focus::Sidebar => &[Context::QueryScreen, Context::List],
+        };
+        let key = KeyPress::new(code, modifiers);
+        let command = match keymap().resolve_in(contexts, &mut self.pending, key) {
+            Resolution::Command(command) => command,
+            // Mid-sequence (the first `g` of `gg`): swallow it so the
+            // editor doesn't also see it.
+            Resolution::Pending => return None,
+            Resolution::None => return self.forward_to_editor(code, modifiers),
+        };
+
+        // A few commands only make sense against a specific pane. Invoked
+        // from elsewhere, the key should do whatever it would have done
+        // otherwise -- `enter` inserts a newline in the editor rather than
+        // a schema name.
+        if let Some(required) = required_focus(command)
+            && self.focus != required
+        {
+            return self.forward_to_editor(code, modifiers);
+        }
+
+        if let Some(mv) = command.as_vim_move() {
+            match self.focus {
+                Focus::Sidebar => self.schema_sidebar.apply_move(mv),
+                Focus::Results => self.results.apply_move(mv),
+                Focus::Editor => {}
             }
-            KeyCode::Esc => Some(Action::BackToPicker),
-            KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_prompt(PromptKind::Save);
-                None
+            return None;
+        }
+
+        match command {
+            Command::Back => return Some(Action::BackToPicker),
+            Command::Help => return Some(Action::ShowHelp),
+            Command::RunQuery => {
+                if !self.engine.is_pending() {
+                    self.engine.submit_query(self.query_editor.text());
+                }
             }
-            KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_prompt(PromptKind::Open);
-                None
-            }
-            KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_history();
-                None
-            }
-            KeyCode::Tab => {
+            Command::CycleFocus => {
                 self.focus = match self.focus {
                     Focus::Editor => Focus::Results,
                     Focus::Results => Focus::Sidebar,
                     Focus::Sidebar => Focus::Editor,
                 };
-                None
             }
-            KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.export_curl();
-                None
-            }
-            _ if is_submit(code, modifiers) => {
-                if !self.engine.is_pending() {
-                    self.engine.submit_query(self.query_editor.text());
+            Command::SaveFile => self.open_prompt(PromptKind::Save),
+            Command::OpenFile => self.open_prompt(PromptKind::Open),
+            Command::History => self.open_history(),
+            Command::ExportCurl => self.export_curl(),
+            Command::Yank => {
+                if let Some(text) = self.results.selected_text() {
+                    yank_to_clipboard(&text);
                 }
-                None
             }
-            KeyCode::Char('g') if self.focus == Focus::Sidebar && had_pending_g => {
-                self.schema_sidebar.move_to_top();
-                None
-            }
-            KeyCode::Char('g') if self.focus == Focus::Results && had_pending_g => {
-                self.results.move_to_top();
-                None
-            }
-            KeyCode::Char('g') if self.focus == Focus::Sidebar || self.focus == Focus::Results => {
-                self.pending_g = true;
-                None
-            }
-            KeyCode::Char('G') if self.focus == Focus::Sidebar => {
-                self.schema_sidebar.move_to_bottom();
-                None
-            }
-            KeyCode::Char('G') if self.focus == Focus::Results => {
-                self.results.move_to_bottom();
-                None
-            }
-            KeyCode::Char('d')
-                if self.focus == Focus::Sidebar && modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.schema_sidebar.move_half_page_down();
-                None
-            }
-            KeyCode::Char('d')
-                if self.focus == Focus::Results && modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.results.move_half_page_down();
-                None
-            }
-            KeyCode::Char('u')
-                if self.focus == Focus::Sidebar && modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.schema_sidebar.move_half_page_up();
-                None
-            }
-            KeyCode::Char('u')
-                if self.focus == Focus::Results && modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.results.move_half_page_up();
-                None
-            }
-            _ if self.focus == Focus::Sidebar => match code {
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.schema_sidebar.move_down();
-                    None
+            Command::InsertName => {
+                if let Some(name) = self.schema_sidebar.selected_name() {
+                    let name = name.to_string();
+                    self.query_editor.insert_at_cursor(&name);
+                    self.focus = Focus::Editor;
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.schema_sidebar.move_up();
-                    None
-                }
-                KeyCode::Enter => {
-                    if let Some(name) = self.schema_sidebar.selected_name() {
-                        let name = name.to_string();
-                        self.query_editor.insert_at_cursor(&name);
-                        self.focus = Focus::Editor;
-                    }
-                    None
-                }
-                _ => None,
-            },
-            _ if self.focus == Focus::Results => match code {
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.results.move_down();
-                    None
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.results.move_up();
-                    None
-                }
-                KeyCode::Char('y') => {
-                    if let Some(text) = self.results.selected_text() {
-                        yank_to_clipboard(&text);
-                    }
-                    None
-                }
-                _ => None,
-            },
-            _ => {
-                self.query_editor
-                    .forward_key(KeyEvent::new(code, modifiers));
-                None
             }
+            _ => {}
         }
+        None
     }
 
     fn update(&mut self, _action: Action) -> Option<Action> {
@@ -347,32 +316,39 @@ impl Component for QueryScreenComponent {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        // Sidebar wide enough for a typical table name, but never more than
+        // a third of a narrow terminal.
+        let sidebar_width = 26.min(area.width / 3);
         let outer = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(24), Constraint::Min(1)])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(1)])
             .split(area);
 
         self.schema_sidebar
             .draw(frame, outer[0], self.focus == Focus::Sidebar);
 
+        // The editor gets a third of the height (min 5 rows, so a short
+        // query still has room), results take the rest.
+        let editor_height = (area.height / 3).clamp(5, 12);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(6), Constraint::Min(1)])
+            .constraints([Constraint::Length(editor_height), Constraint::Min(3)])
             .split(outer[1]);
 
         let connection_name = self.active_connection().name.clone();
-        self.query_editor.draw(frame, chunks[0], &connection_name);
+        self.query_editor
+            .draw(frame, chunks[0], &connection_name, self.focus == Focus::Editor);
         self.results
             .draw(frame, chunks[1], self.focus == Focus::Results);
 
         if let Some(prompt) = &self.prompt {
-            let popup = centered_rect(60, 20, area);
+            let popup = ui::centered_rect(60, 20, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             prompt.draw(frame, popup);
         }
 
         if let Some(history_picker) = &mut self.history_picker {
-            let popup = centered_rect(70, 60, area);
+            let popup = ui::centered_rect(70, 60, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             history_picker.draw(frame, popup);
         }

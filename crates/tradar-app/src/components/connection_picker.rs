@@ -5,11 +5,15 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use tradar_core::action::{Action, Component};
+use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::SavedConnection;
+use tradar_core::theme::theme;
+use tradar_core::ui;
 use tradar_core::vim_list;
 
 pub struct ConnectionPickerComponent {
@@ -17,7 +21,9 @@ pub struct ConnectionPickerComponent {
     pub selected: usize,
     pub last_error: Option<String>,
     pub connect_epoch: u64,
-    pending_g: bool,
+    /// Half-finished two-key binding (the first `g` of `gg`), owned here
+    /// because it's per-list state -- see `tradar_core::keymap`.
+    pending: Option<KeyPress>,
     visible_height: usize,
 }
 
@@ -28,15 +34,40 @@ impl ConnectionPickerComponent {
             selected: 0,
             last_error: None,
             connect_epoch: 0,
-            pending_g: false,
+            pending: None,
             visible_height: 0,
         }
+    }
+
+    fn open_selected(&mut self) -> Option<Action> {
+        let connection = self.connections.get(self.selected).cloned()?;
+        self.connect_epoch += 1;
+        // A stale error from a previous failed attempt must not keep
+        // showing once a new attempt is underway.
+        self.last_error = None;
+        Some(Action::OpenRequested {
+            connection,
+            epoch: self.connect_epoch,
+            // Placeholder -- RootComponent overwrites this with the real tab
+            // index right after this call returns, since a lone picker has
+            // no notion of which tab it belongs to.
+            tab: 0,
+        })
     }
 }
 
 impl Component for ConnectionPickerComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
-        if let Some(mv) = vim_list::recognize(code, modifiers, &mut self.pending_g) {
+        let key = KeyPress::new(code, modifiers);
+        let Resolution::Command(command) = keymap().resolve_in(
+            &[Context::Picker, Context::List],
+            &mut self.pending,
+            key,
+        ) else {
+            return None;
+        };
+
+        if let Some(mv) = command.as_vim_move() {
             vim_list::apply(
                 mv,
                 &mut self.selected,
@@ -45,23 +76,11 @@ impl Component for ConnectionPickerComponent {
             );
             return None;
         }
-        match code {
-            KeyCode::Char('q') => Some(Action::Quit),
-            KeyCode::Enter => {
-                let connection = self.connections.get(self.selected).cloned()?;
-                self.connect_epoch += 1;
-                // A stale error from a previous failed attempt must not
-                // keep showing once a new attempt is underway.
-                self.last_error = None;
-                Some(Action::OpenRequested {
-                    connection,
-                    epoch: self.connect_epoch,
-                    // Placeholder -- RootComponent overwrites this with the
-                    // real tab index right after this call returns, since a
-                    // lone picker has no notion of which tab it belongs to.
-                    tab: 0,
-                })
-            }
+
+        match command {
+            Command::Quit => Some(Action::Quit),
+            Command::Open => self.open_selected(),
+            Command::Help => Some(Action::ShowHelp),
             _ => None,
         }
     }
@@ -74,39 +93,56 @@ impl Component for ConnectionPickerComponent {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let theme = theme();
+
+        // The error box, when there is one, takes the bottom of the area.
+        let (list_area, error_area) = match &self.last_error {
+            None => (area, None),
+            Some(_) => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(3), Constraint::Length(4)])
+                    .split(area);
+                (chunks[0], Some(chunks[1]))
+            }
+        };
+
         let items: Vec<ListItem> = self
             .connections
             .iter()
-            .enumerate()
-            .map(|(i, connection)| {
-                let item = ListItem::new(connection.name.clone());
-                if i == self.selected {
-                    item.style(Style::default().add_modifier(Modifier::REVERSED))
-                } else {
-                    item
-                }
+            .map(|connection| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {}", connection.name),
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled(
+                        format!("  {}", connection.driver),
+                        Style::default().fg(theme.text_dim),
+                    ),
+                ]))
             })
             .collect();
 
-        let list =
-            List::new(items).block(Block::default().borders(Borders::ALL).title("Connections"));
+        let mut state = ListState::default();
+        if !self.connections.is_empty() {
+            state.select(Some(self.selected));
+        }
+        self.visible_height = list_area.height.saturating_sub(2) as usize;
+        let list = List::new(items)
+            .block(ui::panel("Connections", true))
+            .highlight_style(ui::selection_style());
+        frame.render_stateful_widget(list, list_area, &mut state);
 
-        let Some(error) = &self.last_error else {
-            self.visible_height = area.height.saturating_sub(2) as usize;
-            frame.render_widget(list, area);
-            return;
-        };
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)])
-            .split(area);
-        self.visible_height = chunks[0].height.saturating_sub(2) as usize;
-        frame.render_widget(list, chunks[0]);
-
-        let error_box = Paragraph::new(error.as_str())
-            .block(Block::default().borders(Borders::ALL).title("Error"));
-        frame.render_widget(error_box, chunks[1]);
+        if let (Some(error_area), Some(error)) = (error_area, &self.last_error) {
+            let error_box = Paragraph::new(Span::styled(
+                error.as_str(),
+                Style::default().fg(theme.error),
+            ))
+            .wrap(Wrap { trim: true })
+            .block(ui::panel("Error", false));
+            frame.render_widget(error_box, error_area);
+        }
     }
 }
 

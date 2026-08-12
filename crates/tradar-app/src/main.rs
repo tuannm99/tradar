@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tradar_app::components::RootComponent;
 use tradar_connector_api::{Connector, Session};
 use tradar_core::action::{Action, Component};
+use tradar_core::config;
 use tradar_core::storage::{
     ConnectionStore, SavedConnection, SessionState, SessionStore, default_connections_path,
     default_session_path,
@@ -63,6 +64,17 @@ enum ConnectOutcome {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Theme and key bindings, before anything is drawn. A broken config is
+    // reported and skipped rather than being fatal: losing your colors
+    // shouldn't stop you reaching your database.
+    let config_path = config::default_config_path()?;
+    if let Err(e) = config::init(&config_path) {
+        eprintln!(
+            "warning: ignoring {}: {e}\n         (using built-in theme and key bindings)",
+            config_path.display()
+        );
+    }
+
     let connections_path = default_connections_path()?;
     let store = ConnectionStore::at(connections_path.clone());
     let connections = store.load()?;

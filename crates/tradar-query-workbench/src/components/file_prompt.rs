@@ -6,8 +6,13 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+
+use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
+use tradar_core::theme::theme;
+use tradar_core::ui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -49,9 +54,19 @@ impl FilePromptComponent {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<PromptOutcome> {
+        // Confirm/cancel come from the keymap; everything else is text
+        // editing, which is fixed (this is a path field, not a vim buffer).
+        let key = KeyPress::new(code, modifiers);
+        let mut pending = None;
+        if let Resolution::Command(command) = keymap().resolve(Context::Prompt, &mut pending, key) {
+            match command {
+                Command::Cancel => return Some(PromptOutcome::Cancelled),
+                Command::Confirm => return Some(PromptOutcome::Confirmed(self.text())),
+                _ => {}
+            }
+        }
+
         match code {
-            KeyCode::Esc => Some(PromptOutcome::Cancelled),
-            KeyCode::Enter => Some(PromptOutcome::Confirmed(self.text())),
             KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.insert(self.cursor, c);
                 self.cursor += 1;
@@ -94,24 +109,54 @@ impl FilePromptComponent {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
-        let title = match self.kind {
-            PromptKind::Save => "Save query to file (Enter=save, Esc=cancel)",
-            PromptKind::Open => "Open query from file (Enter=open, Esc=cancel)",
+        let theme = theme();
+        let confirm = keymap()
+            .binding_for(Context::Prompt, Command::Confirm)
+            .unwrap_or_default();
+        let cancel = keymap()
+            .binding_for(Context::Prompt, Command::Cancel)
+            .unwrap_or_default();
+        let verb = match self.kind {
+            PromptKind::Save => "Save query to",
+            PromptKind::Open => "Open query from",
         };
-        let border_color = if self.error.is_some() {
-            Color::Red
-        } else {
-            Color::Yellow
-        };
-        let text = match &self.error {
-            Some(err) => format!("{}\n{err}", self.text()),
-            None => self.text(),
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(border_color));
-        frame.render_widget(Paragraph::new(text).block(block), area);
+        let title = format!("{verb} — {confirm} confirm, {cancel} cancel");
+
+        // The typed path, with a block cursor so the caret is visible in a
+        // terminal that hides the real one.
+        let input: Vec<char> = self.input.clone();
+        let mut spans: Vec<Span> = input
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let style = Style::default().fg(theme.text);
+                if i == self.cursor {
+                    Span::styled(c.to_string(), style.add_modifier(Modifier::REVERSED))
+                } else {
+                    Span::styled(c.to_string(), style)
+                }
+            })
+            .collect();
+        if self.cursor >= input.len() {
+            spans.push(Span::styled(
+                " ",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        }
+
+        let mut lines = vec![Line::from(spans)];
+        if let Some(error) = &self.error {
+            lines.push(Line::from(Span::styled(
+                error.clone(),
+                Style::default().fg(theme.error),
+            )));
+        }
+
+        let mut block = ui::panel(&title, true);
+        if self.error.is_some() {
+            block = block.border_style(Style::default().fg(theme.error));
+        }
+        frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 }
 

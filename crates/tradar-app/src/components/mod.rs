@@ -13,7 +13,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use tradar_core::action::{Action, Component};
+use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::{SavedConnection, SessionState};
+use tradar_core::theme::theme;
+use tradar_core::ui::{self, HelpOverlay};
 
 use crate::components::connection_picker::ConnectionPickerComponent;
 
@@ -53,6 +56,11 @@ pub struct RootComponent {
     pub should_quit: bool,
     /// The saved connections every new tab's picker starts out showing.
     connections: Vec<SavedConnection>,
+    /// The key-bindings overlay, when raised. It sits above every tab, so
+    /// it lives here rather than on a `Tab`.
+    help: Option<HelpOverlay>,
+    /// Half-finished two-key global binding.
+    pending: Option<KeyPress>,
 }
 
 impl RootComponent {
@@ -62,6 +70,8 @@ impl RootComponent {
             active_tab: 0,
             should_quit: false,
             connections,
+            help: None,
+            pending: None,
         }
     }
 
@@ -135,33 +145,31 @@ impl RootComponent {
 
 impl Component for RootComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
-        match code {
-            // Available from any screen, not just the picker's `q` --
-            // otherwise quitting while a tab is `Active` requires `Esc`
-            // back to the picker first, which clears that tab's title
-            // (and with it, whether the next run's session save even
-            // remembers it was connected).
-            KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-                return None;
+        // The help overlay swallows everything while it's up.
+        if let Some(help) = &mut self.help {
+            if help.handle_key_event(code, modifiers) {
+                self.help = None;
             }
-            KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.new_tab();
-                return None;
+            return None;
+        }
+
+        // Global bindings win everywhere -- including `quit`, which is why
+        // quitting works while a tab is `Active` instead of needing `Esc`
+        // back to the picker first (that would clear the tab's title, and
+        // with it whether the session save remembers it was connected).
+        let key = KeyPress::new(code, modifiers);
+        if let Resolution::Command(command) =
+            keymap().resolve_in(&[Context::Global], &mut self.pending, key)
+        {
+            match command {
+                Command::Quit => self.should_quit = true,
+                Command::NewTab => self.new_tab(),
+                Command::CloseTab => self.close_active_tab(),
+                Command::NextTab => self.next_tab(),
+                Command::PrevTab => self.prev_tab(),
+                _ => {}
             }
-            KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.close_active_tab();
-                return None;
-            }
-            KeyCode::Right if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.next_tab();
-                return None;
-            }
-            KeyCode::Left if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.prev_tab();
-                return None;
-            }
-            _ => {}
+            return None;
         }
 
         let tab_index = self.active_tab;
@@ -226,6 +234,10 @@ impl Component for RootComponent {
                 tab.title = None;
                 None
             }
+            Action::ShowHelp => {
+                self.help = Some(HelpOverlay::new());
+                None
+            }
             other => {
                 let tab = &mut self.tabs[self.active_tab];
                 match &mut tab.screen {
@@ -245,17 +257,27 @@ impl Component for RootComponent {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        // Single-tab (the common case) draws exactly like before this
-        // feature existed -- no tab bar, no row spent on it.
-        let content_area = if self.tabs.len() > 1 {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(area);
-            draw_tab_bar(frame, chunks[0], &self.tabs, self.active_tab);
-            chunks[1]
+        // A tab bar only when there's more than one tab (nothing to switch
+        // between otherwise), and always a one-line hint bar at the bottom.
+        let show_tab_bar = self.tabs.len() > 1;
+        let constraints = if show_tab_bar {
+            vec![
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ]
         } else {
-            area
+            vec![Constraint::Min(1), Constraint::Length(1)]
+        };
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        let (content_area, status_area) = if show_tab_bar {
+            draw_tab_bar(frame, chunks[0], &self.tabs, self.active_tab);
+            (chunks[1], chunks[2])
+        } else {
+            (chunks[0], chunks[1])
         };
 
         let tab = &mut self.tabs[self.active_tab];
@@ -263,19 +285,74 @@ impl Component for RootComponent {
             ScreenSlot::ConnectionPicker => tab.connection_picker.draw(frame, content_area),
             ScreenSlot::Active(screen) => screen.draw(frame, content_area),
         }
+
+        self.draw_status_bar(frame, status_area);
+
+        // Drawn last so it sits above everything, including the tab bar.
+        if let Some(help) = &mut self.help {
+            help.draw(frame, area);
+        }
+    }
+}
+
+impl RootComponent {
+    /// The bottom hint bar. Hints come from the live keymap, so a remapped
+    /// key shows its new binding here without this code knowing.
+    fn draw_status_bar(&self, frame: &mut Frame, area: Rect) {
+        let on_picker = matches!(
+            self.tabs[self.active_tab].screen,
+            ScreenSlot::ConnectionPicker
+        );
+        let screen_context = if on_picker {
+            Context::Picker
+        } else {
+            Context::QueryScreen
+        };
+
+        let mut hints = Vec::new();
+        if on_picker {
+            hints.extend(ui::hint(Context::Picker, Command::Open, "connect"));
+            hints.extend(ui::hint(Context::List, Command::MoveDown, "move"));
+        } else {
+            hints.extend(ui::hint(
+                Context::QueryScreen,
+                Command::RunQuery,
+                "run",
+            ));
+            hints.extend(ui::hint(
+                Context::QueryScreen,
+                Command::CycleFocus,
+                "focus",
+            ));
+            hints.extend(ui::hint(
+                Context::QueryScreen,
+                Command::History,
+                "history",
+            ));
+            hints.extend(ui::hint(Context::QueryScreen, Command::Back, "back"));
+        }
+        hints.extend(ui::hint(Context::Global, Command::NewTab, "tab"));
+        hints.extend(ui::hint(screen_context, Command::Help, "help"));
+
+        let right = self.tabs[self.active_tab].title.clone();
+        ui::draw_status_bar(frame, area, &hints, right.as_deref());
     }
 }
 
 fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) {
+    let theme = theme();
     let spans: Vec<Span> = tabs
         .iter()
         .enumerate()
         .map(|(i, tab)| {
             let label = format!(" {}: {} ", i + 1, tab.label());
             let style = if i == active {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
                 Style::default()
+                    .bg(theme.tab_active_bg)
+                    .fg(theme.tab_active_fg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.tab_inactive)
             };
             Span::styled(label, style)
         })

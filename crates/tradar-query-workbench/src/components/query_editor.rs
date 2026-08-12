@@ -17,8 +17,10 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
+use tradar_core::theme::theme;
+use tradar_core::ui;
 use tradar_core::vim_list;
 
 use crate::sql_highlight;
@@ -327,10 +329,8 @@ impl QueryEditorComponent {
         Line::from(spans)
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, connection_name: &str) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Query — {connection_name}"));
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, connection_name: &str, focused: bool) {
+        let block = ui::panel(&format!("Query — {connection_name}"), focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -361,9 +361,10 @@ impl QueryEditorComponent {
         frame.render_widget(Paragraph::new(Text::from(lines)), text_area);
 
         if inner.height > text_height {
-            let mode_label = match self.mode {
-                EditorMode::Normal => "Normal",
-                EditorMode::Insert => "Insert",
+            let theme = theme();
+            let (mode_label, mode_color) = match self.mode {
+                EditorMode::Normal => (" NORMAL ", theme.accent),
+                EditorMode::Insert => (" INSERT ", theme.warning),
             };
             let mode_area = Rect {
                 x: inner.x,
@@ -371,7 +372,20 @@ impl QueryEditorComponent {
                 width: inner.width,
                 height: 1,
             };
-            frame.render_widget(Paragraph::new(mode_label), mode_area);
+            let position = format!(" {}:{} ", self.cursor_row + 1, self.cursor_col + 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        mode_label,
+                        Style::default()
+                            .bg(mode_color)
+                            .fg(theme.status_bar_bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(position, Style::default().fg(theme.text_dim)),
+                ])),
+                mode_area,
+            );
         }
     }
 }
@@ -591,7 +605,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "local-sqlite"))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "local-sqlite", true))
             .unwrap();
 
         let text = buffer_text(terminal.backend().buffer());
@@ -606,14 +620,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x"))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("Normal"), "buffer was: {text}");
 
         editor.forward_key(key(KeyCode::Char('i')));
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x"))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("Insert"), "buffer was: {text}");
@@ -633,7 +647,7 @@ mod tests {
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 20, 8), "x"))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 20, 8), "x", true))
             .unwrap();
 
         let text = buffer_text(terminal.backend().buffer());

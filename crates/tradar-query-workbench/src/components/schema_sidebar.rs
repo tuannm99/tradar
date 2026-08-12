@@ -4,9 +4,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::style::Style;
+use ratatui::text::Span;
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
+use tradar_core::theme::theme;
+use tradar_core::ui;
 use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::SchemaInfo;
@@ -44,7 +47,9 @@ impl SchemaSidebarComponent {
         self.schema_error = Some(error);
     }
 
-    fn apply(&mut self, mv: VimMove) {
+    /// Moves the selection. `pub` because `QueryScreenComponent` resolves
+    /// the key (it owns focus) and hands the movement down.
+    pub fn apply_move(&mut self, mv: VimMove) {
         vim_list::apply(
             mv,
             &mut self.schema_selected,
@@ -54,27 +59,27 @@ impl SchemaSidebarComponent {
     }
 
     pub fn move_down(&mut self) {
-        self.apply(VimMove::Down);
+        self.apply_move(VimMove::Down);
     }
 
     pub fn move_up(&mut self) {
-        self.apply(VimMove::Up);
+        self.apply_move(VimMove::Up);
     }
 
     pub fn move_to_top(&mut self) {
-        self.apply(VimMove::Top);
+        self.apply_move(VimMove::Top);
     }
 
     pub fn move_to_bottom(&mut self) {
-        self.apply(VimMove::Bottom);
+        self.apply_move(VimMove::Bottom);
     }
 
     pub fn move_half_page_down(&mut self) {
-        self.apply(VimMove::HalfPageDown);
+        self.apply_move(VimMove::HalfPageDown);
     }
 
     pub fn move_half_page_up(&mut self) {
-        self.apply(VimMove::HalfPageUp);
+        self.apply_move(VimMove::HalfPageUp);
     }
 
     pub fn selected_name(&self) -> Option<&str> {
@@ -90,10 +95,16 @@ impl SchemaSidebarComponent {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+        let theme = theme();
         let items: Vec<ListItem> = self
             .schema
             .iter()
-            .map(|entry| ListItem::new(entry.name.clone()))
+            .map(|entry| {
+                ListItem::new(Span::styled(
+                    format!(" {}", entry.name),
+                    Style::default().fg(theme.text),
+                ))
+            })
             .collect();
 
         let mut state = ListState::default();
@@ -101,17 +112,13 @@ impl SchemaSidebarComponent {
             state.select(Some(self.schema_selected));
         }
 
-        let title = if focused {
-            "Schema [focused]"
-        } else {
-            "Schema"
-        };
+        let title = format!("Schema ({})", self.schema.len());
 
         let Some(error) = &self.schema_error else {
             self.visible_height = area.height.saturating_sub(2) as usize;
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+                .block(ui::panel(&title, focused))
+                .highlight_style(ui::selection_style());
             frame.render_stateful_widget(list, area, &mut state);
             return;
         };
@@ -123,13 +130,16 @@ impl SchemaSidebarComponent {
         self.visible_height = chunks[0].height.saturating_sub(2) as usize;
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            .block(ui::panel(&title, focused))
+            .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, chunks[0], &mut state);
 
-        let error_box = Paragraph::new(error.as_str())
-            .block(Block::default().borders(Borders::ALL).title("Error"))
-            .wrap(Wrap { trim: true });
+        let error_box = Paragraph::new(Span::styled(
+            error.as_str(),
+            Style::default().fg(theme.error),
+        ))
+        .block(ui::panel("Error", false))
+        .wrap(Wrap { trim: true });
         frame.render_widget(error_box, chunks[1]);
     }
 }
