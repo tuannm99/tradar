@@ -8,7 +8,6 @@ use std::io::Write;
 
 use base64::Engine;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use edtui::EditorMode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc::UnboundedSender;
@@ -19,7 +18,7 @@ use tradar_core::storage::SavedConnection;
 
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
-use crate::components::query_editor::QueryEditorComponent;
+use crate::components::query_editor::{EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
 use crate::components::schema_sidebar::SchemaSidebarComponent;
 use crate::query_engine::{QueryEngine, QueryOutcome};
@@ -199,7 +198,7 @@ impl Component for QueryScreenComponent {
 
         let had_pending_g = std::mem::take(&mut self.pending_g);
         match code {
-            KeyCode::Esc if self.query_editor.state.mode != EditorMode::Normal => {
+            KeyCode::Esc if self.query_editor.mode != EditorMode::Normal => {
                 self.query_editor
                     .forward_key(KeyEvent::new(code, modifiers));
                 None
@@ -514,7 +513,7 @@ mod tests {
 
         assert_eq!(screen.query_editor.text(), "aordersb");
         assert_eq!(screen.focus, Focus::Editor);
-        assert_eq!(screen.query_editor.state.mode, EditorMode::Insert);
+        assert_eq!(screen.query_editor.mode, EditorMode::Insert);
     }
 
     #[test]
@@ -631,7 +630,7 @@ mod tests {
         assert!(first.is_none());
         assert!(
             second.is_none(),
-            "editor-focused 'g'/'gg' is edtui's own vim handling, not a schema action"
+            "editor-focused 'g'/'gg' is QueryEditorComponent's own vim handling, not a schema action"
         );
     }
 
@@ -831,7 +830,7 @@ mod tests {
         screen
             .query_editor
             .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
-        assert_eq!(screen.query_editor.state.mode, EditorMode::Insert);
+        assert_eq!(screen.query_editor.mode, EditorMode::Insert);
 
         let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
@@ -839,7 +838,7 @@ mod tests {
             action.is_none(),
             "Esc must be consumed by the editor, not bubble to BackToPicker"
         );
-        assert_eq!(screen.query_editor.state.mode, EditorMode::Normal);
+        assert_eq!(screen.query_editor.mode, EditorMode::Normal);
     }
 
     #[test]
@@ -849,7 +848,7 @@ mod tests {
             .query_editor
             .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
         screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(screen.query_editor.state.mode, EditorMode::Normal);
+        assert_eq!(screen.query_editor.mode, EditorMode::Normal);
 
         let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
