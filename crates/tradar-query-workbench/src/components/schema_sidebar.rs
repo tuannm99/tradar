@@ -7,6 +7,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
+use tradar_core::vim_list::{self, VimMove};
+
 use crate::query_driver::SchemaInfo;
 
 pub struct SchemaSidebarComponent {
@@ -42,47 +44,37 @@ impl SchemaSidebarComponent {
         self.schema_error = Some(error);
     }
 
-    fn move_down_by(&mut self, delta: usize) {
-        if self.schema.is_empty() {
-            return;
-        }
-        self.schema_selected = (self.schema_selected + delta).min(self.schema.len() - 1);
-    }
-
-    fn move_up_by(&mut self, delta: usize) {
-        self.schema_selected = self.schema_selected.saturating_sub(delta);
+    fn apply(&mut self, mv: VimMove) {
+        vim_list::apply(
+            mv,
+            &mut self.schema_selected,
+            self.schema.len(),
+            self.visible_height,
+        );
     }
 
     pub fn move_down(&mut self) {
-        self.move_down_by(1);
+        self.apply(VimMove::Down);
     }
 
     pub fn move_up(&mut self) {
-        self.move_up_by(1);
+        self.apply(VimMove::Up);
     }
 
     pub fn move_to_top(&mut self) {
-        self.schema_selected = 0;
+        self.apply(VimMove::Top);
     }
 
     pub fn move_to_bottom(&mut self) {
-        self.schema_selected = self.schema.len().saturating_sub(1);
-    }
-
-    /// Half the last-rendered visible row count, minimum 1 -- matches vim's
-    /// `Ctrl+d`/`Ctrl+u`. Falls back to 1 before the first `draw()`.
-    fn half_page(&self) -> usize {
-        (self.visible_height / 2).max(1)
+        self.apply(VimMove::Bottom);
     }
 
     pub fn move_half_page_down(&mut self) {
-        let step = self.half_page();
-        self.move_down_by(step);
+        self.apply(VimMove::HalfPageDown);
     }
 
     pub fn move_half_page_up(&mut self) {
-        let step = self.half_page();
-        self.move_up_by(step);
+        self.apply(VimMove::HalfPageUp);
     }
 
     pub fn selected_name(&self) -> Option<&str> {

@@ -185,7 +185,7 @@ impl Component for QueryScreenComponent {
         }
 
         if let Some(history_picker) = self.history_picker.as_mut() {
-            match history_picker.handle_key_event(code) {
+            match history_picker.handle_key_event(code, modifiers) {
                 Some(HistoryOutcome::Cancelled) => self.history_picker = None,
                 Some(HistoryOutcome::Selected(query)) => {
                     self.query_editor.set_text(&query);
@@ -364,7 +364,7 @@ impl Component for QueryScreenComponent {
             prompt.draw(frame, popup);
         }
 
-        if let Some(history_picker) = &self.history_picker {
+        if let Some(history_picker) = &mut self.history_picker {
             let popup = centered_rect(70, 60, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             history_picker.draw(frame, popup);

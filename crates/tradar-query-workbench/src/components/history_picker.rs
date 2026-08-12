@@ -3,11 +3,13 @@
 //! `QueryScreenComponent`, the same way `FilePromptComponent` is, and takes
 //! over all key input while open.
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+
+use tradar_core::vim_list;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistoryOutcome {
@@ -19,6 +21,7 @@ pub struct HistoryPickerComponent {
     entries: Vec<String>,
     selected: usize,
     pending_g: bool,
+    visible_height: usize,
 }
 
 impl HistoryPickerComponent {
@@ -29,64 +32,38 @@ impl HistoryPickerComponent {
             entries,
             selected: 0,
             pending_g: false,
+            visible_height: 0,
         }
-    }
-
-    pub fn move_down(&mut self) {
-        if self.entries.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + 1).min(self.entries.len() - 1);
-    }
-
-    pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub fn move_to_top(&mut self) {
-        self.selected = 0;
-    }
-
-    pub fn move_to_bottom(&mut self) {
-        self.selected = self.entries.len().saturating_sub(1);
     }
 
     pub fn selected_entry(&self) -> Option<&str> {
         self.entries.get(self.selected).map(String::as_str)
     }
 
-    pub fn handle_key_event(&mut self, code: KeyCode) -> Option<HistoryOutcome> {
-        let had_pending_g = std::mem::take(&mut self.pending_g);
+    pub fn handle_key_event(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<HistoryOutcome> {
+        if let Some(mv) = vim_list::recognize(code, modifiers, &mut self.pending_g) {
+            vim_list::apply(
+                mv,
+                &mut self.selected,
+                self.entries.len(),
+                self.visible_height,
+            );
+            return None;
+        }
         match code {
             KeyCode::Esc => Some(HistoryOutcome::Cancelled),
             KeyCode::Enter => self
                 .selected_entry()
                 .map(|entry| HistoryOutcome::Selected(entry.to_string())),
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.move_down();
-                None
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.move_up();
-                None
-            }
-            KeyCode::Char('g') if had_pending_g => {
-                self.move_to_top();
-                None
-            }
-            KeyCode::Char('g') => {
-                self.pending_g = true;
-                None
-            }
-            KeyCode::Char('G') => {
-                self.move_to_bottom();
-                None
-            }
             _ => None,
         }
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .entries
             .iter()
@@ -98,6 +75,7 @@ impl HistoryPickerComponent {
             state.select(Some(self.selected));
         }
 
+        self.visible_height = area.height.saturating_sub(2) as usize;
         let list = List::new(items)
             .block(
                 Block::default()
@@ -127,10 +105,10 @@ mod tests {
     fn move_down_advances_and_stops_at_the_last_entry() {
         let mut picker = picker();
 
-        picker.move_down();
+        picker.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(picker.selected_entry(), Some("select 1"));
 
-        picker.move_down();
+        picker.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(picker.selected_entry(), Some("select 1"));
     }
 
@@ -138,7 +116,7 @@ mod tests {
     fn move_up_stops_at_zero() {
         let mut picker = picker();
 
-        picker.move_up();
+        picker.handle_key_event(KeyCode::Char('k'), KeyModifiers::NONE);
         assert_eq!(picker.selected_entry(), Some("select 2"));
     }
 
@@ -146,20 +124,39 @@ mod tests {
     fn gg_and_shift_g_jump_to_top_and_bottom() {
         let mut picker = picker();
 
-        picker.handle_key_event(KeyCode::Char('G'));
+        picker.handle_key_event(KeyCode::Char('G'), KeyModifiers::NONE);
         assert_eq!(picker.selected_entry(), Some("select 1"));
 
-        let first = picker.handle_key_event(KeyCode::Char('g'));
+        let first = picker.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
         assert!(first.is_none(), "a lone 'g' should not act yet");
-        picker.handle_key_event(KeyCode::Char('g'));
+        picker.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
         assert_eq!(picker.selected_entry(), Some("select 2"));
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_scroll_by_half_the_visible_height() {
+        let mut picker = HistoryPickerComponent::new(vec![
+            "1".to_string(),
+            "2".to_string(),
+            "3".to_string(),
+            "4".to_string(),
+            "5".to_string(),
+            "6".to_string(),
+        ]);
+        picker.visible_height = 10;
+
+        picker.handle_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(picker.selected, 5, "should clamp to the last entry");
+
+        picker.handle_key_event(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]
     fn enter_selects_the_current_entry() {
         let mut picker = picker();
 
-        let outcome = picker.handle_key_event(KeyCode::Enter);
+        let outcome = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(
             outcome,
@@ -171,7 +168,7 @@ mod tests {
     fn enter_on_an_empty_history_is_a_no_op() {
         let mut picker = HistoryPickerComponent::new(Vec::new());
 
-        let outcome = picker.handle_key_event(KeyCode::Enter);
+        let outcome = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(outcome, None);
     }
@@ -180,7 +177,7 @@ mod tests {
     fn esc_cancels() {
         let mut picker = picker();
 
-        let outcome = picker.handle_key_event(KeyCode::Esc);
+        let outcome = picker.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert_eq!(outcome, Some(HistoryOutcome::Cancelled));
     }

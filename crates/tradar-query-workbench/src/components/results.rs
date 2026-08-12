@@ -8,6 +8,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
+use tradar_core::vim_list::{self, VimMove};
+
 use crate::query_driver::QueryResult;
 
 pub struct ResultsComponent {
@@ -53,50 +55,36 @@ impl ResultsComponent {
         }
     }
 
-    fn move_down_by(&mut self, delta: usize) {
+    /// For `Documents` `visible_height`-based half-page scrolling is an
+    /// approximation (items can span multiple rows), same tradeoff as the
+    /// row-count-based scrolling in `SchemaSidebarComponent`.
+    fn apply(&mut self, mv: VimMove) {
         let count = self.item_count();
-        if count == 0 {
-            return;
-        }
-        self.selected = (self.selected + delta).min(count - 1);
-    }
-
-    fn move_up_by(&mut self, delta: usize) {
-        self.selected = self.selected.saturating_sub(delta);
+        vim_list::apply(mv, &mut self.selected, count, self.visible_height);
     }
 
     pub fn move_down(&mut self) {
-        self.move_down_by(1);
+        self.apply(VimMove::Down);
     }
 
     pub fn move_up(&mut self) {
-        self.move_up_by(1);
+        self.apply(VimMove::Up);
     }
 
     pub fn move_to_top(&mut self) {
-        self.selected = 0;
+        self.apply(VimMove::Top);
     }
 
     pub fn move_to_bottom(&mut self) {
-        self.selected = self.item_count().saturating_sub(1);
-    }
-
-    /// Half the last-rendered visible row count, minimum 1 -- matches vim's
-    /// `Ctrl+d`/`Ctrl+u`. For `Documents` this is an approximation (items
-    /// can span multiple rows), same tradeoff as the row-count-based
-    /// scrolling in `SchemaSidebarComponent`.
-    fn half_page(&self) -> usize {
-        (self.visible_height / 2).max(1)
+        self.apply(VimMove::Bottom);
     }
 
     pub fn move_half_page_down(&mut self) {
-        let step = self.half_page();
-        self.move_down_by(step);
+        self.apply(VimMove::HalfPageDown);
     }
 
     pub fn move_half_page_up(&mut self) {
-        let step = self.half_page();
-        self.move_up_by(step);
+        self.apply(VimMove::HalfPageUp);
     }
 
     /// Plain-text form of the currently selected row/document, ready to

@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use tradar_core::action::{Action, Component};
 use tradar_core::storage::SavedConnection;
+use tradar_core::vim_list;
 
 pub struct ConnectionPickerComponent {
     pub connections: Vec<SavedConnection>,
@@ -31,76 +32,21 @@ impl ConnectionPickerComponent {
             visible_height: 0,
         }
     }
-
-    fn move_selection_down_by(&mut self, delta: usize) {
-        if self.connections.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + delta).min(self.connections.len() - 1);
-    }
-
-    fn move_selection_up_by(&mut self, delta: usize) {
-        self.selected = self.selected.saturating_sub(delta);
-    }
-
-    fn move_selection_down(&mut self) {
-        self.move_selection_down_by(1);
-    }
-
-    fn move_selection_up(&mut self) {
-        self.move_selection_up_by(1);
-    }
-
-    fn move_selection_to_top(&mut self) {
-        self.selected = 0;
-    }
-
-    fn move_selection_to_bottom(&mut self) {
-        self.selected = self.connections.len().saturating_sub(1);
-    }
-
-    /// Half the last-rendered visible row count, minimum 1 -- matches vim's
-    /// `Ctrl+d`/`Ctrl+u`. Falls back to 1 before the first `draw()`.
-    fn half_page(&self) -> usize {
-        (self.visible_height / 2).max(1)
-    }
 }
 
 impl Component for ConnectionPickerComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
-        let had_pending_g = std::mem::take(&mut self.pending_g);
+        if let Some(mv) = vim_list::recognize(code, modifiers, &mut self.pending_g) {
+            vim_list::apply(
+                mv,
+                &mut self.selected,
+                self.connections.len(),
+                self.visible_height,
+            );
+            return None;
+        }
         match code {
             KeyCode::Char('q') => Some(Action::Quit),
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.move_selection_down();
-                None
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.move_selection_up();
-                None
-            }
-            KeyCode::Char('g') if had_pending_g => {
-                self.move_selection_to_top();
-                None
-            }
-            KeyCode::Char('g') => {
-                self.pending_g = true;
-                None
-            }
-            KeyCode::Char('G') => {
-                self.move_selection_to_bottom();
-                None
-            }
-            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
-                let step = self.half_page();
-                self.move_selection_down_by(step);
-                None
-            }
-            KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
-                let step = self.half_page();
-                self.move_selection_up_by(step);
-                None
-            }
             KeyCode::Enter => {
                 let connection = self.connections.get(self.selected).cloned()?;
                 self.connect_epoch += 1;
