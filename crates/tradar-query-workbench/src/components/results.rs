@@ -10,12 +10,17 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::query_driver::QueryResult;
 
-#[derive(Default)]
 pub struct ResultsComponent {
     pub last_result: Option<QueryResult>,
     pub last_error: Option<String>,
     pub selected: usize,
     visible_height: usize,
+}
+
+impl Default for ResultsComponent {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResultsComponent {
