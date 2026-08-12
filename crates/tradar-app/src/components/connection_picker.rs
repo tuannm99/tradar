@@ -107,6 +107,10 @@ impl Component for ConnectionPickerComponent {
                 Some(Action::OpenRequested {
                     connection,
                     epoch: self.connect_epoch,
+                    // Placeholder -- RootComponent overwrites this with the
+                    // real tab index right after this call returns, since a
+                    // lone picker has no notion of which tab it belongs to.
+                    tab: 0,
                 })
             }
             _ => None,
@@ -306,7 +310,9 @@ mod tests {
         let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         match action {
-            Some(Action::OpenRequested { connection, epoch }) => {
+            Some(Action::OpenRequested {
+                connection, epoch, ..
+            }) => {
                 assert_eq!(connection.name, "local-postgres");
                 assert_eq!(epoch, 1);
             }
@@ -348,6 +354,7 @@ mod tests {
         let next = picker.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: 1,
+            tab: 0,
         });
 
         assert_eq!(picker.last_error.as_deref(), Some("connection refused"));
@@ -374,6 +381,7 @@ mod tests {
         picker.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: 1,
+            tab: 0,
         });
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();

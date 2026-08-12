@@ -1,12 +1,16 @@
-//! The component tree: `RootComponent` switches between the connection
-//! picker and whatever `Screen` a connector's `Session` builds, routing
-//! keys/actions/ticks to whichever is active. This module — like every
-//! file under `components/` — must never depend on a concrete driver
-//! module; only `main.rs` and `connectors.rs` may.
+//! The component tree: `RootComponent` is a lightweight workspace of tabs,
+//! each independently either on the connection picker or an active
+//! connector `Screen`, routing keys/actions/ticks to whichever tab is
+//! active. This module -- like every file under `components/` -- must never
+//! depend on a concrete driver module; only `main.rs` and `connectors.rs`
+//! may.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use tradar_core::action::{Action, Component};
 use tradar_core::storage::SavedConnection;
@@ -18,29 +22,118 @@ pub enum ScreenSlot {
     Active(Box<dyn Component>),
 }
 
-pub struct RootComponent {
+pub struct Tab {
     pub screen: ScreenSlot,
     pub connection_picker: ConnectionPickerComponent,
+    /// The name of the connection backing `screen` while it's `Active` --
+    /// kept here (rather than read off `screen`) purely so the tab bar has
+    /// something to label the tab with; `Component` has no generic "title"
+    /// method and adding one just for this would leak a UI concern into
+    /// every connector's `Screen`.
+    pub title: Option<String>,
+}
+
+impl Tab {
+    fn new(connections: Vec<SavedConnection>) -> Self {
+        Self {
+            screen: ScreenSlot::ConnectionPicker,
+            connection_picker: ConnectionPickerComponent::new(connections),
+            title: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.title.clone().unwrap_or_else(|| "picker".to_string())
+    }
+}
+
+pub struct RootComponent {
+    pub tabs: Vec<Tab>,
+    pub active_tab: usize,
     pub should_quit: bool,
+    /// The saved connections every new tab's picker starts out showing.
+    connections: Vec<SavedConnection>,
 }
 
 impl RootComponent {
     pub fn new(connections: Vec<SavedConnection>) -> Self {
         Self {
-            screen: ScreenSlot::ConnectionPicker,
-            connection_picker: ConnectionPickerComponent::new(connections),
+            tabs: vec![Tab::new(connections.clone())],
+            active_tab: 0,
             should_quit: false,
+            connections,
         }
+    }
+
+    fn new_tab(&mut self) {
+        self.tabs.push(Tab::new(self.connections.clone()));
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// A no-op when only one tab is left -- closing the last tab has no
+    /// sensible target to fall back to, and `q` from the picker is already
+    /// the way to quit the app.
+    fn close_active_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.tabs.remove(self.active_tab);
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+    }
+
+    fn next_tab(&mut self) {
+        self.active_tab = (self.active_tab + 1).min(self.tabs.len() - 1);
+    }
+
+    fn prev_tab(&mut self) {
+        self.active_tab = self.active_tab.saturating_sub(1);
     }
 }
 
 impl Component for RootComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
-        match &mut self.screen {
-            ScreenSlot::ConnectionPicker => {
-                self.connection_picker.handle_key_event(code, modifiers)
+        match code {
+            KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.new_tab();
+                return None;
             }
+            KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.close_active_tab();
+                return None;
+            }
+            KeyCode::Right if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.next_tab();
+                return None;
+            }
+            KeyCode::Left if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.prev_tab();
+                return None;
+            }
+            _ => {}
+        }
+
+        let tab_index = self.active_tab;
+        let action = match &mut self.tabs[tab_index].screen {
+            ScreenSlot::ConnectionPicker => self.tabs[tab_index]
+                .connection_picker
+                .handle_key_event(code, modifiers),
             ScreenSlot::Active(screen) => screen.handle_key_event(code, modifiers),
+        };
+
+        // `ConnectionPickerComponent` has no notion of tabs, so it fills
+        // `tab` with a placeholder -- overwrite it with the real index here,
+        // the one place that actually knows it.
+        match action {
+            Some(Action::OpenRequested {
+                connection, epoch, ..
+            }) => Some(Action::OpenRequested {
+                connection,
+                epoch,
+                tab: tab_index,
+            }),
+            other => other,
         }
     }
 
@@ -50,45 +143,92 @@ impl Component for RootComponent {
                 self.should_quit = true;
                 None
             }
-            Action::Opened { screen, epoch, .. } => {
+            Action::Opened {
+                connection,
+                screen,
+                epoch,
+                tab,
+            } => {
                 // A reply from a connect attempt that's been superseded by a
-                // newer one -- drop it instead of silently switching the
-                // active screen back.
-                if epoch == self.connection_picker.connect_epoch {
-                    self.screen = ScreenSlot::Active(screen);
+                // newer one on the same tab -- drop it instead of silently
+                // switching that tab's screen back. `tab` may also no
+                // longer exist at all if the user closed it while this
+                // connect was in flight; `get_mut` makes that a no-op too.
+                if let Some(t) = self.tabs.get_mut(tab)
+                    && epoch == t.connection_picker.connect_epoch
+                {
+                    t.title = Some(connection.name.clone());
+                    t.screen = ScreenSlot::Active(screen);
                 }
                 None
             }
-            Action::OpenFailed { error, epoch } => {
-                if epoch == self.connection_picker.connect_epoch {
-                    self.connection_picker
-                        .update(Action::OpenFailed { error, epoch });
+            Action::OpenFailed { error, epoch, tab } => {
+                if let Some(t) = self.tabs.get_mut(tab)
+                    && epoch == t.connection_picker.connect_epoch
+                {
+                    t.connection_picker.last_error = Some(error);
                 }
                 None
             }
             Action::BackToPicker => {
-                self.screen = ScreenSlot::ConnectionPicker;
+                let tab = &mut self.tabs[self.active_tab];
+                tab.screen = ScreenSlot::ConnectionPicker;
+                tab.title = None;
                 None
             }
-            other => match &mut self.screen {
-                ScreenSlot::ConnectionPicker => self.connection_picker.update(other),
-                ScreenSlot::Active(screen) => screen.update(other),
-            },
+            other => {
+                let tab = &mut self.tabs[self.active_tab];
+                match &mut tab.screen {
+                    ScreenSlot::ConnectionPicker => tab.connection_picker.update(other),
+                    ScreenSlot::Active(screen) => screen.update(other),
+                }
+            }
         }
     }
 
     fn tick(&mut self) {
-        if let ScreenSlot::Active(screen) = &mut self.screen {
+        if let ScreenSlot::Active(screen) = &mut self.tabs[self.active_tab].screen {
             screen.tick();
         }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        match &mut self.screen {
-            ScreenSlot::ConnectionPicker => self.connection_picker.draw(frame, area),
-            ScreenSlot::Active(screen) => screen.draw(frame, area),
+        // Single-tab (the common case) draws exactly like before this
+        // feature existed -- no tab bar, no row spent on it.
+        let content_area = if self.tabs.len() > 1 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(area);
+            draw_tab_bar(frame, chunks[0], &self.tabs, self.active_tab);
+            chunks[1]
+        } else {
+            area
+        };
+
+        let tab = &mut self.tabs[self.active_tab];
+        match &mut tab.screen {
+            ScreenSlot::ConnectionPicker => tab.connection_picker.draw(frame, content_area),
+            ScreenSlot::Active(screen) => screen.draw(frame, content_area),
         }
     }
+}
+
+fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) {
+    let spans: Vec<Span> = tabs
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            let label = format!(" {}: {} ", i + 1, tab.label());
+            let style = if i == active {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Span::styled(label, style)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 pub mod connection_picker;
@@ -140,11 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn starts_on_the_connection_picker_with_nothing_selected() {
+    fn starts_with_a_single_tab_on_the_connection_picker() {
         let root = root();
 
-        assert!(matches!(root.screen, ScreenSlot::ConnectionPicker));
-        assert_eq!(root.connection_picker.selected, 0);
+        assert_eq!(root.tabs.len(), 1);
+        assert_eq!(root.active_tab, 0);
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::ConnectionPicker));
+        assert_eq!(root.tabs[0].connection_picker.selected, 0);
     }
 
     #[test]
@@ -158,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn opened_switches_to_the_active_screen() {
+    fn opened_switches_to_the_active_screen_and_sets_the_tab_title() {
         let mut root = root();
         let connection = connections()[1].clone();
         let dropped = Rc::new(Cell::new(false));
@@ -167,13 +309,15 @@ mod tests {
             connection,
             screen: Box::new(FakeScreen { dropped }),
             epoch: 0,
+            tab: 0,
         });
 
-        assert!(matches!(root.screen, ScreenSlot::Active(_)));
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::Active(_)));
+        assert_eq!(root.tabs[0].title.as_deref(), Some("local-postgres"));
     }
 
     #[test]
-    fn back_to_picker_returns_to_the_connection_picker() {
+    fn back_to_picker_returns_the_active_tab_to_the_connection_picker() {
         let mut root = root();
         root.update(Action::Opened {
             connection: connections()[0].clone(),
@@ -181,11 +325,13 @@ mod tests {
                 dropped: Rc::new(Cell::new(false)),
             }),
             epoch: 0,
+            tab: 0,
         });
 
         root.update(Action::BackToPicker);
 
-        assert!(matches!(root.screen, ScreenSlot::ConnectionPicker));
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::ConnectionPicker));
+        assert!(root.tabs[0].title.is_none());
     }
 
     #[test]
@@ -195,10 +341,11 @@ mod tests {
         root.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: 0,
+            tab: 0,
         });
 
         assert_eq!(
-            root.connection_picker.last_error.as_deref(),
+            root.tabs[0].connection_picker.last_error.as_deref(),
             Some("connection refused")
         );
     }
@@ -210,15 +357,11 @@ mod tests {
         let conn_b = connections()[1].clone();
 
         // Connect to A, then connect to B before A resolves -- mirrors the
-        // real race: both connect attempts are in flight at once.
-        let request_a = root
-            .connection_picker
-            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
-        root.connection_picker
-            .handle_key_event(KeyCode::Down, KeyModifiers::NONE);
-        let request_b = root
-            .connection_picker
-            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        // real race: both connect attempts are in flight at once, both on
+        // the same tab.
+        let request_a = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        let request_b = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
             panic!("expected OpenRequested for A");
@@ -237,8 +380,9 @@ mod tests {
                 dropped: dropped_b.clone(),
             }),
             epoch: epoch_b,
+            tab: 0,
         });
-        assert!(matches!(root.screen, ScreenSlot::Active(_)));
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::Active(_)));
 
         // A's stale reply arrives after -- it must not override B.
         root.update(Action::Opened {
@@ -247,9 +391,10 @@ mod tests {
                 dropped: dropped_a.clone(),
             }),
             epoch: epoch_a,
+            tab: 0,
         });
 
-        assert!(matches!(root.screen, ScreenSlot::Active(_)));
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::Active(_)));
         assert!(
             dropped_a.get(),
             "a stale Opened for a superseded connect attempt must be dropped immediately, \
@@ -265,13 +410,9 @@ mod tests {
     fn a_stale_open_failed_from_a_superseded_connect_attempt_is_ignored() {
         let mut root = root();
 
-        let request_a = root
-            .connection_picker
-            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
-        root.connection_picker
-            .handle_key_event(KeyCode::Down, KeyModifiers::NONE);
-        root.connection_picker
-            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let request_a = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
             panic!("expected OpenRequested for A");
@@ -280,10 +421,11 @@ mod tests {
         root.update(Action::OpenFailed {
             error: "connection refused".to_string(),
             epoch: epoch_a,
+            tab: 0,
         });
 
         assert_eq!(
-            root.connection_picker.last_error, None,
+            root.tabs[0].connection_picker.last_error, None,
             "a stale OpenFailed for a superseded connect attempt must not surface an error"
         );
     }
@@ -298,5 +440,127 @@ mod tests {
         );
 
         assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    #[test]
+    fn handle_key_event_stamps_open_requested_with_the_active_tab_index() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+
+        let action = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let Some(Action::OpenRequested { tab, .. }) = action else {
+            panic!("expected OpenRequested");
+        };
+        assert_eq!(tab, 1);
+    }
+
+    #[test]
+    fn ctrl_t_opens_a_new_tab_and_makes_it_active() {
+        let mut root = root();
+
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+        assert_eq!(root.tabs.len(), 2);
+        assert_eq!(root.active_tab, 1);
+        assert!(matches!(root.tabs[1].screen, ScreenSlot::ConnectionPicker));
+    }
+
+    #[test]
+    fn ctrl_w_closes_the_active_tab_but_never_the_last_one() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.tabs.len(), 2);
+
+        root.handle_key_event(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(root.tabs.len(), 1);
+        assert_eq!(root.active_tab, 0);
+
+        root.handle_key_event(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(root.tabs.len(), 1, "must never close the last tab");
+    }
+
+    #[test]
+    fn ctrl_left_and_ctrl_right_switch_between_tabs() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 2);
+
+        root.handle_key_event(KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+
+        root.handle_key_event(KeyCode::Left, KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 0, "should clamp, not go negative");
+
+        root.handle_key_event(KeyCode::Right, KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+    }
+
+    #[test]
+    fn opened_for_a_background_tab_does_not_switch_the_active_tab() {
+        let mut root = root();
+        // Tab 0 starts connecting to A ...
+        let request_a = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected OpenRequested for A");
+        };
+        // ... then the user opens a second tab and stays there while A is
+        // still connecting in the background.
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+
+        root.update(Action::Opened {
+            connection: connections()[0].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: epoch_a,
+            tab: 0,
+        });
+
+        assert_eq!(root.active_tab, 1, "resolving tab 0 must not steal focus");
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::Active(_)));
+        assert!(matches!(root.tabs[1].screen, ScreenSlot::ConnectionPicker));
+    }
+
+    #[test]
+    fn closing_a_tab_while_its_connect_is_in_flight_drops_the_reply_harmlessly() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 2);
+
+        let request = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Action::OpenRequested {
+            epoch,
+            tab: tab_idx,
+            ..
+        }) = request
+        else {
+            panic!("expected OpenRequested");
+        };
+        assert_eq!(tab_idx, 2);
+
+        root.handle_key_event(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(
+            root.tabs.len(),
+            2,
+            "tab 2 (the one still connecting) is gone"
+        );
+
+        // `tab: 2` no longer refers to any tab at all -- must not panic.
+        root.update(Action::Opened {
+            connection: connections()[0].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch,
+            tab: tab_idx,
+        });
+
+        assert_eq!(root.tabs.len(), 2);
     }
 }

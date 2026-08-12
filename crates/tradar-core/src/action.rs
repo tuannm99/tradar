@@ -16,15 +16,25 @@ pub enum Action {
     OpenRequested {
         connection: SavedConnection,
         epoch: u64,
+        /// Which tab issued this request. Set by the originating
+        /// `ConnectionPickerComponent` to a placeholder and overwritten by
+        /// `RootComponent` with the real tab index -- see
+        /// `RootComponent::handle_key_event` in `tradar-app`. Carried end to
+        /// end through `main.rs`'s connect task and back so a reply lands on
+        /// the right tab even if the user switched tabs while it was in
+        /// flight.
+        tab: usize,
     },
     Opened {
         connection: SavedConnection,
         screen: Box<dyn Component>,
         epoch: u64,
+        tab: usize,
     },
     OpenFailed {
         error: String,
         epoch: u64,
+        tab: usize,
     },
     BackToPicker,
 }

@@ -49,10 +49,12 @@ enum ConnectOutcome {
         connection: SavedConnection,
         session: Box<dyn Session>,
         epoch: u64,
+        tab: usize,
     },
     Failed {
         error: String,
         epoch: u64,
+        tab: usize,
     },
 }
 
@@ -133,8 +135,12 @@ async fn run(
 
         while let Ok(action) = action_rx.try_recv() {
             match action {
-                Action::OpenRequested { connection, epoch } => {
-                    spawn_connect(registry.clone(), connect_tx.clone(), connection, epoch);
+                Action::OpenRequested {
+                    connection,
+                    epoch,
+                    tab,
+                } => {
+                    spawn_connect(registry.clone(), connect_tx.clone(), connection, epoch, tab);
                 }
                 other => {
                     if let Some(next) = root.update(other) {
@@ -150,16 +156,18 @@ async fn run(
                     connection,
                     session,
                     epoch,
+                    tab,
                 } => {
                     let screen = session.build_screen(action_tx.clone());
                     root.update(Action::Opened {
                         connection,
                         screen,
                         epoch,
+                        tab,
                     });
                 }
-                ConnectOutcome::Failed { error, epoch } => {
-                    root.update(Action::OpenFailed { error, epoch });
+                ConnectOutcome::Failed { error, epoch, tab } => {
+                    root.update(Action::OpenFailed { error, epoch, tab });
                 }
             }
         }
@@ -182,6 +190,7 @@ fn spawn_connect(
     connect_tx: mpsc::UnboundedSender<ConnectOutcome>,
     connection: SavedConnection,
     epoch: u64,
+    tab: usize,
 ) {
     tokio::spawn(async move {
         let Some(connector) = registry.get(&connection.driver) else {
@@ -191,6 +200,7 @@ fn spawn_connect(
                     connection.driver
                 ),
                 epoch,
+                tab,
             });
             return;
         };
@@ -200,12 +210,14 @@ fn spawn_connect(
                     connection,
                     session,
                     epoch,
+                    tab,
                 });
             }
             Err(e) => {
                 let _ = connect_tx.send(ConnectOutcome::Failed {
                     error: e.to_string(),
                     epoch,
+                    tab,
                 });
             }
         }
