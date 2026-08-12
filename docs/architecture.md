@@ -11,7 +11,7 @@ Cargo.toml                    [workspace], default-members = ["crates/tradar-app
 crates/
   tradar-core/
     src/
-      action.rs               — enum Action đóng (5 variant) + trait Component (có tick() mặc định no-op)
+      action.rs               — enum Action đóng (5 variant, 3 trong đó mang thêm field `tab: usize` từ 2026-08-12 — xem "Sessions/workspace state" trong docs/backlog.md) + trait Component (có tick() mặc định no-op)
       capability.rs           — enum Capability
       storage/                — saved connections dạng TOML (dùng crate `directories` để lấy config path); driver: String (connector id)
       config/                — chỗ dành sẵn cho việc load app config; chưa dùng
@@ -31,7 +31,7 @@ crates/
       main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 5 connector(); event loop:
                                     crossterm input -> Component actions -> spawn Connector::connect -> Session -> Screen
       components/
-        mod.rs                — RootComponent: ScreenSlot::ConnectionPicker | Active(Box<dyn Component>)
+        mod.rs                — RootComponent: tabs: Vec<Tab> (mỗi Tab: ScreenSlot::ConnectionPicker | Active(Box<dyn Component>) + connection_picker riêng + title) + active_tab
         connection_picker.rs  — ConnectionPickerComponent
 ```
 
@@ -287,7 +287,7 @@ Nêu ra trong lúc review thiết kế, chủ đích để ngoài shape mục ti
 - **Lifecycle hook tường minh (`on_open`, `on_close`, `suspend`, `resume`, `dispose`).** Xem lại khi một connector giữ một resource cần shutdown có kiểm soát thay vì dựa vào `Drop` — vd một Kafka consumer cần rời group sạch sẽ.
 - **`Capability` dạng bitflags thay vì enum thuần.** Xem lại nếu số lượng variant lớn tới mức (vài chục) một slice `&'static [Capability]` trở nên cồng kềnh so với kiểu flags.
 - **Command pattern (`enum Command` gửi từ Screen tới Session) thay vì gọi method đồng bộ trực tiếp.** Xem lại nếu một tính năng cụ thể cần intercept/replay command — undo/redo, macro, session recording — hiện chưa có cái nào được lên kế hoạch.
-- **`Workspace → Tab → Screen` thay vì một `ScreenSlot::Active(Box<dyn Component>)` duy nhất.** Xem lại khi multi-tab hoặc split-view (vd hai connection mở song song) trở thành một tính năng thực sự được lên kế hoạch — nó đang ở backlog dưới mục "Sessions/workspace state" nhưng chưa được scope. (Được đề xuất lại 2026-08-08 như một phần của một kiến trúc lớn hơn — xem mục dưới; vẫn giữ nguyên quyết định gác lại vì lý do cũ chưa đổi.)
+- ~~**`Workspace → Tab → Screen` thay vì một `ScreenSlot::Active(Box<dyn Component>)` duy nhất.**~~ Đã làm (2026-08-12), theo hướng thực dụng chứ không đúng nguyên văn: không có type `Workspace` mới, `RootComponent` (`crates/tradar-app/src/components/mod.rs`) đóng vai trò đó, đổi từ một `screen`/`connection_picker` sang `tabs: Vec<Tab>` + `active_tab: usize` (`Tab` gồm `screen: ScreenSlot`, `connection_picker` riêng, và `title` để tab bar có gì hiển thị). Xem chi tiết đầy đủ ở mục "Sessions/workspace state" trong `docs/backlog.md`. Split-view (nhiều tab hiển thị cùng lúc, không chỉ chuyển qua lại) vẫn chưa làm — xem lại nếu thực sự cần.
 - **`ConnectorFactory` thay vì trait object `Connector` trực tiếp trong registry.** Xem lại nếu một connector cần khởi tạo non-singleton (vd instance riêng cho từng tab với config khác nhau), hiện chưa có gì cần việc này.
 
 **Ghi nhận thêm 2026-08-08** — một buổi review kiến trúc rộng hơn đề xuất tổ chức lại toàn bộ dự án theo hướng "Engineering Workbench" thay vì theo từng database: thêm layer `Runtime` (workspace/scheduler/lifecycle/background task) tách khỏi App, tách UI thành `tradar-ui` (widget dùng chung) + `tradar-editor` (vim/textarea/cursor/completion) tách khỏi `tradar-query-workbench`, một loạt crate hạ tầng dùng chung (`tradar-table`, `tradar-tree`, `tradar-json`, `tradar-log`, `tradar-terminal`, `tradar-theme`, `tradar-keymap`, `tradar-command`, `tradar-icons`, `tradar-search`, `tradar-utils`, `tradar-plugin`), một AI service độc lập gắn vào editor, và các connector mới ngoài phạm vi hiện tại (Kubernetes, Docker, SSH). Tất cả các ý này **chưa được đưa vào shape mục tiêu ở trên** — cùng lý do như các mục phía trên: chưa có connector/tính năng cụ thể nào cần chúng, và phần lớn còn chưa nằm trong phạm vi v1/planned của `CLAUDE.md` hay `docs/backlog.md`. Ghi lại ở đây để trace, không phải để scaffold ngay:
