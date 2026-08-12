@@ -168,15 +168,25 @@ async fn run(
     terminal.draw(|frame| root.draw(frame, frame.area()))?;
 
     while !root.should_quit {
+        // Only a key press, a channel message, or a tick that reports a
+        // real change is worth a redraw -- otherwise `terminal.draw` would
+        // re-diff and (mostly no-op) repaint the whole widget tree up to
+        // 20 times a second even while the screen is sitting perfectly
+        // still.
+        let mut dirty = false;
+
         if event::poll(std::time::Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
-            && let Some(action) = root.handle_key_event(key.code, key.modifiers)
         {
-            let _ = action_tx.send(action);
+            dirty = true;
+            if let Some(action) = root.handle_key_event(key.code, key.modifiers) {
+                let _ = action_tx.send(action);
+            }
         }
 
         while let Ok(action) = action_rx.try_recv() {
+            dirty = true;
             match action {
                 Action::OpenRequested {
                     connection,
@@ -194,6 +204,7 @@ async fn run(
         }
 
         while let Ok(outcome) = connect_rx.try_recv() {
+            dirty = true;
             match outcome {
                 ConnectOutcome::Opened {
                     connection,
@@ -217,11 +228,12 @@ async fn run(
 
         // Drains whatever the active screen's `Session` has queued up (e.g.
         // a completed query) -- see "Screen không bao giờ làm IO" in
-        // docs/architecture.md. Always redrawn afterwards, since a tick can
-        // change state with no accompanying key press or channel message.
-        root.tick();
+        // docs/architecture.md.
+        if root.tick() {
+            dirty = true;
+        }
 
-        if !root.should_quit {
+        if dirty && !root.should_quit {
             terminal.draw(|frame| root.draw(frame, frame.area()))?;
         }
     }

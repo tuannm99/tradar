@@ -22,7 +22,9 @@ pub trait Session: Send + Sync {
     /// Bounded per call -- see "Screen không bao giờ làm IO" in
     /// docs/architecture.md for why an unbounded drain here would starve
     /// rendering under a firehose-shaped connector (Kafka, a tail, ...).
-    fn tick(&mut self);
+    /// Returns whether anything changed that's worth a redraw, so the event
+    /// loop in `main.rs` can skip redrawing an unchanged screen.
+    fn tick(&mut self) -> bool;
 
     fn build_screen(self: Box<Self>, action_tx: UnboundedSender<Action>) -> Box<dyn Component>;
 }

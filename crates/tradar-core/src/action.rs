@@ -42,6 +42,11 @@ pub enum Action {
 pub trait Component {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action>;
     fn update(&mut self, action: Action) -> Option<Action>;
-    fn tick(&mut self) {}
+    /// Returns whether anything changed that's worth a redraw. The default
+    /// (no-op, nothing changed) covers every `Component` that only ever
+    /// changes state in response to a key press or an `Action`.
+    fn tick(&mut self) -> bool {
+        false
+    }
     fn draw(&mut self, frame: &mut Frame, area: Rect);
 }

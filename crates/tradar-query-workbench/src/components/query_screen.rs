@@ -327,13 +327,16 @@ impl Component for QueryScreenComponent {
         None
     }
 
-    fn tick(&mut self) {
-        self.engine.tick();
-        match self.engine.take_outcome() {
-            Some(QueryOutcome::Completed { result }) => self.results.set_result(result),
-            Some(QueryOutcome::Failed { error }) => self.results.set_error(error),
-            None => {}
+    fn tick(&mut self) -> bool {
+        let outcome_arrived = self.engine.tick();
+        if outcome_arrived {
+            match self.engine.take_outcome() {
+                Some(QueryOutcome::Completed { result }) => self.results.set_result(result),
+                Some(QueryOutcome::Failed { error }) => self.results.set_error(error),
+                None => {}
+            }
         }
+        outcome_arrived
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {

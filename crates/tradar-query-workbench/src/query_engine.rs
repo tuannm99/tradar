@@ -117,17 +117,20 @@ impl QueryEngine {
 }
 
 impl Session for QueryEngine {
-    fn tick(&mut self) {
+    fn tick(&mut self) -> bool {
+        let mut changed = false;
         for _ in 0..MAX_DRAIN_PER_TICK {
             match self.outcome_rx.try_recv() {
                 Ok(tagged) if tagged.epoch == self.epoch => {
                     self.pending = false;
                     self.last_outcome = Some(tagged.outcome);
+                    changed = true;
                 }
                 Ok(_stale) => {}
                 Err(_) => break,
             }
         }
+        changed
     }
 
     fn build_screen(self: Box<Self>, action_tx: UnboundedSender<Action>) -> Box<dyn Component> {

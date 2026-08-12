@@ -236,9 +236,11 @@ impl Component for RootComponent {
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> bool {
         if let ScreenSlot::Active(screen) = &mut self.tabs[self.active_tab].screen {
-            screen.tick();
+            screen.tick()
+        } else {
+            false
         }
     }
 
