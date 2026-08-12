@@ -18,7 +18,10 @@ use tokio::sync::mpsc;
 use tradar_app::components::RootComponent;
 use tradar_connector_api::{Connector, Session};
 use tradar_core::action::{Action, Component};
-use tradar_core::storage::{ConnectionStore, SavedConnection, default_connections_path};
+use tradar_core::storage::{
+    ConnectionStore, SavedConnection, SessionState, SessionStore, default_connections_path,
+    default_session_path,
+};
 
 /// Every connector compiled into this binary. Adding a connector means
 /// adding a dependency line in `Cargo.toml` and a line here -- nothing else
@@ -74,10 +77,26 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let session_store = SessionStore::at(default_session_path()?);
+    let session_state = session_store.load().unwrap_or_default();
+
     let registry = Arc::new(registry());
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let (connect_tx, connect_rx) = mpsc::unbounded_channel();
     let mut root = RootComponent::new(connections);
+
+    // Reconnect whatever tabs were open (and connected) when the app last
+    // quit, same as a user hand-picking each one from the picker again.
+    for action in root.restore_tabs(&session_state) {
+        if let Action::OpenRequested {
+            connection,
+            epoch,
+            tab,
+        } = action
+        {
+            spawn_connect(registry.clone(), connect_tx.clone(), connection, epoch, tab);
+        }
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -110,7 +129,31 @@ async fn main() -> anyhow::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    // Best-effort -- a failure to persist the session (e.g. an unwritable
+    // config dir) must never mask the app's actual exit result.
+    let _ = session_store.save(&session_state_of(&root));
+
     result
+}
+
+/// Which tabs were `Active` (connected) when the app is quitting, and which
+/// of those was focused -- the shape `SessionStore::save` persists so the
+/// next run can reconnect them. Tabs still sitting on the picker have
+/// nothing worth remembering.
+fn session_state_of(root: &RootComponent) -> SessionState {
+    let mut tabs = Vec::new();
+    let mut active_tab = None;
+    for (i, tab) in root.tabs.iter().enumerate() {
+        let Some(name) = &tab.title else { continue };
+        if i == root.active_tab {
+            active_tab = Some(tabs.len());
+        }
+        tabs.push(name.clone());
+    }
+    SessionState {
+        active_tab: active_tab.unwrap_or(0),
+        tabs,
+    }
 }
 
 async fn run(

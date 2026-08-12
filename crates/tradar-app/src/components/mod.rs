@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use tradar_core::action::{Action, Component};
-use tradar_core::storage::SavedConnection;
+use tradar_core::storage::{SavedConnection, SessionState};
 
 use crate::components::connection_picker::ConnectionPickerComponent;
 
@@ -90,11 +90,61 @@ impl RootComponent {
     fn prev_tab(&mut self) {
         self.active_tab = self.active_tab.saturating_sub(1);
     }
+
+    /// Recreates tabs for a previously-saved session, each immediately
+    /// requesting a connect to its saved connection -- synthesizing the
+    /// exact `Action::OpenRequested` a real `Enter` keypress on that tab's
+    /// picker would produce, so `main.rs` can hand it to `spawn_connect`
+    /// the same way it does for user-driven connects. A name from `session`
+    /// that no longer matches any saved connection is silently skipped.
+    pub fn restore_tabs(&mut self, session: &SessionState) -> Vec<Action> {
+        let mut requests = Vec::new();
+        let mut restored_any = false;
+        for name in &session.tabs {
+            let Some(index) = self.connections.iter().position(|c| &c.name == name) else {
+                continue;
+            };
+            let tab_index = if restored_any {
+                self.new_tab();
+                self.tabs.len() - 1
+            } else {
+                0
+            };
+            restored_any = true;
+            self.tabs[tab_index].connection_picker.selected = index;
+            let action = self.tabs[tab_index]
+                .connection_picker
+                .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+            if let Some(Action::OpenRequested {
+                connection, epoch, ..
+            }) = action
+            {
+                requests.push(Action::OpenRequested {
+                    connection,
+                    epoch,
+                    tab: tab_index,
+                });
+            }
+        }
+        if restored_any {
+            self.active_tab = session.active_tab.min(self.tabs.len() - 1);
+        }
+        requests
+    }
 }
 
 impl Component for RootComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         match code {
+            // Available from any screen, not just the picker's `q` --
+            // otherwise quitting while a tab is `Active` requires `Esc`
+            // back to the picker first, which clears that tab's title
+            // (and with it, whether the next run's session save even
+            // remembers it was connected).
+            KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+                return None;
+            }
             KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.new_tab();
                 return None;
@@ -457,6 +507,28 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_q_quits_even_while_a_tab_is_active_not_just_from_the_picker() {
+        let mut root = root();
+        root.update(Action::Opened {
+            connection: connections()[0].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: 0,
+            tab: 0,
+        });
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::Active(_)));
+
+        root.handle_key_event(KeyCode::Char('q'), KeyModifiers::CONTROL);
+
+        assert!(root.should_quit);
+        assert!(
+            matches!(root.tabs[0].screen, ScreenSlot::Active(_)),
+            "quitting must not first bounce the tab back to the picker"
+        );
+    }
+
+    #[test]
     fn ctrl_t_opens_a_new_tab_and_makes_it_active() {
         let mut root = root();
 
@@ -562,5 +634,67 @@ mod tests {
         });
 
         assert_eq!(root.tabs.len(), 2);
+    }
+
+    #[test]
+    fn restore_tabs_creates_one_tab_per_known_connection_and_returns_requests() {
+        let mut root = root();
+
+        let requests = root.restore_tabs(&SessionState {
+            active_tab: 1,
+            tabs: vec!["local-sqlite".to_string(), "local-postgres".to_string()],
+        });
+
+        assert_eq!(root.tabs.len(), 2);
+        assert_eq!(root.active_tab, 1);
+        assert_eq!(requests.len(), 2);
+        let Action::OpenRequested {
+            connection, tab, ..
+        } = &requests[0]
+        else {
+            panic!("expected OpenRequested");
+        };
+        assert_eq!(connection.name, "local-sqlite");
+        assert_eq!(*tab, 0);
+        let Action::OpenRequested {
+            connection, tab, ..
+        } = &requests[1]
+        else {
+            panic!("expected OpenRequested");
+        };
+        assert_eq!(connection.name, "local-postgres");
+        assert_eq!(*tab, 1);
+    }
+
+    #[test]
+    fn restore_tabs_skips_names_that_no_longer_match_a_saved_connection() {
+        let mut root = root();
+
+        let requests = root.restore_tabs(&SessionState {
+            active_tab: 0,
+            tabs: vec!["renamed-or-deleted".to_string(), "local-sqlite".to_string()],
+        });
+
+        assert_eq!(root.tabs.len(), 1);
+        assert_eq!(requests.len(), 1);
+        let Action::OpenRequested { connection, .. } = &requests[0] else {
+            panic!("expected OpenRequested");
+        };
+        assert_eq!(connection.name, "local-sqlite");
+    }
+
+    #[test]
+    fn restore_tabs_with_no_matches_leaves_the_single_default_tab_untouched() {
+        let mut root = root();
+
+        let requests = root.restore_tabs(&SessionState {
+            active_tab: 0,
+            tabs: vec!["renamed-or-deleted".to_string()],
+        });
+
+        assert!(requests.is_empty());
+        assert_eq!(root.tabs.len(), 1);
+        assert_eq!(root.active_tab, 0);
+        assert!(matches!(root.tabs[0].screen, ScreenSlot::ConnectionPicker));
     }
 }
