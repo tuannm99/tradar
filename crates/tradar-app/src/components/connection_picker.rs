@@ -104,6 +104,9 @@ impl Component for ConnectionPickerComponent {
             KeyCode::Enter => {
                 let connection = self.connections.get(self.selected).cloned()?;
                 self.connect_epoch += 1;
+                // A stale error from a previous failed attempt must not
+                // keep showing once a new attempt is underway.
+                self.last_error = None;
                 Some(Action::OpenRequested {
                     connection,
                     epoch: self.connect_epoch,
@@ -345,6 +348,21 @@ mod tests {
         };
         assert_eq!(first_epoch, 1);
         assert_eq!(second_epoch, 2);
+    }
+
+    #[test]
+    fn a_new_connect_attempt_clears_a_stale_error_from_a_previous_one() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.update(Action::OpenFailed {
+            error: "connection refused".to_string(),
+            epoch: 1,
+            tab: 0,
+        });
+        assert!(picker.last_error.is_some());
+
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(picker.last_error, None);
     }
 
     #[test]
