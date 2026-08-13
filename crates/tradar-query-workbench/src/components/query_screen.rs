@@ -20,6 +20,7 @@ use tradar_core::ui;
 use tradar_core::vim_list::VimMove;
 
 use crate::components::completion::{CompletionPopup, CompletionSource};
+use crate::components::file_picker::{FilePickerComponent, PickerOutcome};
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
@@ -43,6 +44,8 @@ pub struct QueryScreenComponent {
     /// Half-finished two-key binding (the first `g` of `gg`).
     pending: Option<KeyPress>,
     prompt: Option<FilePromptComponent>,
+    /// The open-a-query overlay, when up.
+    picker: Option<FilePickerComponent>,
     last_path: Option<String>,
     history_picker: Option<HistoryPickerComponent>,
     /// Where the editor was last drawn, so a click there can focus it.
@@ -103,6 +106,7 @@ impl QueryScreenComponent {
             engine,
             pending: None,
             prompt: None,
+            picker: None,
             last_path: None,
             history_picker: None,
             editor_area: Rect::ZERO,
@@ -125,10 +129,52 @@ impl QueryScreenComponent {
     }
 
     fn open_prompt(&mut self, kind: PromptKind) {
-        self.prompt = Some(FilePromptComponent::new(
-            kind,
-            self.last_path.as_deref().unwrap_or(""),
-        ));
+        self.prompt = Some(FilePromptComponent::new(kind, &self.prompt_prefill()));
+    }
+
+    /// What the save/open prompt starts with: the file you last worked on,
+    /// shown by bare name when it's in the queries directory. The full path
+    /// would be technically the same target but fills the prompt with noise
+    /// you then have to delete to save under another name.
+    fn prompt_prefill(&self) -> String {
+        let Some(last) = self.last_path.as_deref() else {
+            return String::new();
+        };
+        tradar_core::storage::query_files()
+            .and_then(|files| {
+                std::path::Path::new(last)
+                    .strip_prefix(files.dir())
+                    .ok()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| last.to_string())
+    }
+
+    /// Opens the file picker, or falls back to a typed path when there's
+    /// no queries directory configured (tests, mainly).
+    fn open_file_picker(&mut self) {
+        match tradar_core::storage::query_files() {
+            Some(files) => {
+                self.picker = Some(FilePickerComponent::new(&files.recent(), files.dir()));
+            }
+            None => self.open_prompt(PromptKind::Open),
+        }
+    }
+
+    fn open_query_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        self.query_editor.set_text(&content);
+        self.remember(path);
+        Ok(())
+    }
+
+    /// Records a file as recently used, both in memory (to prefill the
+    /// next save prompt) and on disk.
+    fn remember(&mut self, path: &std::path::Path) {
+        self.last_path = Some(path.to_string_lossy().to_string());
+        if let Some(files) = tradar_core::storage::query_files() {
+            files.record(path);
+        }
     }
 
     fn open_history(&mut self) {
@@ -244,17 +290,24 @@ impl QueryScreenComponent {
         let Some(kind) = self.prompt.as_ref().map(|p| p.kind) else {
             return;
         };
+        // A bare name lands in the queries directory; anything path-shaped
+        // is used as typed.
+        let path = match tradar_core::storage::query_files() {
+            Some(files) => tradar_core::storage::resolve_query_path(&trimmed, files.dir()),
+            None => std::path::PathBuf::from(&trimmed),
+        };
         let result = match kind {
             PromptKind::Save => {
-                std::fs::write(&trimmed, self.query_editor.text()).map_err(|e| e.to_string())
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&path, self.query_editor.text()).map_err(|e| e.to_string())
             }
-            PromptKind::Open => std::fs::read_to_string(&trimmed)
-                .map(|content| self.query_editor.set_text(&content))
-                .map_err(|e| e.to_string()),
+            PromptKind::Open => self.open_query_file(&path),
         };
         match result {
             Ok(()) => {
-                self.last_path = Some(trimmed);
+                self.remember(&path);
                 self.prompt = None;
             }
             Err(e) => {
@@ -272,6 +325,22 @@ impl Component for QueryScreenComponent {
             match prompt.handle_key_event(code, modifiers) {
                 Some(PromptOutcome::Cancelled) => self.prompt = None,
                 Some(PromptOutcome::Confirmed(path)) => self.handle_prompt_confirmed(path),
+                None => {}
+            }
+            return None;
+        }
+
+        if let Some(picker) = self.picker.as_mut() {
+            match picker.handle_key_event(code, modifiers) {
+                Some(PickerOutcome::Cancelled) => self.picker = None,
+                Some(PickerOutcome::Chosen(path)) => {
+                    match self.open_query_file(&path) {
+                        Ok(()) => self.picker = None,
+                        // Keep the overlay up with the failure showing --
+                        // closing it would leave no sign the open failed.
+                        Err(e) => self.results.set_error(format!("{}: {e}", path.display())),
+                    }
+                }
                 None => {}
             }
             return None;
@@ -395,7 +464,7 @@ impl Component for QueryScreenComponent {
                 };
             }
             Command::SaveFile => self.open_prompt(PromptKind::Save),
-            Command::OpenFile => self.open_prompt(PromptKind::Open),
+            Command::OpenFile => self.open_file_picker(),
             Command::History => self.open_history(),
             Command::ExportCurl => self.export_curl(),
             Command::Yank => {
@@ -422,7 +491,7 @@ impl Component for QueryScreenComponent {
     fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
         // An overlay covers the screen, so a click behind it would act on
         // something the user can't even see.
-        if self.prompt.is_some() || self.history_picker.is_some() {
+        if self.prompt.is_some() || self.history_picker.is_some() || self.picker.is_some() {
             return None;
         }
 
@@ -502,6 +571,12 @@ impl Component for QueryScreenComponent {
         if let Some(completion) = &mut self.completion {
             let cursor = self.query_editor.cursor_screen_position(self.editor_area);
             completion.draw(frame, area, cursor);
+        }
+
+        if let Some(picker) = &mut self.picker {
+            let popup = ui::centered_rect(70, 60, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            picker.draw(frame, popup);
         }
 
         if let Some(prompt) = &self.prompt {
@@ -1186,8 +1261,83 @@ mod tests {
         assert!(prompt.error.is_some());
     }
 
+    /// The picker as `Ctrl+O` builds it, minus the process-global queries
+    /// directory -- which tests must not initialise, since a `OnceLock` set
+    /// by one test would leak into every other.
+    fn open_picker_on(screen: &mut QueryScreenComponent, dir: &std::path::Path) {
+        screen.picker = Some(FilePickerComponent::new(&[], dir));
+    }
+
+    #[test]
+    fn choosing_a_file_in_the_picker_loads_it_and_closes_the_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.sql"), "select * from users").unwrap();
+        let (mut screen, _rx) = screen();
+        screen.query_editor.insert_at_cursor("stale content");
+        open_picker_on(&mut screen, dir.path());
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.picker.is_none());
+        assert_eq!(screen.query_editor.text(), "select * from users");
+        assert_eq!(
+            screen.last_path.as_deref(),
+            dir.path().join("a.sql").to_str()
+        );
+    }
+
+    #[test]
+    fn a_picked_file_that_cannot_be_read_leaves_the_overlay_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut screen, _rx) = screen();
+        open_picker_on(&mut screen, dir.path());
+        // Nothing in the directory, so the typed text is opened as a path.
+        for c in "/does/not/exist.sql".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(
+            screen.picker.is_some(),
+            "closing it would leave no sign the open failed"
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_picker_without_touching_the_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.sql"), "select 1").unwrap();
+        let (mut screen, _rx) = screen();
+        screen.query_editor.insert_at_cursor("draft");
+        open_picker_on(&mut screen, dir.path());
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.picker.is_none());
+        assert_eq!(screen.query_editor.text(), "draft");
+    }
+
+    #[test]
+    fn keys_do_not_reach_the_editor_while_the_picker_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut screen, _rx) = screen();
+        screen.query_editor.insert_at_cursor("draft");
+        open_picker_on(&mut screen, dir.path());
+
+        screen.handle_key_event(KeyCode::Char('x'), KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.query_editor.text(),
+            "draft",
+            "'x' filters, not edits"
+        );
+    }
+
     #[test]
     fn ctrl_o_loads_a_file_into_the_editor() {
+        // Without a queries directory configured (as in tests) `Ctrl+O`
+        // falls back to asking for a path outright.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("query.sql");
         std::fs::write(&path, "select * from users").unwrap();

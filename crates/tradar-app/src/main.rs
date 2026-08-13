@@ -20,6 +20,7 @@ use tradar_app::components::RootComponent;
 use tradar_connector_api::{Connector, Session};
 use tradar_core::action::{Action, Component};
 use tradar_core::config;
+use tradar_core::storage;
 use tradar_core::storage::{
     ConnectionStore, SavedConnection, SessionState, SessionStore, TabState,
     default_connections_path, default_session_path,
@@ -73,6 +74,16 @@ async fn main() -> anyhow::Result<()> {
             "warning: ignoring {}: {e}\n         (using built-in theme and key bindings)",
             config_path.display()
         );
+    }
+
+    // Where ctrl-s writes and ctrl-o looks. Failing to work out the path
+    // (no home directory, say) just means the query screen falls back to
+    // asking for a full path.
+    if let (Ok(queries_dir), Ok(recent_path)) = (
+        storage::default_queries_dir(),
+        storage::default_recent_path(),
+    ) {
+        storage::init_query_files(queries_dir, storage::RecentStore::at(recent_path));
     }
 
     let store = ConnectionStore::at(default_connections_path()?);

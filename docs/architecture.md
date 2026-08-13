@@ -13,7 +13,9 @@ crates/
     src/
       action.rs               — enum Action đóng (6 variant, 3 trong đó mang thêm field `tab: usize` từ 2026-08-12 — xem "Sessions/workspace state" trong docs/backlog.md) + trait Component (có tick() mặc định trả false)
       capability.rs           — enum Capability
-      storage/                — saved connections + session state dạng TOML (dùng crate `directories` để lấy config path); driver: String (connector id)
+      storage/                — saved connections + session state + query file/recent list dạng TOML (dùng crate `directories` để lấy config path); driver: String (connector id).
+                                  QueryFiles (thư mục queries + recent list) là global của process như theme/keymap: screen được dựng bên trong connector nên luồn xuống
+                                  sẽ phải nhét "file để ở đâu" vào SPI connector; init_query_files() gọi một lần trong main.rs, query_files() trả None nếu chưa init
       config/                — load ~/.config/tradar/config.toml → theme + keymap (2026-08-13; trước đó là placeholder rỗng)
       theme.rs                — bảng màu theo vai trò + override từ config
       keymap.rs               — Command × Context, resolve phím → lệnh, remap từ config, hỗ trợ chuỗi 2 phím (gg)
@@ -25,7 +27,8 @@ crates/
     src/
       query_driver.rs         — trait QueryDriver (connect, list_schema, execute, export_curl) + SchemaInfo/QueryResult
       query_engine.rs         — QueryEngine: nhận một chuỗi query, giao cho QueryDriver đang active, lưu lịch sử; implement Session
-      components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/schema_sidebar.rs (struct state+draw thuần, do QueryScreenComponent compose)
+      components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/schema_sidebar.rs/completion.rs/file_prompt.rs/file_picker.rs/history_picker.rs
+                                  (struct state+draw thuần, do QueryScreenComponent compose và định tuyến phím tới, không tự implement Component)
   connectors/
     tradar-postgres/  tradar-sqlite/  tradar-elasticsearch/  tradar-redis/  tradar-mongo/
       src/lib.rs               — mỗi crate: struct driver (private, implement QueryDriver) + struct XConnector (private, implement Connector)

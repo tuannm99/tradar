@@ -64,6 +64,146 @@ impl TabState {
     }
 }
 
+/// Where saved queries live by default. Same directory as the other state
+/// files, so everything tradar owns is in one place.
+pub fn default_queries_dir() -> anyhow::Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
+        anyhow::anyhow!("could not determine a config directory for this platform")
+    })?;
+    Ok(dirs.config_dir().join("queries"))
+}
+
+/// Turns what the user typed in a save/open prompt into a path. A bare
+/// name goes in the queries directory and gains a `.sql` extension; a name
+/// containing a separator (or starting with `~`) is taken as a path and
+/// used as-is, so anyone who wants to save next to their project still
+/// can.
+pub fn resolve_query_path(input: &str, queries_dir: &std::path::Path) -> PathBuf {
+    let input = input.trim();
+    if input.contains('/') || input.contains('\\') || input.starts_with('~') {
+        return PathBuf::from(input);
+    }
+    let name = if std::path::Path::new(input).extension().is_some() {
+        input.to_string()
+    } else {
+        format!("{input}.sql")
+    };
+    queries_dir.join(name)
+}
+
+/// The files most recently saved or opened, most recent first. Global
+/// rather than per session: which queries you were last editing isn't tied
+/// to which connections happened to be open.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecentFiles {
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// Longest the recent list gets. Past this it stops being "recent" and
+/// starts being a second, worse file browser.
+const MAX_RECENT: usize = 20;
+
+impl RecentFiles {
+    /// Moves `path` to the front, de-duplicating so re-opening a file
+    /// promotes it rather than listing it twice.
+    pub fn record(&mut self, path: &std::path::Path) {
+        let path = path.to_string_lossy().to_string();
+        self.paths.retain(|existing| *existing != path);
+        self.paths.insert(0, path);
+        self.paths.truncate(MAX_RECENT);
+    }
+}
+
+pub fn default_recent_path() -> anyhow::Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
+        anyhow::anyhow!("could not determine a config directory for this platform")
+    })?;
+    Ok(dirs.config_dir().join("recent.toml"))
+}
+
+#[derive(Debug, Clone)]
+pub struct RecentStore {
+    path: PathBuf,
+}
+
+impl RecentStore {
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn load(&self) -> anyhow::Result<RecentFiles> {
+        if !self.path.exists() {
+            return Ok(RecentFiles::default());
+        }
+        Ok(toml::from_str(&std::fs::read_to_string(&self.path)?)?)
+    }
+
+    pub fn save(&self, recent: &RecentFiles) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.path, toml::to_string_pretty(recent)?)?;
+        Ok(())
+    }
+}
+
+/// Where saved queries live and which ones were opened lately.
+///
+/// Process-global like [`crate::theme`] and [`crate::keymap`], and for the
+/// same reason: every query screen wants it, screens are built deep inside
+/// connectors, and threading it down would mean putting "where files live"
+/// into the connector SPI -- which has nothing to do with connecting to a
+/// database.
+pub struct QueryFiles {
+    dir: PathBuf,
+    store: RecentStore,
+    recent: std::sync::RwLock<Vec<String>>,
+}
+
+static QUERY_FILES: std::sync::OnceLock<QueryFiles> = std::sync::OnceLock::new();
+
+/// Called once at startup. Before this -- and in tests, which never call it
+/// -- [`query_files`] returns `None` and callers fall back to plain paths.
+pub fn init_query_files(dir: PathBuf, store: RecentStore) {
+    let recent = store.load().unwrap_or_default().paths;
+    let _ = QUERY_FILES.set(QueryFiles {
+        dir,
+        store,
+        recent: std::sync::RwLock::new(recent),
+    });
+}
+
+pub fn query_files() -> Option<&'static QueryFiles> {
+    QUERY_FILES.get()
+}
+
+impl QueryFiles {
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Most recent first.
+    pub fn recent(&self) -> Vec<String> {
+        self.recent.read().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    /// Promotes `path` to the front and persists the list. A write failure
+    /// is swallowed: losing a recent entry must not fail the save or open
+    /// that just succeeded.
+    pub fn record(&self, path: &std::path::Path) {
+        let Ok(mut guard) = self.recent.write() else {
+            return;
+        };
+        let mut recent = RecentFiles {
+            paths: std::mem::take(&mut *guard),
+        };
+        recent.record(path);
+        let _ = self.store.save(&recent);
+        *guard = recent.paths;
+    }
+}
+
 pub fn default_session_path() -> anyhow::Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
         anyhow::anyhow!("could not determine a config directory for this platform")
@@ -178,6 +318,86 @@ mod tests {
         std::fs::write(&path, "active_tab = 0\ntabs = [\"local sqlite\"]\n").unwrap();
 
         assert!(SessionStore::at(path).load().is_err());
+    }
+
+    #[test]
+    fn a_bare_name_is_saved_into_the_queries_directory_as_sql() {
+        let dir = std::path::Path::new("/home/u/.config/tradar/queries");
+
+        assert_eq!(
+            resolve_query_path("report", dir),
+            dir.join("report.sql"),
+            "a bare name gets the extension so files are readable elsewhere"
+        );
+        assert_eq!(
+            resolve_query_path("report.txt", dir),
+            dir.join("report.txt"),
+            "an explicit extension is respected"
+        );
+    }
+
+    #[test]
+    fn anything_that_looks_like_a_path_is_used_as_typed() {
+        let dir = std::path::Path::new("/home/u/.config/tradar/queries");
+
+        assert_eq!(
+            resolve_query_path("/tmp/one.sql", dir),
+            PathBuf::from("/tmp/one.sql")
+        );
+        assert_eq!(
+            resolve_query_path("./one.sql", dir),
+            PathBuf::from("./one.sql")
+        );
+        assert_eq!(
+            resolve_query_path("~/one.sql", dir),
+            PathBuf::from("~/one.sql")
+        );
+    }
+
+    #[test]
+    fn recording_a_file_moves_it_to_the_front_without_duplicating() {
+        let mut recent = RecentFiles::default();
+
+        recent.record(std::path::Path::new("/a.sql"));
+        recent.record(std::path::Path::new("/b.sql"));
+        recent.record(std::path::Path::new("/a.sql"));
+
+        assert_eq!(recent.paths, vec!["/a.sql", "/b.sql"]);
+    }
+
+    #[test]
+    fn the_recent_list_is_capped() {
+        let mut recent = RecentFiles::default();
+
+        for i in 0..(MAX_RECENT + 5) {
+            recent.record(std::path::Path::new(&format!("/{i}.sql")));
+        }
+
+        assert_eq!(recent.paths.len(), MAX_RECENT);
+        assert_eq!(recent.paths[0], format!("/{}.sql", MAX_RECENT + 4));
+    }
+
+    #[test]
+    fn saving_then_loading_round_trips_the_recent_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecentStore::at(dir.path().join("recent.toml"));
+        let mut recent = RecentFiles::default();
+        recent.record(std::path::Path::new("/a.sql"));
+
+        store.save(&recent).unwrap();
+
+        assert_eq!(store.load().unwrap(), recent);
+    }
+
+    #[test]
+    fn loading_a_missing_recent_file_returns_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let recent = RecentStore::at(dir.path().join("nope.toml"))
+            .load()
+            .unwrap();
+
+        assert!(recent.paths.is_empty());
     }
 
     #[test]
