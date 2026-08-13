@@ -50,6 +50,10 @@ impl QueryDriver for PostgresDriver {
         Ok(())
     }
 
+    fn keywords(&self) -> &'static [&'static str] {
+        query_driver::SQL_KEYWORDS
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
         // Tables and their columns in one round trip, ordered so the

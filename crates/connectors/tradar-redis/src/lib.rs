@@ -35,6 +35,52 @@ impl QueryDriver for RedisDriver {
         Ok(())
     }
 
+    /// Commands worth completing. Redis has hundreds; these are the ones
+    /// you type by hand, plus the two this driver formats specially.
+    fn keywords(&self) -> &'static [&'static str] {
+        &[
+            "GET",
+            "SET",
+            "DEL",
+            "EXISTS",
+            "EXPIRE",
+            "TTL",
+            "KEYS",
+            "SCAN",
+            "TYPE",
+            "INCR",
+            "DECR",
+            "MGET",
+            "MSET",
+            "HGET",
+            "HSET",
+            "HGETALL",
+            "HDEL",
+            "HKEYS",
+            "HVALS",
+            "LPUSH",
+            "RPUSH",
+            "LPOP",
+            "RPOP",
+            "LRANGE",
+            "LLEN",
+            "SADD",
+            "SREM",
+            "SMEMBERS",
+            "SCARD",
+            "ZADD",
+            "ZRANGE",
+            "ZREVRANGE",
+            "ZSCORE",
+            "ZCARD",
+            "WITHSCORES",
+            "INFO",
+            "DBSIZE",
+            "FLUSHDB",
+            "PING",
+        ]
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let mut connection = self
             .connection

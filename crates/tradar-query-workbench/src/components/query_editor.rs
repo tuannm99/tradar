@@ -25,6 +25,13 @@ use tradar_core::vim_list;
 
 use crate::sql_highlight;
 
+/// What counts as part of a word for completion: identifier characters,
+/// plus `$` and `_` so Mongo's `$match` and `snake_case` names complete as
+/// one unit.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorMode {
     Normal,
@@ -118,6 +125,49 @@ impl QueryEditorComponent {
         let mut row = self.cursor_row;
         vim_list::apply(mv, &mut row, self.lines.len(), self.visible_height);
         self.move_row_to(row);
+    }
+
+    /// The word being typed, immediately before the cursor -- what a
+    /// completion would replace. Word characters only, so `users.` or
+    /// `(id` starts a fresh word rather than dragging punctuation in.
+    pub fn word_before_cursor(&self) -> String {
+        let line = &self.lines[self.cursor_row];
+        let end = self.cursor_col.min(line.len());
+        let start = line[..end]
+            .iter()
+            .rposition(|c| !is_word_char(*c))
+            .map_or(0, |i| i + 1);
+        line[start..end].iter().collect()
+    }
+
+    /// Swaps the word before the cursor for `text` and leaves the cursor
+    /// after it -- accepting a completion.
+    pub fn replace_word_before_cursor(&mut self, text: &str) {
+        let line = &self.lines[self.cursor_row];
+        let end = self.cursor_col.min(line.len());
+        let start = line[..end]
+            .iter()
+            .rposition(|c| !is_word_char(*c))
+            .map_or(0, |i| i + 1);
+        let replacement: Vec<char> = text.chars().collect();
+        let inserted = replacement.len();
+        self.lines[self.cursor_row].splice(start..end, replacement);
+        self.cursor_col = start + inserted;
+        self.clamp_col();
+    }
+
+    /// Where the cursor sits on screen, given the area the editor was last
+    /// drawn into -- so a popup can be placed against it.
+    pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {
+        let x = area
+            .x
+            .saturating_add(1)
+            .saturating_add(self.cursor_col as u16);
+        let y = area
+            .y
+            .saturating_add(1)
+            .saturating_add(self.cursor_row.saturating_sub(self.scroll) as u16);
+        (x, y)
     }
 
     pub fn forward_key(&mut self, key: KeyEvent) {

@@ -117,6 +117,42 @@ impl QueryDriver for MongoDriver {
         Ok(())
     }
 
+    /// The shell shapes this driver actually parses -- see the module
+    /// docs; anything else is rejected, so completing it would mislead.
+    fn keywords(&self) -> &'static [&'static str] {
+        &[
+            "db",
+            "find",
+            "aggregate",
+            "insertOne",
+            "insertMany",
+            "updateOne",
+            "updateMany",
+            "deleteOne",
+            "deleteMany",
+            "$match",
+            "$group",
+            "$sort",
+            "$limit",
+            "$project",
+            "$lookup",
+            "$unwind",
+            "$set",
+            "$gt",
+            "$gte",
+            "$lt",
+            "$lte",
+            "$ne",
+            "$in",
+            "$nin",
+            "$and",
+            "$or",
+            "$not",
+            "$exists",
+            "$regex",
+        ]
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let names = self.database()?.list_collection_names().await?;
         Ok(names.into_iter().map(SchemaInfo::new).collect())

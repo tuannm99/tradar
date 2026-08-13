@@ -84,6 +84,12 @@ impl QueryEngine {
         self.pending
     }
 
+    /// The driver's own completion vocabulary -- see
+    /// `QueryDriver::keywords`.
+    pub fn keywords(&self) -> &'static [&'static str] {
+        self.driver.keywords()
+    }
+
     pub fn export_curl(&self, query: &str) -> Option<String> {
         self.driver.export_curl(query)
     }

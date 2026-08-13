@@ -53,6 +53,10 @@ pub enum Context {
     List,
     /// The file-path prompt and the history overlay.
     Prompt,
+    /// Only while the autocomplete popup is showing. Checked before the
+    /// editor's own keys, so `tab` accepts a suggestion when one is on
+    /// screen and cycles panes when none is.
+    Completion,
 }
 
 impl Context {
@@ -65,6 +69,7 @@ impl Context {
             Self::Results => "results",
             Self::List => "list",
             Self::Prompt => "prompt",
+            Self::Completion => "completion",
         }
     }
 
@@ -77,12 +82,13 @@ impl Context {
             "results" => Self::Results,
             "list" => Self::List,
             "prompt" => Self::Prompt,
+            "completion" => Self::Completion,
             _ => return None,
         })
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 7] {
+    pub fn all() -> [Self; 8] {
         [
             Self::Global,
             Self::Picker,
@@ -91,6 +97,7 @@ impl Context {
             Self::Results,
             Self::List,
             Self::Prompt,
+            Self::Completion,
         ]
     }
 }
@@ -142,6 +149,10 @@ pub enum Command {
     /// Move between fields of a multi-field form.
     NextField,
     PrevField,
+    /// Take the highlighted autocomplete suggestion.
+    AcceptCompletion,
+    NextCompletion,
+    PrevCompletion,
 }
 
 impl Command {
@@ -181,6 +192,9 @@ impl Command {
             Self::Cancel => "cancel",
             Self::NextField => "next-field",
             Self::PrevField => "prev-field",
+            Self::AcceptCompletion => "accept-completion",
+            Self::NextCompletion => "next-completion",
+            Self::PrevCompletion => "prev-completion",
         }
     }
 
@@ -188,7 +202,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 34] = [
+    const ALL: [Self; 37] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -223,6 +237,9 @@ impl Command {
         Self::Cancel,
         Self::NextField,
         Self::PrevField,
+        Self::AcceptCompletion,
+        Self::NextCompletion,
+        Self::PrevCompletion,
     ];
 
     /// One-line description, shown next to the binding in the help overlay.
@@ -262,6 +279,9 @@ impl Command {
             Self::Cancel => "Cancel",
             Self::NextField => "Next field",
             Self::PrevField => "Previous field",
+            Self::AcceptCompletion => "Accept the suggestion",
+            Self::NextCompletion => "Next suggestion",
+            Self::PrevCompletion => "Previous suggestion",
         }
     }
 
@@ -438,6 +458,16 @@ impl Default for Keymap {
                 ("G", Command::MoveBottom),
                 ("ctrl-d", Command::HalfPageDown),
                 ("ctrl-u", Command::HalfPageUp),
+            ]),
+        );
+        bindings.insert(
+            Context::Completion,
+            parse_defaults(&[
+                ("tab", Command::AcceptCompletion),
+                ("ctrl-n", Command::NextCompletion),
+                ("down", Command::NextCompletion),
+                ("ctrl-p", Command::PrevCompletion),
+                ("up", Command::PrevCompletion),
             ]),
         );
         bindings.insert(

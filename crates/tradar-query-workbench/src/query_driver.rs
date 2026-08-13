@@ -121,11 +121,89 @@ fn strip_leading_comments(sql: &str) -> &str {
     }
 }
 
+/// The SQL words worth completing, shared by the SQL connectors -- they
+/// can't depend on each other, but both depend on this crate. Not a full
+/// grammar's worth: the point is to save typing on the words you write
+/// constantly, not to enumerate the standard.
+pub const SQL_KEYWORDS: &[&str] = &[
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "GROUP BY",
+    "ORDER BY",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "JOIN",
+    "LEFT JOIN",
+    "RIGHT JOIN",
+    "INNER JOIN",
+    "OUTER JOIN",
+    "FULL JOIN",
+    "CROSS JOIN",
+    "ON",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "IN",
+    "IS NULL",
+    "IS NOT NULL",
+    "LIKE",
+    "ILIKE",
+    "BETWEEN",
+    "EXISTS",
+    "UNION",
+    "UNION ALL",
+    "INTERSECT",
+    "EXCEPT",
+    "WITH",
+    "DISTINCT",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "COALESCE",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "INSERT INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE FROM",
+    "RETURNING",
+    "CREATE TABLE",
+    "ALTER TABLE",
+    "DROP TABLE",
+    "CREATE INDEX",
+    "PRIMARY KEY",
+    "FOREIGN KEY",
+    "REFERENCES",
+    "DEFAULT",
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "ASC",
+    "DESC",
+];
+
 #[async_trait]
 pub trait QueryDriver: Send + Sync {
     async fn connect(&mut self) -> anyhow::Result<()>;
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>>;
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult>;
+
+    /// Words this backend's query language uses, offered as completions.
+    /// Empty by default: a driver that doesn't say gets schema names only,
+    /// which is still useful. Each driver spells its own vocabulary -- this
+    /// crate must not know that Postgres speaks SQL and Redis doesn't.
+    fn keywords(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     /// Render `query` as a shell command that reproduces it against this
     /// driver's backend, if the driver supports export at all (currently

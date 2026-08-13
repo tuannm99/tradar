@@ -377,6 +377,7 @@ fn context_title(context: Context) -> &'static str {
         Context::Results => "Results pane (when focused)",
         Context::List => "Lists (connections, schema, results, history)",
         Context::Prompt => "Prompts and overlays",
+        Context::Completion => "Autocomplete (while suggestions show)",
     }
 }
 

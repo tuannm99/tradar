@@ -19,6 +19,7 @@ use tradar_core::storage::SavedConnection;
 use tradar_core::ui;
 use tradar_core::vim_list::VimMove;
 
+use crate::components::completion::{CompletionPopup, CompletionSource};
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
@@ -46,6 +47,11 @@ pub struct QueryScreenComponent {
     history_picker: Option<HistoryPickerComponent>,
     /// Where the editor was last drawn, so a click there can focus it.
     editor_area: Rect,
+    /// Everything completable for this connection, built once on connect.
+    completions: CompletionSource,
+    /// The suggestion list, present only while there is something to
+    /// suggest -- so "no popup" and "no matches" are one state.
+    completion: Option<CompletionPopup>,
 }
 
 /// Copies `text` to the system clipboard via an OSC52 escape sequence,
@@ -78,6 +84,9 @@ impl QueryScreenComponent {
         // consistent state regardless of how it was constructed).
         engine.tick();
 
+        let completions =
+            CompletionSource::new(engine.keywords(), engine.schema().as_deref().unwrap_or(&[]));
+
         let mut query_editor = QueryEditorComponent::new();
         // Only Postgres/SQLite speak real SQL -- Mongo/Elasticsearch/Redis
         // use their own hand-rolled query shapes with no tree-sitter
@@ -97,6 +106,8 @@ impl QueryScreenComponent {
             last_path: None,
             history_picker: None,
             editor_area: Rect::ZERO,
+            completions,
+            completion: None,
         }
     }
 
@@ -135,8 +146,43 @@ impl QueryScreenComponent {
         if self.focus == Focus::Editor {
             self.query_editor
                 .forward_key(KeyEvent::new(code, modifiers));
+            self.refresh_completions();
         }
         None
+    }
+
+    /// Rebuilds the suggestion list for the word under the cursor. Only
+    /// while typing: a popup in Normal mode would cover the query while
+    /// you're navigating it, and there's nothing being typed to complete.
+    fn refresh_completions(&mut self) {
+        if self.focus != Focus::Editor || self.query_editor.mode != EditorMode::Insert {
+            self.completion = None;
+            return;
+        }
+        let matches = self
+            .completions
+            .matches(&self.query_editor.word_before_cursor());
+        match (&mut self.completion, matches.is_empty()) {
+            (_, true) => self.completion = None,
+            (Some(popup), false) => popup.set_items(matches),
+            (slot @ None, false) => *slot = Some(CompletionPopup::new(matches)),
+        }
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(text) = self
+            .completion
+            .as_ref()
+            .and_then(|popup| popup.selected_text())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.query_editor.replace_word_before_cursor(&text);
+        // The word is complete now, so there is nothing left to suggest --
+        // leaving the popup up would offer to complete what was just
+        // accepted.
+        self.completion = None;
     }
 
     /// Scrolls whichever pane the pointer is over, rather than whichever
@@ -208,6 +254,37 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        // While suggestions are showing they take the keys bound to them,
+        // and nothing else -- every other key falls through to normal
+        // editing, which then refilters the list.
+        if self.completion.is_some() {
+            let key = KeyPress::new(code, modifiers);
+            let mut pending = None;
+            if let Resolution::Command(command) =
+                keymap().resolve(Context::Completion, &mut pending, key)
+            {
+                match command {
+                    Command::AcceptCompletion => {
+                        self.accept_completion();
+                        return None;
+                    }
+                    Command::NextCompletion => {
+                        if let Some(popup) = &mut self.completion {
+                            popup.next();
+                        }
+                        return None;
+                    }
+                    Command::PrevCompletion => {
+                        if let Some(popup) = &mut self.completion {
+                            popup.prev();
+                        }
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // `Esc` belongs to the editor while it's in a mode it can leave
         // (Insert), and only means "back to the picker" from Normal mode.
         // Checked before the keymap so a user rebinding `back` can't
@@ -218,6 +295,7 @@ impl Component for QueryScreenComponent {
         {
             self.query_editor
                 .forward_key(KeyEvent::new(code, modifiers));
+            self.completion = None;
             return None;
         }
 
@@ -231,6 +309,7 @@ impl Component for QueryScreenComponent {
         {
             self.query_editor
                 .forward_key(KeyEvent::new(code, modifiers));
+            self.refresh_completions();
             return None;
         }
 
@@ -370,6 +449,7 @@ impl Component for QueryScreenComponent {
             .split(outer[1]);
 
         let connection_name = self.active_connection().name.clone();
+        self.editor_area = chunks[0];
         self.query_editor.draw(
             frame,
             chunks[0],
@@ -379,6 +459,11 @@ impl Component for QueryScreenComponent {
         self.results.draw_running(self.engine.is_pending());
         self.results
             .draw(frame, chunks[1], self.focus == Focus::Results);
+
+        if let Some(completion) = &mut self.completion {
+            let cursor = self.query_editor.cursor_screen_position(self.editor_area);
+            completion.draw(frame, area, cursor);
+        }
 
         if let Some(prompt) = &self.prompt {
             let popup = ui::centered_rect(60, 20, area);
@@ -434,6 +519,9 @@ mod tests {
     impl QueryDriver for FakeDriver {
         async fn connect(&mut self) -> anyhow::Result<()> {
             Ok(())
+        }
+        fn keywords(&self) -> &'static [&'static str] {
+            &["ORDER BY", "OR", "SELECT"]
         }
         async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
             Ok(Vec::new())
@@ -785,6 +873,126 @@ mod tests {
         screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(screen.query_editor.text(), "email");
+    }
+
+    /// A screen whose schema has a table worth completing.
+    fn screen_with_completions() -> (QueryScreenComponent, mpsc::UnboundedReceiver<Action>) {
+        screen_with(fake_engine_with_schema(empty_result(), Ok(schema())))
+    }
+
+    fn type_in_insert(screen: &mut QueryScreenComponent, text: &str) {
+        screen.handle_key_event(KeyCode::Char('i'), KeyModifiers::NONE);
+        for c in text.chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn typing_offers_matching_suggestions_and_tab_accepts_one() {
+        let (mut screen, _rx) = screen_with_completions();
+
+        type_in_insert(&mut screen, "use");
+
+        assert!(screen.completion.is_some(), "'use' should match 'users'");
+        screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_eq!(screen.query_editor.text(), "users");
+        assert!(
+            screen.completion.is_none(),
+            "the word is complete, so there is nothing left to suggest"
+        );
+    }
+
+    #[test]
+    fn tab_cycles_focus_when_no_suggestion_is_showing() {
+        let (mut screen, _rx) = screen_with_completions();
+        assert!(screen.completion.is_none());
+
+        screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.focus,
+            Focus::Results,
+            "tab keeps its usual meaning when there's nothing to accept"
+        );
+    }
+
+    #[test]
+    fn a_word_with_no_matches_shows_no_popup() {
+        let (mut screen, _rx) = screen_with_completions();
+
+        type_in_insert(&mut screen, "zzz");
+
+        assert!(screen.completion.is_none());
+    }
+
+    #[test]
+    fn leaving_insert_mode_dismisses_the_suggestions() {
+        let (mut screen, _rx) = screen_with_completions();
+        type_in_insert(&mut screen, "use");
+        assert!(screen.completion.is_some());
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.completion.is_none());
+        assert_eq!(screen.query_editor.mode, EditorMode::Normal);
+    }
+
+    #[test]
+    fn deleting_back_to_a_shorter_prefix_reopens_the_suggestions() {
+        let (mut screen, _rx) = screen_with_completions();
+        type_in_insert(&mut screen, "users");
+        assert!(
+            screen.completion.is_none(),
+            "an exact match has nothing left to complete"
+        );
+
+        screen.handle_key_event(KeyCode::Backspace, KeyModifiers::NONE);
+
+        assert!(screen.completion.is_some(), "'user' matches 'users' again");
+    }
+
+    #[test]
+    fn suggestions_can_be_stepped_through_before_accepting() {
+        let (mut screen, _rx) = screen_with_completions();
+        // "o" matches the `orders` table plus the driver's OR / ORDER BY.
+        type_in_insert(&mut screen, "o");
+        let first = screen
+            .completion
+            .as_ref()
+            .and_then(|p| p.selected_text())
+            .map(str::to_string);
+        assert!(first.is_some());
+
+        screen.handle_key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let second = screen
+            .completion
+            .as_ref()
+            .and_then(|p| p.selected_text())
+            .map(str::to_string);
+
+        assert_ne!(first, second, "ctrl-n should move to another suggestion");
+    }
+
+    #[tokio::test]
+    async fn clicking_the_editor_focuses_it() {
+        let (mut screen, _rx) = screen();
+        screen.focus = Focus::Results;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        // The editor pane starts right of the 26-wide sidebar, at the top.
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 40,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(screen.focus, Focus::Editor);
     }
 
     #[test]

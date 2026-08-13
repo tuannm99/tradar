@@ -80,6 +80,51 @@ impl QueryDriver for ElasticsearchDriver {
         Ok(())
     }
 
+    /// The Dev-Tools-console vocabulary: HTTP verbs, the endpoints you
+    /// reach for, and the Query-DSL keys that go in the body.
+    fn keywords(&self) -> &'static [&'static str] {
+        &[
+            "GET",
+            "POST",
+            "PUT",
+            "DELETE",
+            "HEAD",
+            "_search",
+            "_count",
+            "_mapping",
+            "_settings",
+            "_cat/indices",
+            "_cat/health",
+            "_cat/nodes",
+            "_bulk",
+            "_doc",
+            "_aliases",
+            "_refresh",
+            "query",
+            "match",
+            "match_all",
+            "match_phrase",
+            "term",
+            "terms",
+            "range",
+            "bool",
+            "must",
+            "must_not",
+            "should",
+            "filter",
+            "aggs",
+            "sort",
+            "size",
+            "from",
+            "_source",
+            "exists",
+            "wildcard",
+            "prefix",
+            "fuzzy",
+            "nested",
+        ]
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let url = format!("{}/_cat/indices?format=json", self.base_url);
         let indices: Vec<serde_json::Value> = reqwest::get(&url).await?.json().await?;
