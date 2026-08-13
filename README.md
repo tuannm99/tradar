@@ -8,6 +8,8 @@ Nó cho bạn một giao diện duy nhất, điều khiển bằng bàn phím, �
 
 Pre-alpha, nhưng chạy được: `tradar` kết nối tới một instance PostgreSQL, SQLite, MongoDB, Elasticsearch, hoặc Redis thật, chạy query, và hiện kết quả trong terminal — connection picker → query screen → results, toàn bộ điều khiển bằng bàn phím. Query editor là một editor vim-modal tự viết (không dùng thư viện ngoài) — `Normal`/`Insert` mode, di chuyển kiểu vim (`h`/`j`/`k`/`l`, `gg`/`G`, `Ctrl-d`/`Ctrl-u`, `0`/`$`), `i`/`a`/`I`/`A`/`o`/`O` để vào Insert, `x`/`dd` để xoá. Trên kết nối PostgreSQL/SQLite, query được tô màu cú pháp SQL qua treesitter (`tree-sitter-sequel`); các driver còn lại (Mongo/Elasticsearch/Redis) dùng cú pháp tự chế không có grammar khớp nên hiển thị plain text. Query editor hỗ trợ nhiều dòng: `Enter` thường chèn một dòng mới, còn `Ctrl+Enter` (hoặc `F5`, vì không phải terminal nào cũng báo Ctrl+Enter riêng biệt) chạy query. Trên kết nối Elasticsearch, `Ctrl+Y` ghi request hiện tại thành lệnh `curl` vào `./tradar-query.sh` trong thư mục làm việc. `Ctrl+S` lưu buffer query editor ra một file (gõ đường dẫn vào ô prompt hiện lên, `Enter` để lưu, `Esc` để huỷ); `Ctrl+O` đọc một file vào buffer, ghi đè nội dung hiện tại; `Ctrl+R` mở danh sách lịch sử query (most-recent-first, `j`/`k`/`gg`/`G`, `Enter` để load một entry vào editor) — cả ba hoạt động bất kể đang focus panel nào. Chưa có màn hình "add connection" tương tác, nên saved connection phải được thêm bằng tay vào file TOML tại đường dẫn `tradar` in ra khi chưa có connection nào (xem `crates/tradar-core/src/storage/mod.rs`). Query screen có một schema sidebar (`Tab` để focus, `↑`/`↓` hoặc `j`/`k` để di chuyển, `Enter` để chèn tên table/collection/index/key được chọn vào query) tự động load khi connect. Export tổng quát (ngoài curl export của Elasticsearch) chưa được xây dựng. Xem `docs/architecture.md` để biết hình dạng hệ thống, gồm cả phạm vi ngôn ngữ query của từng driver.
 
+Bấm `?` ở bất kỳ màn hình nào để xem toàn bộ phím tắt đang có hiệu lực (danh sách này sinh thẳng từ keymap đang chạy, nên remap xong là nó tự đổi theo). Đáy màn hình luôn có một thanh gợi ý phím theo ngữ cảnh.
+
 Nhiều tab/connection cùng lúc: `Ctrl+T` mở tab mới (quay về connection picker), `Ctrl+W` đóng tab hiện tại (không đóng được tab cuối cùng), `Ctrl+Left`/`Ctrl+Right` chuyển tab. Tab bar chỉ hiện khi có từ 2 tab trở lên. `Ctrl+Q` thoát app ngay lập tức từ bất kỳ đâu (không cần `Esc` về picker rồi `q`). Khi thoát, `tradar` nhớ lại tab nào đã connect và tab nào đang active (`~/.config/tradar/session.toml`), rồi tự kết nối lại đúng như vậy ở lần chạy tiếp theo — nội dung query editor đang gõ dở thì không được nhớ lại, chỉ có connection.
 
 ## Database
@@ -55,6 +57,29 @@ target = "mongodb://localhost:27017/mydb"
 ```
 
 `target` của MongoDB phải kèm theo một database path (`/mydb` ở trên) — `MongoDriver::connect()` báo lỗi "connection string must include a default database" nếu thiếu.
+
+## Cấu hình: theme và keymap
+
+Tuỳ chọn, nằm ở `~/.config/tradar/config.toml`. Không có file thì dùng mặc định; file hỏng thì `tradar` in cảnh báo ra stderr rồi chạy tiếp bằng mặc định (không chết app).
+
+```toml
+[theme]
+# Màu theo vai trò, không phải theo tên màu cụ thể. Giá trị nhận tên màu
+# ("red", "bright-blue"), mã hex ("#89b4fa"), hoặc chỉ số 256-color ("75").
+border-focused = "#89b4fa"
+error = "red"
+syntax-keyword = "176"
+
+[keymap.global]
+new-tab = "ctrl-n"            # một phím
+
+[keymap.list]
+move-down = ["j", "down"]     # hoặc nhiều phím cho cùng một lệnh
+move-top = "gg"               # hoặc chuỗi 2 phím
+close-tab = []                # rỗng = gỡ bỏ phím
+```
+
+Context gồm `global`, `picker`, `query-screen`, `list`, `prompt` — bấm `?` trong app để xem toàn bộ lệnh và phím hiện hành của từng context. Chỉ những lệnh đó remap được; phím vim **bên trong** query editor (`i`/`a`/`o`/`x`/`dd`/`hjkl`...) cố định theo vim chuẩn.
 
 ## Triết lý
 

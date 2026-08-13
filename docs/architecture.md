@@ -11,10 +11,14 @@ Cargo.toml                    [workspace], default-members = ["crates/tradar-app
 crates/
   tradar-core/
     src/
-      action.rs               — enum Action đóng (5 variant, 3 trong đó mang thêm field `tab: usize` từ 2026-08-12 — xem "Sessions/workspace state" trong docs/backlog.md) + trait Component (có tick() mặc định no-op)
+      action.rs               — enum Action đóng (6 variant, 3 trong đó mang thêm field `tab: usize` từ 2026-08-12 — xem "Sessions/workspace state" trong docs/backlog.md) + trait Component (có tick() mặc định trả false)
       capability.rs           — enum Capability
-      storage/                — saved connections dạng TOML (dùng crate `directories` để lấy config path); driver: String (connector id)
-      config/                — chỗ dành sẵn cho việc load app config; chưa dùng
+      storage/                — saved connections + session state dạng TOML (dùng crate `directories` để lấy config path); driver: String (connector id)
+      config/                — load ~/.config/tradar/config.toml → theme + keymap (2026-08-13; trước đó là placeholder rỗng)
+      theme.rs                — bảng màu theo vai trò + override từ config
+      keymap.rs               — Command × Context, resolve phím → lệnh, remap từ config, hỗ trợ chuỗi 2 phím (gg)
+      ui.rs                   — widget dùng chung: panel có viền/focus, selection style, centered_rect, status hint bar, HelpOverlay
+      vim_list.rs             — phép toán di chuyển selection dùng chung cho mọi list (và cho row movement của editor)
   tradar-connector-api/
     src/lib.rs                — trait Connector, trait Session, struct ConnectorDescriptor
   tradar-query-workbench/
@@ -35,7 +39,7 @@ crates/
         connection_picker.rs  — ConnectionPickerComponent
 ```
 
-`Action`/`Component` nằm ở `tradar-core` (đóng, 5 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 5 nhưng không chứa code driver nào.
+`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 5 nhưng không chứa code driver nào.
 
 ### Trait `QueryDriver`
 
@@ -71,6 +75,21 @@ Postgres và SQLite chấp nhận SQL tuỳ ý. Ba driver còn lại chỉ chấ
 - **Elasticsearch**: mô phỏng theo Dev Tools console của Kibana, không phải client Search-only cố định. Dòng đầu là `METHOD /path` (vd `GET my-index/_search`); các dòng còn lại (nếu có) là JSON request body, gửi nguyên văn. Không có cấu hình auth/TLS client-cert, và mỗi lần chạy chỉ một request (không có script nhiều request). Toàn bộ JSON response được bọc thành một `Documents` một phần tử, không unwrap thành từng document theo hit. `Ctrl+Y` trên một kết nối Elasticsearch xuất request hiện tại thành lệnh `curl` ghi vào `./tradar-query.sh` (đường dẫn cố định, ghi đè mỗi lần export).
 - **Redis**: một dòng lệnh duy nhất, tách theo khoảng trắng (không hỗ trợ quoting/escaping), gửi qua `redis::cmd`. Chuyển đổi kết quả chỉ nhận biết kiểu cho `HGETALL` (→ JSON object) và `ZRANGE`/`ZREVRANGE ... WITHSCORES` (→ mảng object `{member, score}`); mọi lệnh khác dùng chuyển đổi RESP-to-JSON tổng quát. Không có pipelining, transaction (`MULTI`/`EXEC`), pub/sub, hay xử lý riêng cho stream (`XADD`/`XRANGE`).
 - **MongoDB**: một parser tối giản cho đúng shape `db.<collection>.<method>(<json-args>)` — không phải JS engine thật. Hỗ trợ `find`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`. Không có method chaining (`.sort()`, `.limit()`), không có `$where`, không có bulk operation hay transaction; bất cứ gì ngoài shape này trả về lỗi "unsupported query".
+
+### Keymap, theme và widget dùng chung
+
+Thêm 2026-08-13. Ba module trong `tradar-core` mà **mọi** component phải đi qua thay vì tự làm:
+
+- **`keymap`** — component không match `KeyCode` trực tiếp nữa; nó hỏi `keymap().resolve_in(&[context...], &mut pending, key)` và nhận về một `Command`. `Context` (`Global`/`Picker`/`QueryScreen`/`List`/`Prompt`) tồn tại vì cùng một phím mang nghĩa khác nhau tuỳ chỗ (`enter` = connect ở picker, = chèn tên schema ở query screen). `resolve_in` nhận *nhiều* context theo thứ tự ưu tiên, dùng chung một ô `pending` — đó là cách một màn hình check binding riêng của nó trước rồi mới rơi xuống điều hướng list dùng chung. `pending: Option<KeyPress>` do chính component giữ và chính là `pending_g: bool` cũ được tổng quát hoá cho chuỗi 2 phím bất kỳ, không riêng `gg`.
+- **`theme`** — màu đặt tên theo *vai trò* (`border_focused`, `error`, `syntax_keyword`), không theo tên màu. Component không được viết `Color::Red` thẳng.
+- **`ui`** — `panel()`/`selection_style()`/`centered_rect()`/`draw_status_bar()`/`HelpOverlay`. Nằm ở `tradar-core` vì cả `tradar-app` và `tradar-query-workbench` đều cần, mà hai crate đó không được phụ thuộc nhau.
+
+Cả `theme` và `keymap` được nạp một lần lúc khởi động (`config::init`) vào một `OnceLock`, đọc qua hàm `theme()`/`keymap()` trả về `&'static` — nếu chưa nạp thì rơi về mặc định dựng sẵn. Chọn global thay vì truyền tham số xuyên mọi `handle_key_event`/`draw` là có chủ đích: nó tránh phải đổi signature của trait `Component` (và `Session::build_screen` ở `tradar-connector-api`) chỉ để mang theo hai thứ config bất biến suốt vòng đời process. Đánh đổi: test không thay được keymap giữa chừng, nên logic remap được test trực tiếp trên `Keymap` ở `tradar-core`, còn component thì test theo binding mặc định.
+
+Hai bất biến của phần dispatch phím, cả hai đều có test hồi quy trong `query_screen.rs` (dễ vô tình phá khi thêm binding mới):
+
+1. **Ký tự thường gõ trong Insert mode luôn là text, không bao giờ là lệnh.** Không có quy tắc này thì bind `?` cho help sẽ khiến không gõ được dấu `?` vào query. Chỉ phím có `CONTROL`/`ALT` (hoặc phím không phải `Char`) mới đi tới keymap khi editor đang ở Insert mode.
+2. **Lệnh gắn với một pane cụ thể chỉ chạy khi pane đó đang focus** (`required_focus`: `yank` → Results, `insert-name` → Sidebar). Bấm ở chỗ khác thì phím rơi xuống editor như thể không có binding — nên `enter` vẫn xuống dòng bình thường khi đang gõ query.
 
 ### Quy tắc cách ly (isolation rule)
 
