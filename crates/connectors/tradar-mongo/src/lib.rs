@@ -354,7 +354,7 @@ mod tests {
                 assert_eq!(docs.len(), 1);
                 assert_eq!(docs[0]["name"], "Ada");
             }
-            QueryResult::Table { .. } => panic!("expected Documents"),
+            other => panic!("expected Documents, got {other:?}"),
         }
     }
 
@@ -380,7 +380,7 @@ mod tests {
                 assert_eq!(docs[0]["item"], "pen");
                 assert_eq!(docs[0]["qty"], 2);
             }
-            QueryResult::Table { .. } => panic!("expected Documents"),
+            other => panic!("expected Documents, got {other:?}"),
         }
     }
 

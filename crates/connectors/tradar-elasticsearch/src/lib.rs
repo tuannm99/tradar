@@ -208,7 +208,7 @@ mod tests {
                 assert_eq!(docs.len(), 1);
                 assert!(docs[0].get("status").is_some(), "response was: {docs:?}");
             }
-            QueryResult::Table { .. } => panic!("expected Documents"),
+            other => panic!("expected Documents, got {other:?}"),
         }
     }
 
@@ -234,7 +234,7 @@ mod tests {
                     "expected the _cat/indices header row, got: {docs:?}"
                 );
             }
-            QueryResult::Table { .. } => panic!("expected Documents"),
+            other => panic!("expected Documents, got {other:?}"),
         }
     }
 

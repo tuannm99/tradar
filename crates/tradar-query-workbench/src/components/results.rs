@@ -103,7 +103,8 @@ impl ResultsComponent {
         match &self.last_result {
             Some(QueryResult::Table { rows, .. }) => rows.len(),
             Some(QueryResult::Documents(docs)) => docs.len(),
-            None => 0,
+            // Nothing to select: it's a one-line report, not a list.
+            Some(QueryResult::Affected { .. }) | None => 0,
         }
     }
 
@@ -171,6 +172,7 @@ impl ResultsComponent {
             QueryResult::Documents(docs) => docs
                 .get(self.selected)
                 .map(|doc| serde_json::to_string_pretty(doc).unwrap_or_default()),
+            QueryResult::Affected { .. } => None,
         }
     }
 
@@ -186,6 +188,7 @@ impl ResultsComponent {
             (None, Some(QueryResult::Documents(docs))) => {
                 format!("Results ({})", count(docs.len(), "document"))
             }
+            (None, Some(QueryResult::Affected { .. })) => "Results".to_string(),
             (None, None) => "Results".to_string(),
         };
         let block = ui::panel(&title, focused);
@@ -266,6 +269,21 @@ impl ResultsComponent {
                     .column_spacing(2)
                     .row_highlight_style(ui::selection_style());
                 frame.render_stateful_widget(table, inner, &mut state);
+            }
+            QueryResult::Affected { rows } => {
+                self.visible_height = 0;
+                // A write reports what it did, in the pane where results
+                // would otherwise appear -- the whole point is that this
+                // can't be mistaken for an empty SELECT.
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("OK — {} affected", count(*rows as usize, "row")),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    inner,
+                );
             }
             QueryResult::Documents(docs) => {
                 self.visible_height = inner.height as usize;
@@ -674,6 +692,32 @@ mod tests {
         let text = draw_component(&mut results, 40, 10);
 
         assert!(text.contains("3 rows"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn a_write_reports_what_it_affected_instead_of_looking_empty() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Affected { rows: 3 });
+
+        let text = draw_component(&mut results, 40, 8);
+
+        assert!(text.contains("OK"), "buffer was: {text}");
+        assert!(text.contains("3 rows affected"), "buffer was: {text}");
+        assert!(
+            !text.contains("0 rows)"),
+            "must not read like an empty result: {text}"
+        );
+    }
+
+    #[test]
+    fn a_write_has_nothing_to_select_or_yank() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Affected { rows: 3 });
+
+        results.move_down();
+
+        assert_eq!(results.selected, 0);
+        assert_eq!(results.selected_text(), None);
     }
 
     #[test]

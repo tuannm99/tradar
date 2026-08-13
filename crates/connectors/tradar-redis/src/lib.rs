@@ -210,7 +210,7 @@ mod tests {
                 assert_eq!(docs[0]["name"], "Ada");
                 assert_eq!(docs[0]["age"], "36");
             }
-            QueryResult::Table { .. } => panic!("expected Documents"),
+            other => panic!("expected Documents, got {other:?}"),
         }
     }
 
@@ -240,7 +240,7 @@ mod tests {
                     ])
                 );
             }
-            QueryResult::Table { .. } => panic!("expected Documents"),
+            other => panic!("expected Documents, got {other:?}"),
         }
     }
 

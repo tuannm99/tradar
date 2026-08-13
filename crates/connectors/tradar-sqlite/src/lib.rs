@@ -10,7 +10,9 @@ use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
 use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_driver::{
+    self as query_driver, QueryDriver, QueryResult, SchemaInfo,
+};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 struct SqliteDriver {
@@ -51,6 +53,17 @@ impl QueryDriver for SqliteDriver {
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
+
+        // A write reports how many rows it changed; fetching it as a result
+        // set would just yield zero rows and look like a SELECT that
+        // matched nothing.
+        if !query_driver::returns_rows(query) {
+            let result = sqlx::query(query).execute(pool).await?;
+            return Ok(QueryResult::Affected {
+                rows: result.rows_affected(),
+            });
+        }
+
         let rows = sqlx::query(query).fetch_all(pool).await?;
 
         let columns = rows
@@ -150,6 +163,54 @@ mod tests {
 
         assert_eq!(schema.len(), 1);
         assert_eq!(schema[0].name, "users");
+    }
+
+    #[tokio::test]
+    async fn execute_reports_affected_rows_for_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+
+        let created = driver
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+        assert_eq!(created, QueryResult::Affected { rows: 0 });
+
+        let inserted = driver
+            .execute("INSERT INTO users VALUES (1), (2), (3)")
+            .await
+            .unwrap();
+        assert_eq!(
+            inserted,
+            QueryResult::Affected { rows: 3 },
+            "a write must report what it changed, not an empty table"
+        );
+
+        let deleted = driver
+            .execute("DELETE FROM users WHERE id > 1")
+            .await
+            .unwrap();
+        assert_eq!(deleted, QueryResult::Affected { rows: 2 });
+    }
+
+    #[tokio::test]
+    async fn a_select_that_matches_nothing_is_still_an_empty_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+
+        let result = driver.execute("SELECT * FROM users").await.unwrap();
+
+        // The distinction this whole change exists for: no rows found is
+        // not the same shape as no rows returned by a write.
+        assert!(matches!(result, QueryResult::Table { .. }));
     }
 
     #[tokio::test]

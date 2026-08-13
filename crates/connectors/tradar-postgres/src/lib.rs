@@ -12,7 +12,9 @@ use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
 use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_driver::{
+    self as query_driver, QueryDriver, QueryResult, SchemaInfo,
+};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 /// How long to wait for the initial connection before giving up. sqlx's own
@@ -63,6 +65,17 @@ impl QueryDriver for PostgresDriver {
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
+
+        // A write reports how many rows it changed; fetching it as a result
+        // set would just yield zero rows and look like a SELECT that
+        // matched nothing.
+        if !query_driver::returns_rows(query) {
+            let result = sqlx::query(query).execute(pool).await?;
+            return Ok(QueryResult::Affected {
+                rows: result.rows_affected(),
+            });
+        }
+
         let rows = sqlx::query(query).fetch_all(pool).await?;
 
         let columns = rows
