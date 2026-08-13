@@ -202,8 +202,16 @@ impl Session for QueryEngine {
         changed
     }
 
-    fn build_screen(self: Box<Self>, action_tx: UnboundedSender<Action>) -> Box<dyn Component> {
-        Box::new(QueryScreenComponent::new(*self, action_tx))
+    fn build_screen(
+        self: Box<Self>,
+        action_tx: UnboundedSender<Action>,
+        restore: Option<&str>,
+    ) -> Box<dyn Component> {
+        let mut screen = QueryScreenComponent::new(*self, action_tx);
+        if let Some(text) = restore {
+            screen.query_editor.set_text(text);
+        }
+        Box::new(screen)
     }
 }
 

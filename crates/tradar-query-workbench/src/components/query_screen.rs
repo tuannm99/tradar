@@ -445,6 +445,12 @@ impl Component for QueryScreenComponent {
         None
     }
 
+    fn restore_state(&self) -> Option<String> {
+        let text = self.query_editor.text();
+        // An empty editor has nothing worth carrying to the next run.
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     fn update(&mut self, _action: Action) -> Option<Action> {
         None
     }

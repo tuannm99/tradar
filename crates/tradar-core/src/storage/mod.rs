@@ -38,12 +38,30 @@ pub fn default_connections_path() -> anyhow::Result<PathBuf> {
 pub struct SessionState {
     #[serde(default)]
     pub active_tab: usize,
-    /// `SavedConnection::name` values, in tab order. Matched by name against
-    /// whatever's in `connections.toml` on the next run -- a name that no
-    /// longer exists there is silently skipped, since the connection it
-    /// pointed to may have been renamed or removed.
+    /// The connected tabs, in order.
     #[serde(default)]
-    pub tabs: Vec<String>,
+    pub tabs: Vec<TabState>,
+}
+
+/// One remembered tab. The connection is matched by name against
+/// `connections.toml` on the next run -- a name that no longer exists there
+/// is silently skipped, since it may have been renamed or removed.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabState {
+    pub connection: String,
+    /// What was in the query editor. Kept so quitting doesn't throw away
+    /// work in progress; empty when there was nothing typed.
+    #[serde(default)]
+    pub query: String,
+}
+
+impl TabState {
+    pub fn new(connection: impl Into<String>) -> Self {
+        Self {
+            connection: connection.into(),
+            query: String::new(),
+        }
+    }
 }
 
 pub fn default_session_path() -> anyhow::Result<PathBuf> {
@@ -150,6 +168,19 @@ mod tests {
     }
 
     #[test]
+    fn a_session_file_from_before_queries_were_saved_is_ignored_not_fatal() {
+        // The old format stored tabs as plain strings. Rather than
+        // migrating, loading fails and the caller falls back to a fresh
+        // session -- losing a restore is a smaller cost than the migration
+        // code for a file that is rewritten on every quit anyway.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(&path, "active_tab = 0\ntabs = [\"local sqlite\"]\n").unwrap();
+
+        assert!(SessionStore::at(path).load().is_err());
+    }
+
+    #[test]
     fn loading_a_missing_session_file_returns_the_default_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::at(dir.path().join("session.toml"));
@@ -172,7 +203,13 @@ mod tests {
         let store = SessionStore::at(dir.path().join("session.toml"));
         let state = SessionState {
             active_tab: 1,
-            tabs: vec!["local sqlite".to_string(), "local postgres".to_string()],
+            tabs: vec![
+                TabState {
+                    connection: "local sqlite".to_string(),
+                    query: "select 1;\nselect 2;".to_string(),
+                },
+                TabState::new("local postgres"),
+            ],
         };
 
         store.save(&state).unwrap();

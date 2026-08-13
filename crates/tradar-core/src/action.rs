@@ -58,5 +58,14 @@ pub trait Component {
     fn tick(&mut self) -> bool {
         false
     }
+    /// What this screen would want handed back if the app restarted --
+    /// for a query screen, the text in its editor. Opaque to everyone but
+    /// the screen itself: the app just persists the string and passes it
+    /// to `Session::build_screen` next time. `None` for a screen with
+    /// nothing worth restoring, which is the default.
+    fn restore_state(&self) -> Option<String> {
+        None
+    }
+
     fn draw(&mut self, frame: &mut Frame, area: Rect);
 }

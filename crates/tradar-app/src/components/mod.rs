@@ -152,8 +152,12 @@ impl RootComponent {
     pub fn restore_tabs(&mut self, session: &SessionState) -> Vec<Action> {
         let mut requests = Vec::new();
         let mut restored_any = false;
-        for name in &session.tabs {
-            let Some(index) = self.connections.iter().position(|c| &c.name == name) else {
+        for tab in &session.tabs {
+            let Some(index) = self
+                .connections
+                .iter()
+                .position(|c| c.name == tab.connection)
+            else {
                 continue;
             };
             let tab_index = if restored_any {
@@ -440,6 +444,8 @@ pub mod connection_picker;
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
+
+    use tradar_core::storage::TabState;
 
     use super::*;
 
@@ -917,7 +923,10 @@ mod tests {
 
         let requests = root.restore_tabs(&SessionState {
             active_tab: 1,
-            tabs: vec!["local-sqlite".to_string(), "local-postgres".to_string()],
+            tabs: vec![
+                TabState::new("local-sqlite"),
+                TabState::new("local-postgres"),
+            ],
         });
 
         assert_eq!(root.tabs.len(), 2);
@@ -947,7 +956,10 @@ mod tests {
 
         let requests = root.restore_tabs(&SessionState {
             active_tab: 0,
-            tabs: vec!["renamed-or-deleted".to_string(), "local-sqlite".to_string()],
+            tabs: vec![
+                TabState::new("renamed-or-deleted"),
+                TabState::new("local-sqlite"),
+            ],
         });
 
         assert_eq!(root.tabs.len(), 1);
@@ -964,7 +976,7 @@ mod tests {
 
         let requests = root.restore_tabs(&SessionState {
             active_tab: 0,
-            tabs: vec!["renamed-or-deleted".to_string()],
+            tabs: vec![TabState::new("renamed-or-deleted")],
         });
 
         assert!(requests.is_empty());

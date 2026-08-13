@@ -21,8 +21,8 @@ use tradar_connector_api::{Connector, Session};
 use tradar_core::action::{Action, Component};
 use tradar_core::config;
 use tradar_core::storage::{
-    ConnectionStore, SavedConnection, SessionState, SessionStore, default_connections_path,
-    default_session_path,
+    ConnectionStore, SavedConnection, SessionState, SessionStore, TabState,
+    default_connections_path, default_session_path,
 };
 
 /// Every connector compiled into this binary. Adding a connector means
@@ -88,6 +88,16 @@ async fn main() -> anyhow::Result<()> {
     let mut drivers: Vec<String> = registry.keys().cloned().collect();
     drivers.sort();
 
+    // What each restored tab had in its editor last time, by tab index --
+    // handed to `build_screen` when that tab's connect resolves.
+    let restore_by_tab: HashMap<usize, String> = session_state
+        .tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, tab)| !tab.query.is_empty())
+        .map(|(index, tab)| (index, tab.query.clone()))
+        .collect();
+
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let (connect_tx, connect_rx) = mpsc::unbounded_channel();
     let mut root = RootComponent::new(connections).with_editing(drivers, store);
@@ -121,11 +131,14 @@ async fn main() -> anyhow::Result<()> {
     let result = run(
         &mut terminal,
         &mut root,
-        registry,
-        action_tx,
-        action_rx,
-        connect_tx,
-        connect_rx,
+        Wiring {
+            registry,
+            action_tx,
+            action_rx,
+            connect_tx,
+            connect_rx,
+            restore_by_tab,
+        },
     )
     .await;
 
@@ -159,7 +172,18 @@ fn session_state_of(root: &RootComponent) -> SessionState {
         if i == root.active_tab {
             active_tab = Some(tabs.len());
         }
-        tabs.push(name.clone());
+        // Whatever the screen wants back next run -- the query text, for a
+        // query screen.
+        let query = match &tab.screen {
+            tradar_app::components::ScreenSlot::Active(screen) => {
+                screen.restore_state().unwrap_or_default()
+            }
+            tradar_app::components::ScreenSlot::ConnectionPicker => String::new(),
+        };
+        tabs.push(TabState {
+            connection: name.clone(),
+            query,
+        });
     }
     SessionState {
         active_tab: active_tab.unwrap_or(0),
@@ -167,15 +191,31 @@ fn session_state_of(root: &RootComponent) -> SessionState {
     }
 }
 
+/// Everything the event loop needs besides the terminal and the component
+/// tree: the connector registry, the two channels it pumps, and the
+/// per-tab text a restored session should reopen with.
+struct Wiring {
+    registry: Arc<HashMap<String, Box<dyn Connector>>>,
+    action_tx: mpsc::UnboundedSender<Action>,
+    action_rx: mpsc::UnboundedReceiver<Action>,
+    connect_tx: mpsc::UnboundedSender<ConnectOutcome>,
+    connect_rx: mpsc::UnboundedReceiver<ConnectOutcome>,
+    restore_by_tab: HashMap<usize, String>,
+}
+
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     root: &mut RootComponent,
-    registry: Arc<HashMap<String, Box<dyn Connector>>>,
-    action_tx: mpsc::UnboundedSender<Action>,
-    mut action_rx: mpsc::UnboundedReceiver<Action>,
-    connect_tx: mpsc::UnboundedSender<ConnectOutcome>,
-    mut connect_rx: mpsc::UnboundedReceiver<ConnectOutcome>,
+    wiring: Wiring,
 ) -> anyhow::Result<()> {
+    let Wiring {
+        registry,
+        action_tx,
+        mut action_rx,
+        connect_tx,
+        mut connect_rx,
+        restore_by_tab,
+    } = wiring;
     terminal.draw(|frame| root.draw(frame, frame.area()))?;
 
     while !root.should_quit {
@@ -234,7 +274,10 @@ async fn run(
                     epoch,
                     tab,
                 } => {
-                    let screen = session.build_screen(action_tx.clone());
+                    let screen = session.build_screen(
+                        action_tx.clone(),
+                        restore_by_tab.get(&tab).map(String::as_str),
+                    );
                     root.update(Action::Opened {
                         connection,
                         screen,

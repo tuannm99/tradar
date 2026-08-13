@@ -26,7 +26,15 @@ pub trait Session: Send + Sync {
     /// loop in `main.rs` can skip redrawing an unchanged screen.
     fn tick(&mut self) -> bool;
 
-    fn build_screen(self: Box<Self>, action_tx: UnboundedSender<Action>) -> Box<dyn Component>;
+    /// Builds this session's screen. `restore` is whatever that screen
+    /// returned from `Component::restore_state` when the app last quit --
+    /// opaque here, meaningful only to the screen (a query screen fills
+    /// its editor with it). `None` on a fresh connect.
+    fn build_screen(
+        self: Box<Self>,
+        action_tx: UnboundedSender<Action>,
+        restore: Option<&str>,
+    ) -> Box<dyn Component>;
 }
 
 pub struct ConnectorDescriptor {
