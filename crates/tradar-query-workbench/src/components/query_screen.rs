@@ -151,6 +151,42 @@ impl QueryScreenComponent {
         None
     }
 
+    /// Runs just the statement the cursor is in, so a file can hold a
+    /// stack of queries and you run them one at a time. Falls back to the
+    /// last statement when the cursor sits past the end (on the trailing
+    /// blank line, which is where it usually is after typing).
+    fn run_statement_at_cursor(&mut self) {
+        if self.engine.is_pending() {
+            return;
+        }
+        let text = self.query_editor.text();
+        let statements = self.engine.split_statements(&text);
+        let cursor = self.query_editor.cursor_offset();
+        let statement = statements
+            .iter()
+            .find(|s| cursor >= s.start && cursor <= s.end)
+            .or_else(|| statements.last());
+        if let Some(statement) = statement {
+            self.engine.submit_query(statement.text.clone());
+        }
+    }
+
+    fn run_all_statements(&mut self) {
+        if self.engine.is_pending() {
+            return;
+        }
+        let text = self.query_editor.text();
+        let statements: Vec<String> = self
+            .engine
+            .split_statements(&text)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        if !statements.is_empty() {
+            self.engine.submit_all(statements);
+        }
+    }
+
     /// Rebuilds the suggestion list for the word under the cursor. Only
     /// while typing: a popup in Normal mode would cover the query while
     /// you're navigating it, and there's nothing being typed to complete.
@@ -344,11 +380,8 @@ impl Component for QueryScreenComponent {
         match command {
             Command::Back => return Some(Action::BackToPicker),
             Command::Help => return Some(Action::ShowHelp),
-            Command::RunQuery => {
-                if !self.engine.is_pending() {
-                    self.engine.submit_query(self.query_editor.text());
-                }
-            }
+            Command::RunQuery => self.run_statement_at_cursor(),
+            Command::RunAll => self.run_all_statements(),
             Command::CancelQuery => {
                 if self.engine.cancel() {
                     self.results.set_error("query cancelled".to_string());
@@ -522,6 +555,9 @@ mod tests {
         }
         fn keywords(&self) -> &'static [&'static str] {
             &["ORDER BY", "OR", "SELECT"]
+        }
+        fn split_statements(&self, text: &str) -> Vec<crate::query_driver::Statement> {
+            crate::query_driver::split_sql_statements(text)
         }
         async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
             Ok(Vec::new())
@@ -993,6 +1029,88 @@ mod tests {
         });
 
         assert_eq!(screen.focus, Focus::Editor);
+    }
+
+    /// The statement `run-query` would send for the current cursor
+    /// position, without needing the engine to actually run it.
+    fn statement_at_cursor(screen: &QueryScreenComponent) -> Option<String> {
+        let text = screen.query_editor.text();
+        let cursor = screen.query_editor.cursor_offset();
+        let statements = screen.engine.split_statements(&text);
+        statements
+            .iter()
+            .find(|s| cursor >= s.start && cursor <= s.end)
+            .or_else(|| statements.last())
+            .map(|s| s.text.clone())
+    }
+
+    #[tokio::test]
+    async fn run_query_picks_the_statement_the_cursor_is_in() {
+        let (mut screen, _rx) = screen();
+        screen
+            .query_editor
+            .set_text("SELECT 1;\nSELECT 2;\nSELECT 3;");
+
+        // Cursor starts on line 1.
+        assert_eq!(statement_at_cursor(&screen).as_deref(), Some("SELECT 1"));
+
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(statement_at_cursor(&screen).as_deref(), Some("SELECT 2"));
+
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(statement_at_cursor(&screen).as_deref(), Some("SELECT 3"));
+    }
+
+    #[tokio::test]
+    async fn a_statement_spanning_several_lines_is_picked_whole() {
+        let (mut screen, _rx) = screen();
+        screen
+            .query_editor
+            .set_text("SELECT id,\n  name\nFROM users;\nSELECT 2;");
+
+        // Cursor on the middle line of the first statement.
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        assert_eq!(
+            statement_at_cursor(&screen).as_deref(),
+            Some("SELECT id,\n  name\nFROM users"),
+            "a line break must not cut the statement short"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cursor_past_the_last_statement_runs_the_last_one() {
+        let (mut screen, _rx) = screen();
+        // A trailing newline is where the cursor sits after typing.
+        screen.query_editor.set_text("SELECT 1;\nSELECT 2;\n");
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+
+        assert_eq!(statement_at_cursor(&screen).as_deref(), Some("SELECT 2"));
+    }
+
+    #[tokio::test]
+    async fn run_all_sends_every_statement_and_records_them_in_history() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("SELECT 1;\nSELECT 2;");
+
+        screen.handle_key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if !screen.engine.is_pending() {
+                break;
+            }
+        }
+
+        assert_eq!(screen.engine.history(), &["SELECT 1", "SELECT 2"]);
     }
 
     #[test]

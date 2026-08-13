@@ -12,7 +12,7 @@ use mongodb::bson::{Bson, Document};
 use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo, Statement};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 struct ParsedQuery {
@@ -151,6 +151,26 @@ impl QueryDriver for MongoDriver {
             "$exists",
             "$regex",
         ]
+    }
+
+    /// One `db.<collection>.<method>(...)` per line: the parser accepts a
+    /// single call, so a line is exactly a statement.
+    fn split_statements(&self, text: &str) -> Vec<Statement> {
+        let mut statements = Vec::new();
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let start = offset + (line.len() - line.trim_start().len());
+                statements.push(Statement {
+                    text: trimmed.to_string(),
+                    start,
+                    end: start + trimmed.len(),
+                });
+            }
+            offset += line.len();
+        }
+        statements
     }
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {

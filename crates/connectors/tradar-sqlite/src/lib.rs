@@ -44,6 +44,10 @@ impl QueryDriver for SqliteDriver {
         query_driver::SQL_KEYWORDS
     }
 
+    fn split_statements(&self, text: &str) -> Vec<query_driver::Statement> {
+        query_driver::split_sql_statements(text)
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
         let tables: Vec<(String,)> =

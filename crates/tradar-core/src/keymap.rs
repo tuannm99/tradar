@@ -121,6 +121,8 @@ pub enum Command {
     RunQuery,
     /// Abandon the query that's currently running.
     CancelQuery,
+    /// Run every statement in the buffer, not just the one at the cursor.
+    RunAll,
     CycleFocus,
     SaveFile,
     OpenFile,
@@ -170,6 +172,7 @@ impl Command {
             Self::Back => "back",
             Self::RunQuery => "run-query",
             Self::CancelQuery => "cancel-query",
+            Self::RunAll => "run-all",
             Self::CycleFocus => "cycle-focus",
             Self::SaveFile => "save-file",
             Self::OpenFile => "open-file",
@@ -202,7 +205,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 37] = [
+    const ALL: [Self; 38] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -215,6 +218,7 @@ impl Command {
         Self::Back,
         Self::RunQuery,
         Self::CancelQuery,
+        Self::RunAll,
         Self::CycleFocus,
         Self::SaveFile,
         Self::OpenFile,
@@ -255,8 +259,9 @@ impl Command {
             Self::EditConnection => "Edit the selected connection",
             Self::DeleteConnection => "Delete the selected connection",
             Self::Back => "Back to the connection picker",
-            Self::RunQuery => "Run the query",
+            Self::RunQuery => "Run the statement at the cursor",
             Self::CancelQuery => "Cancel the running query",
+            Self::RunAll => "Run every statement in the buffer",
             Self::CycleFocus => "Cycle focus: editor / results / schema",
             Self::SaveFile => "Save the query to a file",
             Self::OpenFile => "Load a query from a file",
@@ -419,6 +424,7 @@ impl Default for Keymap {
                 ("f5", Command::RunQuery),
                 ("ctrl-enter", Command::RunQuery),
                 ("ctrl-c", Command::CancelQuery),
+                ("ctrl-a", Command::RunAll),
                 ("tab", Command::CycleFocus),
                 ("ctrl-s", Command::SaveFile),
                 ("ctrl-o", Command::OpenFile),

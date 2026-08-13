@@ -84,6 +84,12 @@ impl QueryEngine {
         self.pending
     }
 
+    /// The statements in `text`, per this driver's own rules -- see
+    /// `QueryDriver::split_statements`.
+    pub fn split_statements(&self, text: &str) -> Vec<crate::query_driver::Statement> {
+        self.driver.split_statements(text)
+    }
+
     /// The driver's own completion vocabulary -- see
     /// `QueryDriver::keywords`.
     pub fn keywords(&self) -> &'static [&'static str] {
@@ -112,6 +118,43 @@ impl QueryEngine {
                 Ok(result) => QueryOutcome::Completed { result },
                 Err(e) => QueryOutcome::Failed {
                     error: e.to_string(),
+                },
+            };
+            let _ = tx.send(TaggedOutcome { epoch, outcome });
+        }));
+    }
+
+    /// Runs `statements` one after another, reporting the last result --
+    /// or the first failure, since carrying on after an error would apply
+    /// half a script and hide which half.
+    pub fn submit_all(&mut self, statements: Vec<String>) {
+        self.epoch += 1;
+        let epoch = self.epoch;
+        self.pending = true;
+        for statement in &statements {
+            self.history.push(statement.clone());
+        }
+
+        let driver = Arc::clone(&self.driver);
+        let tx = self.outcome_tx.clone();
+        self.running = Some(tokio::spawn(async move {
+            let total = statements.len();
+            let mut last = None;
+            let mut failure = None;
+            for (index, statement) in statements.into_iter().enumerate() {
+                match driver.execute(&statement).await {
+                    Ok(result) => last = Some(result),
+                    Err(e) => {
+                        failure = Some(format!("statement {} of {total} failed: {e}", index + 1));
+                        break;
+                    }
+                }
+            }
+            let outcome = match (failure, last) {
+                (Some(error), _) => QueryOutcome::Failed { error },
+                (None, Some(result)) => QueryOutcome::Completed { result },
+                (None, None) => QueryOutcome::Failed {
+                    error: "nothing to run".to_string(),
                 },
             };
             let _ = tx.send(TaggedOutcome { epoch, outcome });

@@ -156,6 +156,21 @@ impl QueryEditorComponent {
         self.clamp_col();
     }
 
+    /// The cursor's position as a byte offset into `text()` -- what
+    /// "which statement am I in?" needs, since statements are reported as
+    /// offsets into the whole buffer.
+    pub fn cursor_offset(&self) -> usize {
+        let mut offset = 0;
+        for row in &self.lines[..self.cursor_row] {
+            offset += row.iter().map(|c| c.len_utf8()).sum::<usize>() + 1; // + newline
+        }
+        offset
+            + self.lines[self.cursor_row][..self.cursor_col.min(self.lines[self.cursor_row].len())]
+                .iter()
+                .map(|c| c.len_utf8())
+                .sum::<usize>()
+    }
+
     /// Where the cursor sits on screen, given the area the editor was last
     /// drawn into -- so a popup can be placed against it.
     pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {

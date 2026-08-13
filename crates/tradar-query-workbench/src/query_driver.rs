@@ -64,6 +64,106 @@ pub enum QueryResult {
     },
 }
 
+/// One runnable statement inside a buffer that may hold several, plus
+/// where it sits -- the offsets are what let "run the statement under the
+/// cursor" find the right one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Statement {
+    pub text: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Splits a SQL buffer on `;`, ignoring separators that aren't really
+/// separators: inside `'...'`/`"..."` strings, inside `--` line comments or
+/// `/* */` blocks, and inside Postgres dollar-quoted bodies (`$$ ... $$`,
+/// `$tag$ ... $tag$`) which routinely contain semicolons.
+///
+/// A lexer rather than a parser: knowing which characters are quoted is
+/// enough to find statement boundaries, and it stays correct for dialects
+/// this crate has never heard of. Shared here because every SQL connector
+/// needs the same answer -- see `SQL_KEYWORDS`.
+pub fn split_sql_statements(sql: &str) -> Vec<Statement> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    // A doubled quote is an escaped quote, not the end.
+                    if bytes[i] == quote {
+                        if bytes.get(i + 1) == Some(&quote) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i = sql[i..].find('\n').map_or(bytes.len(), |n| i + n);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = sql[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |n| i + 2 + n + 2);
+            }
+            b'$' => match dollar_tag(sql, i) {
+                Some(tag) => {
+                    let body = i + tag.len();
+                    i = sql[body..]
+                        .find(&tag)
+                        .map_or(bytes.len(), |n| body + n + tag.len());
+                }
+                None => i += 1,
+            },
+            b';' => {
+                push_statement(sql, start, i, &mut statements);
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    push_statement(sql, start, bytes.len(), &mut statements);
+    statements
+}
+
+/// The dollar-quote tag starting at `at` (`$$` or `$tag$`), if there is
+/// one. `None` for a bare `$` such as a parameter placeholder.
+fn dollar_tag(sql: &str, at: usize) -> Option<String> {
+    let rest = &sql[at + 1..];
+    let end = rest.find('$')?;
+    let tag = &rest[..end];
+    tag.chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+        .then(|| format!("${tag}$"))
+}
+
+/// Records `sql[start..end]` as a statement unless it's only whitespace and
+/// comments -- a trailing `;` or a commented-out block shouldn't turn into
+/// an empty statement that then gets run.
+fn push_statement(sql: &str, start: usize, end: usize, out: &mut Vec<Statement>) {
+    let slice = &sql[start..end];
+    if strip_leading_comments(slice).trim().is_empty() {
+        return;
+    }
+    let leading = slice.len() - slice.trim_start().len();
+    let trailing = slice.len() - slice.trim_end().len();
+    out.push(Statement {
+        text: slice.trim().to_string(),
+        start: start + leading,
+        end: end - trailing,
+    });
+}
+
 /// Whether `sql` is a statement that returns rows, and so should be run
 /// with a fetch rather than an execute. Lives here rather than in one
 /// connector because every SQL driver needs the same answer and connector
@@ -197,6 +297,25 @@ pub trait QueryDriver: Send + Sync {
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>>;
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult>;
 
+    /// Splits a buffer into the statements it holds, so a file can carry
+    /// several and be run one at a time. The default treats the whole
+    /// buffer as a single statement, which is right for a backend with no
+    /// separator of its own; each driver overrides it because every query
+    /// language delimits differently (SQL on `;`, Redis per line, an
+    /// Elasticsearch request as a verb line plus its JSON body).
+    fn split_statements(&self, text: &str) -> Vec<Statement> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        let start = text.len() - text.trim_start().len();
+        vec![Statement {
+            text: trimmed.to_string(),
+            start,
+            end: start + trimmed.len(),
+        }]
+    }
+
     /// Words this backend's query language uses, offered as completions.
     /// Empty by default: a driver that doesn't say gets schema names only,
     /// which is still useful. Each driver spells its own vocabulary -- this
@@ -217,6 +336,116 @@ pub trait QueryDriver: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn texts(sql: &str) -> Vec<String> {
+        split_sql_statements(sql)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
+    }
+
+    #[test]
+    fn a_buffer_splits_on_semicolons() {
+        assert_eq!(texts("SELECT 1; SELECT 2"), vec!["SELECT 1", "SELECT 2"]);
+    }
+
+    #[test]
+    fn a_statement_may_span_several_lines() {
+        let sql = "SELECT id,\n       name\nFROM users\nWHERE id = 1;\n\nSELECT 2;";
+
+        assert_eq!(
+            texts(sql),
+            vec![
+                "SELECT id,\n       name\nFROM users\nWHERE id = 1",
+                "SELECT 2"
+            ],
+            "line breaks are not statement boundaries"
+        );
+    }
+
+    #[test]
+    fn a_semicolon_inside_a_string_is_not_a_separator() {
+        assert_eq!(
+            texts("SELECT ';' AS x; SELECT 2"),
+            vec!["SELECT ';' AS x", "SELECT 2"]
+        );
+        assert_eq!(
+            texts(r#"SELECT "a;b" FROM t"#),
+            vec![r#"SELECT "a;b" FROM t"#]
+        );
+    }
+
+    #[test]
+    fn a_doubled_quote_inside_a_string_does_not_end_it() {
+        assert_eq!(
+            texts("SELECT 'it''s; fine' AS x; SELECT 2"),
+            vec!["SELECT 'it''s; fine' AS x", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn a_semicolon_inside_a_comment_is_not_a_separator() {
+        assert_eq!(
+            texts("SELECT 1 -- one; two\n; SELECT 2"),
+            vec!["SELECT 1 -- one; two", "SELECT 2"]
+        );
+        assert_eq!(
+            texts("SELECT /* a; b */ 1; SELECT 2"),
+            vec!["SELECT /* a; b */ 1", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn a_dollar_quoted_body_may_contain_semicolons() {
+        let sql = "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql; SELECT 2";
+
+        assert_eq!(
+            texts(sql),
+            vec![
+                "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql",
+                "SELECT 2"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tagged_dollar_quote_is_matched_by_its_tag() {
+        let sql = "SELECT $tag$ a; $$ still inside $tag$; SELECT 2";
+
+        assert_eq!(
+            texts(sql),
+            vec!["SELECT $tag$ a; $$ still inside $tag$", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn empty_statements_are_dropped() {
+        assert_eq!(texts("SELECT 1;"), vec!["SELECT 1"]);
+        assert_eq!(texts("SELECT 1;;;"), vec!["SELECT 1"]);
+        assert!(texts("").is_empty());
+        assert!(texts("  \n ; ; ").is_empty());
+        assert!(
+            texts("-- just a comment").is_empty(),
+            "nothing to run in a comment-only buffer"
+        );
+    }
+
+    #[test]
+    fn offsets_point_at_the_statement_in_the_original_buffer() {
+        let sql = "SELECT 1;\n\nSELECT 2;";
+
+        let statements = split_sql_statements(sql);
+
+        assert_eq!(&sql[statements[0].start..statements[0].end], "SELECT 1");
+        assert_eq!(&sql[statements[1].start..statements[1].end], "SELECT 2");
+    }
+
+    #[test]
+    fn an_unterminated_statement_still_counts() {
+        // The last statement usually has no trailing semicolon.
+        assert_eq!(texts("SELECT 1;\nSELECT 2"), vec!["SELECT 1", "SELECT 2"]);
+        assert_eq!(texts("SELECT 'unclosed"), vec!["SELECT 'unclosed"]);
+    }
 
     #[test]
     fn row_returning_statements_are_recognised() {

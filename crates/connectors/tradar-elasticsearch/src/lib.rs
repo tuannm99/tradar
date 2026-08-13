@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{ColumnInfo, QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_driver::{
+    ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
+};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 struct ElasticsearchDriver {
@@ -123,6 +125,37 @@ impl QueryDriver for ElasticsearchDriver {
             "fuzzy",
             "nested",
         ]
+    }
+
+    /// A request is a `METHOD /path` line plus the JSON body that follows
+    /// it, so a new verb line starts a new statement -- the same rule
+    /// Kibana's Dev Tools console uses. Blank lines between requests are
+    /// ignored rather than treated as separators, since a pretty-printed
+    /// body can contain them.
+    fn split_statements(&self, text: &str) -> Vec<Statement> {
+        let mut statements: Vec<Statement> = Vec::new();
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim();
+            let line_start = offset + (line.len() - line.trim_start().len());
+            offset += line.len();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match (starts_request(trimmed), statements.last_mut()) {
+                (false, Some(current)) => {
+                    // Continuation of the request above: extend it to here.
+                    current.end = line_start + trimmed.len();
+                    current.text = text[current.start..current.end].trim_end().to_string();
+                }
+                _ => statements.push(Statement {
+                    text: trimmed.to_string(),
+                    start: line_start,
+                    end: line_start + trimmed.len(),
+                }),
+            }
+        }
+        statements
     }
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
@@ -248,6 +281,19 @@ fn flatten_properties(prefix: &str, properties: &serde_json::Value, out: &mut Ve
             }),
         }
     }
+}
+
+/// Whether a line opens a new request: an HTTP verb followed by a path,
+/// which is what separates one console request from the next.
+fn starts_request(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    let Some(verb) = words.next() else {
+        return false;
+    };
+    matches!(
+        verb.to_ascii_uppercase().as_str(),
+        "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH"
+    ) && words.next().is_some()
 }
 
 #[cfg(test)]
