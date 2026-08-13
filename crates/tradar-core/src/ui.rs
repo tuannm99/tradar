@@ -133,6 +133,111 @@ pub fn draw_status_bar(frame: &mut Frame, area: Rect, hints: &[Hint], right: Opt
     }
 }
 
+/// A single-line text field: the editing half of any prompt or form
+/// (`Ctrl+S`'s file path, the connection form's fields). Owns only the
+/// text and cursor -- confirming, cancelling and drawing a frame around it
+/// belong to whoever hosts it, since those differ per prompt.
+#[derive(Debug, Default, Clone)]
+pub struct TextInput {
+    chars: Vec<char>,
+    cursor: usize,
+}
+
+impl TextInput {
+    pub fn new(initial: &str) -> Self {
+        let chars: Vec<char> = initial.chars().collect();
+        let cursor = chars.len();
+        Self { chars, cursor }
+    }
+
+    pub fn text(&self) -> String {
+        self.chars.iter().collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chars.is_empty()
+    }
+
+    /// Handles one key of text editing. Returns whether the key was used,
+    /// so the host can tell "the field consumed this" from "this is mine to
+    /// interpret". Deliberately fixed (not remappable): these are the
+    /// editing keys every terminal field has, and a user who rebinds
+    /// `backspace` has bigger problems.
+    pub fn handle_key_event(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match code {
+            KeyCode::Char(c)
+                if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.chars.insert(self.cursor, c);
+                self.cursor += 1;
+                true
+            }
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                    self.chars.remove(self.cursor);
+                }
+                true
+            }
+            KeyCode::Delete => {
+                if self.cursor < self.chars.len() {
+                    self.chars.remove(self.cursor);
+                }
+                true
+            }
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                true
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.chars.len());
+                true
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                true
+            }
+            KeyCode::End => {
+                self.cursor = self.chars.len();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The field as styled spans. `focused` draws a block cursor -- a
+    /// terminal hides the real one, so without this you can't see where
+    /// you're typing.
+    pub fn spans(&self, focused: bool) -> Vec<Span<'static>> {
+        let theme = theme();
+        let mut spans: Vec<Span<'static>> = self
+            .chars
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let style = Style::default().fg(theme.text);
+                if focused && i == self.cursor {
+                    Span::styled(c.to_string(), style.add_modifier(Modifier::REVERSED))
+                } else {
+                    Span::styled(c.to_string(), style)
+                }
+            })
+            .collect();
+        if focused && self.cursor >= self.chars.len() {
+            spans.push(Span::styled(
+                " ",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        }
+        spans
+    }
+}
+
 /// The `?` overlay: every binding currently in effect, grouped by context.
 /// Built from the live `Keymap`, so a remapped key shows up here without
 /// anyone maintaining a second copy of the list.

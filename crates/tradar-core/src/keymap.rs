@@ -92,6 +92,9 @@ pub enum Command {
     PrevTab,
     // Picker
     Open,
+    NewConnection,
+    EditConnection,
+    DeleteConnection,
     // Query screen
     Back,
     RunQuery,
@@ -117,6 +120,9 @@ pub enum Command {
     // Overlays
     Confirm,
     Cancel,
+    /// Move between fields of a multi-field form.
+    NextField,
+    PrevField,
 }
 
 impl Command {
@@ -128,6 +134,9 @@ impl Command {
             Self::NextTab => "next-tab",
             Self::PrevTab => "prev-tab",
             Self::Open => "open",
+            Self::NewConnection => "new-connection",
+            Self::EditConnection => "edit-connection",
+            Self::DeleteConnection => "delete-connection",
             Self::Back => "back",
             Self::RunQuery => "run-query",
             Self::CycleFocus => "cycle-focus",
@@ -148,6 +157,8 @@ impl Command {
             Self::HalfPageUp => "half-page-up",
             Self::Confirm => "confirm",
             Self::Cancel => "cancel",
+            Self::NextField => "next-field",
+            Self::PrevField => "prev-field",
         }
     }
 
@@ -155,13 +166,16 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 31] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
         Self::NextTab,
         Self::PrevTab,
         Self::Open,
+        Self::NewConnection,
+        Self::EditConnection,
+        Self::DeleteConnection,
         Self::Back,
         Self::RunQuery,
         Self::CycleFocus,
@@ -182,6 +196,8 @@ impl Command {
         Self::HalfPageUp,
         Self::Confirm,
         Self::Cancel,
+        Self::NextField,
+        Self::PrevField,
     ];
 
     /// One-line description, shown next to the binding in the help overlay.
@@ -193,6 +209,9 @@ impl Command {
             Self::NextTab => "Go to the next tab",
             Self::PrevTab => "Go to the previous tab",
             Self::Open => "Connect to the selected connection",
+            Self::NewConnection => "Add a connection",
+            Self::EditConnection => "Edit the selected connection",
+            Self::DeleteConnection => "Delete the selected connection",
             Self::Back => "Back to the connection picker",
             Self::RunQuery => "Run the query",
             Self::CycleFocus => "Cycle focus: editor / results / schema",
@@ -213,6 +232,8 @@ impl Command {
             Self::HalfPageUp => "Scroll half a page up",
             Self::Confirm => "Confirm",
             Self::Cancel => "Cancel",
+            Self::NextField => "Next field",
+            Self::PrevField => "Previous field",
         }
     }
 
@@ -337,6 +358,9 @@ impl Default for Keymap {
             parse_defaults(&[
                 ("q", Command::Quit),
                 ("enter", Command::Open),
+                ("a", Command::NewConnection),
+                ("e", Command::EditConnection),
+                ("d", Command::DeleteConnection),
                 ("?", Command::Help),
             ]),
         );
@@ -375,7 +399,12 @@ impl Default for Keymap {
         );
         bindings.insert(
             Context::Prompt,
-            parse_defaults(&[("enter", Command::Confirm), ("esc", Command::Cancel)]),
+            parse_defaults(&[
+                ("enter", Command::Confirm),
+                ("esc", Command::Cancel),
+                ("tab", Command::NextField),
+                ("backtab", Command::PrevField),
+            ]),
         );
         Self { bindings }
     }

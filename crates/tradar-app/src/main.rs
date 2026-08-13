@@ -43,9 +43,8 @@ fn registry() -> HashMap<String, Box<dyn Connector>> {
 }
 
 /// The result of a connect attempt, carried across a `tokio::spawn`
-/// boundary. Deliberately *not* `Action::Opened` itself: a `Screen`
-/// (`Box<dyn Component>`) can hold non-`Send` state (`edtui`'s
-/// `EditorState` holds an `Rc`-based clipboard), so it must be built with
+/// boundary. Deliberately *not* `Action::Opened` itself: `Component` isn't
+/// bound to `Send`, so a `Screen` (`Box<dyn Component>`) must be built with
 /// `Session::build_screen` on this single-threaded event loop, never inside
 /// a spawned task. `Session` itself is `Send + Sync` and crosses fine.
 enum ConnectOutcome {
@@ -75,27 +74,22 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let connections_path = default_connections_path()?;
-    let store = ConnectionStore::at(connections_path.clone());
+    let store = ConnectionStore::at(default_connections_path()?);
     let connections = store.load()?;
-
-    if connections.is_empty() {
-        println!(
-            "No saved connections found. Add one to {} and re-run tradar.\n\
-             (There's no interactive \"add connection\" screen yet -- see \
-             docs/architecture.md.)",
-            connections_path.display()
-        );
-        return Ok(());
-    }
 
     let session_store = SessionStore::at(default_session_path()?);
     let session_state = session_store.load().unwrap_or_default();
 
     let registry = Arc::new(registry());
+    // The picker's driver field offers exactly what this build can connect
+    // to, sorted so the list doesn't shuffle between runs (the registry is
+    // a HashMap).
+    let mut drivers: Vec<String> = registry.keys().cloned().collect();
+    drivers.sort();
+
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let (connect_tx, connect_rx) = mpsc::unbounded_channel();
-    let mut root = RootComponent::new(connections);
+    let mut root = RootComponent::new(connections).with_editing(drivers, store);
 
     // Reconnect whatever tabs were open (and connected) when the app last
     // quit, same as a user hand-picking each one from the picker again.

@@ -80,6 +80,7 @@ impl SessionStore {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ConnectionStore {
     path: PathBuf,
 }

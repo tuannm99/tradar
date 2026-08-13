@@ -14,7 +14,7 @@ use ratatui::widgets::Paragraph;
 
 use tradar_core::action::{Action, Component};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
-use tradar_core::storage::{SavedConnection, SessionState};
+use tradar_core::storage::{ConnectionStore, SavedConnection, SessionState};
 use tradar_core::theme::theme;
 use tradar_core::ui::{self, HelpOverlay};
 
@@ -37,10 +37,15 @@ pub struct Tab {
 }
 
 impl Tab {
-    fn new(connections: Vec<SavedConnection>) -> Self {
+    fn new(connections: Vec<SavedConnection>, editing: Option<&Editing>) -> Self {
+        let mut connection_picker = ConnectionPickerComponent::new(connections);
+        if let Some(editing) = editing {
+            connection_picker =
+                connection_picker.with_editing(editing.drivers.clone(), editing.store.clone());
+        }
         Self {
             screen: ScreenSlot::ConnectionPicker,
-            connection_picker: ConnectionPickerComponent::new(connections),
+            connection_picker,
             title: None,
         }
     }
@@ -48,6 +53,16 @@ impl Tab {
     fn label(&self) -> String {
         self.title.clone().unwrap_or_else(|| "picker".to_string())
     }
+}
+
+/// What a picker needs to edit the connection list: the connector ids
+/// compiled into this build (from `main.rs`'s registry) and where to save.
+/// Absent in tests that only exercise navigation, which leaves the picker
+/// read-only.
+#[derive(Clone)]
+pub struct Editing {
+    pub drivers: Vec<String>,
+    pub store: ConnectionStore,
 }
 
 pub struct RootComponent {
@@ -61,22 +76,41 @@ pub struct RootComponent {
     help: Option<HelpOverlay>,
     /// Half-finished two-key global binding.
     pending: Option<KeyPress>,
+    /// Present once `with_editing` is called; every tab's picker gets it.
+    editing: Option<Editing>,
 }
 
 impl RootComponent {
     pub fn new(connections: Vec<SavedConnection>) -> Self {
         Self {
-            tabs: vec![Tab::new(connections.clone())],
+            tabs: vec![Tab::new(connections.clone(), None)],
             active_tab: 0,
             should_quit: false,
             connections,
             help: None,
             pending: None,
+            editing: None,
         }
     }
 
+    /// Lets every picker add/edit/delete connections. `main.rs` calls this
+    /// with the connector registry's ids and the store it loaded from.
+    pub fn with_editing(mut self, drivers: Vec<String>, store: ConnectionStore) -> Self {
+        let editing = Editing { drivers, store };
+        for tab in &mut self.tabs {
+            tab.connection_picker = std::mem::replace(
+                &mut tab.connection_picker,
+                ConnectionPickerComponent::new(Vec::new()),
+            )
+            .with_editing(editing.drivers.clone(), editing.store.clone());
+        }
+        self.editing = Some(editing);
+        self
+    }
+
     fn new_tab(&mut self) {
-        self.tabs.push(Tab::new(self.connections.clone()));
+        self.tabs
+            .push(Tab::new(self.connections.clone(), self.editing.as_ref()));
         self.active_tab = self.tabs.len() - 1;
     }
 
@@ -348,6 +382,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+pub mod connection_form;
 pub mod connection_picker;
 
 #[cfg(test)]

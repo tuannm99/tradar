@@ -6,13 +6,13 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::theme::theme;
-use tradar_core::ui;
+use tradar_core::ui::{self, TextInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -28,25 +28,21 @@ pub enum PromptOutcome {
 
 pub struct FilePromptComponent {
     pub kind: PromptKind,
-    input: Vec<char>,
-    cursor: usize,
+    input: TextInput,
     pub error: Option<String>,
 }
 
 impl FilePromptComponent {
     pub fn new(kind: PromptKind, initial: &str) -> Self {
-        let input: Vec<char> = initial.chars().collect();
-        let cursor = input.len();
         Self {
             kind,
-            input,
-            cursor,
+            input: TextInput::new(initial),
             error: None,
         }
     }
 
     pub fn text(&self) -> String {
-        self.input.iter().collect()
+        self.input.text()
     }
 
     pub fn handle_key_event(
@@ -66,46 +62,13 @@ impl FilePromptComponent {
             }
         }
 
-        match code {
-            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.insert(self.cursor, c);
-                self.cursor += 1;
-                self.error = None;
-                None
-            }
-            KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                    self.input.remove(self.cursor);
-                    self.error = None;
-                }
-                None
-            }
-            KeyCode::Delete => {
-                if self.cursor < self.input.len() {
-                    self.input.remove(self.cursor);
-                    self.error = None;
-                }
-                None
-            }
-            KeyCode::Left => {
-                self.cursor = self.cursor.saturating_sub(1);
-                None
-            }
-            KeyCode::Right => {
-                self.cursor = (self.cursor + 1).min(self.input.len());
-                None
-            }
-            KeyCode::Home => {
-                self.cursor = 0;
-                None
-            }
-            KeyCode::End => {
-                self.cursor = self.input.len();
-                None
-            }
-            _ => None,
+        // Anything the field itself handles is text editing; typing
+        // clears a stale error so the prompt stops shouting at you while
+        // you fix the path.
+        if self.input.handle_key_event(code, modifiers) {
+            self.error = None;
         }
+        None
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
@@ -122,27 +85,7 @@ impl FilePromptComponent {
         };
         let title = format!("{verb} — {confirm} confirm, {cancel} cancel");
 
-        // The typed path, with a block cursor so the caret is visible in a
-        // terminal that hides the real one.
-        let input: Vec<char> = self.input.clone();
-        let mut spans: Vec<Span> = input
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let style = Style::default().fg(theme.text);
-                if i == self.cursor {
-                    Span::styled(c.to_string(), style.add_modifier(Modifier::REVERSED))
-                } else {
-                    Span::styled(c.to_string(), style)
-                }
-            })
-            .collect();
-        if self.cursor >= input.len() {
-            spans.push(Span::styled(
-                " ",
-                Style::default().add_modifier(Modifier::REVERSED),
-            ));
-        }
+        let spans = self.input.spans(true);
 
         let mut lines = vec![Line::from(spans)];
         if let Some(error) = &self.error {
