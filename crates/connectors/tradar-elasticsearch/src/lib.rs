@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo};
+use tradar_query_workbench::query_driver::{ColumnInfo, QueryDriver, QueryResult, SchemaInfo};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 struct ElasticsearchDriver {
@@ -128,13 +128,25 @@ impl QueryDriver for ElasticsearchDriver {
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let url = format!("{}/_cat/indices?format=json", self.base_url);
         let indices: Vec<serde_json::Value> = reqwest::get(&url).await?.json().await?;
+
+        // One `_mapping` call covers every index, so index fields cost a
+        // single extra round trip no matter how many indices there are.
+        // Failing to read mappings must not fail schema browsing itself --
+        // the index list is still useful without field detail.
+        let mappings: serde_json::Value =
+            match reqwest::get(format!("{}/_mapping", self.base_url)).await {
+                Ok(response) => response.json().await.unwrap_or(serde_json::Value::Null),
+                Err(_) => serde_json::Value::Null,
+            };
+
         Ok(indices
             .into_iter()
             .filter_map(|entry| {
-                entry
-                    .get("index")
-                    .and_then(|v| v.as_str())
-                    .map(SchemaInfo::new)
+                let name = entry.get("index").and_then(|v| v.as_str())?;
+                Some(SchemaInfo {
+                    name: name.to_string(),
+                    columns: index_fields(&mappings, name),
+                })
             })
             .collect())
     }
@@ -196,6 +208,48 @@ pub fn connector() -> Box<dyn Connector> {
     Box::new(ElasticsearchConnector)
 }
 
+/// The fields of one index, read out of a `GET /_mapping` response.
+fn index_fields(mappings: &serde_json::Value, index: &str) -> Vec<ColumnInfo> {
+    let mut fields = Vec::new();
+    if let Some(properties) = mappings
+        .get(index)
+        .and_then(|m| m.get("mappings"))
+        .and_then(|m| m.get("properties"))
+    {
+        flatten_properties("", properties, &mut fields);
+    }
+    fields
+}
+
+/// Flattens a mapping's `properties` into `parent.child` paths, which is
+/// how you refer to a nested field in a query anyway. An object node has
+/// no `type` of its own, only more `properties`; a leaf's `type` is
+/// reported as-is. Multi-fields (`fields`) are skipped: `title.keyword` is
+/// an indexing detail rather than a field of the document.
+fn flatten_properties(prefix: &str, properties: &serde_json::Value, out: &mut Vec<ColumnInfo>) {
+    let Some(properties) = properties.as_object() else {
+        return;
+    };
+    for (name, definition) in properties {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        match definition.get("properties") {
+            Some(nested) => flatten_properties(&path, nested, out),
+            None => out.push(ColumnInfo {
+                name: path,
+                type_name: definition
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("object")
+                    .to_string(),
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +289,36 @@ mod tests {
         let result = driver.connect().await;
 
         assert!(result.is_ok(), "connect failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn list_schema_reports_index_fields_from_the_mapping() {
+        let container = ElasticSearch::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(9200).await.unwrap();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut driver = ElasticsearchDriver::new(&base_url);
+        driver.connect().await.unwrap();
+        reqwest::Client::new()
+            .put(format!("{base_url}/orders"))
+            .header("content-type", "application/json")
+            .body(
+                r#"{"mappings":{"properties":{
+                       "id":{"type":"long"},
+                       "customer":{"properties":{"name":{"type":"text"}}}}}}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let orders = schema
+            .iter()
+            .find(|entry| entry.name == "orders")
+            .expect("the index we just created should be listed");
+        let fields: Vec<&str> = orders.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(fields.contains(&"id"), "fields were: {fields:?}");
+        assert!(fields.contains(&"customer.name"), "fields were: {fields:?}");
     }
 
     #[tokio::test]
@@ -279,6 +363,73 @@ mod tests {
             }
             other => panic!("expected Documents, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn index_fields_flattens_nested_properties_into_paths() {
+        let mappings = serde_json::json!({
+            "orders": {
+                "mappings": {
+                    "properties": {
+                        "id": {"type": "long"},
+                        "customer": {
+                            "properties": {
+                                "name": {"type": "text"},
+                                "address": {"properties": {"city": {"type": "keyword"}}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let fields = index_fields(&mappings, "orders");
+
+        let named: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|c| (c.name.as_str(), c.type_name.as_str()))
+            .collect();
+        assert!(named.contains(&("id", "long")));
+        assert!(
+            named.contains(&("customer.name", "text")),
+            "a nested field is named the way you'd write it in a query: {named:?}"
+        );
+        assert!(named.contains(&("customer.address.city", "keyword")));
+        assert!(
+            !named.iter().any(|(name, _)| *name == "customer"),
+            "an object node is not itself a field: {named:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_field_is_not_reported_as_a_separate_field() {
+        let mappings = serde_json::json!({
+            "posts": {
+                "mappings": {
+                    "properties": {
+                        "title": {
+                            "type": "text",
+                            "fields": {"keyword": {"type": "keyword"}}
+                        }
+                    }
+                }
+            }
+        });
+
+        let fields = index_fields(&mappings, "posts");
+
+        assert_eq!(fields.len(), 1, "title.keyword is an indexing detail");
+        assert_eq!(fields[0].name, "title");
+        assert_eq!(fields[0].type_name, "text");
+    }
+
+    #[test]
+    fn an_index_with_no_mapping_reports_no_fields() {
+        let mappings = serde_json::json!({"other": {"mappings": {}}});
+
+        assert!(index_fields(&mappings, "missing").is_empty());
+        assert!(index_fields(&mappings, "other").is_empty());
+        assert!(index_fields(&serde_json::Value::Null, "any").is_empty());
     }
 
     #[tokio::test]
