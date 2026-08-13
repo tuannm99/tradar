@@ -103,6 +103,10 @@ pub enum Command {
     Yank,
     InsertName,
     Help,
+    /// Horizontal scrolling for the results table, when it has more columns
+    /// than fit on screen.
+    ScrollLeft,
+    ScrollRight,
     // Lists
     MoveDown,
     MoveUp,
@@ -134,6 +138,8 @@ impl Command {
             Self::Yank => "yank",
             Self::InsertName => "insert-name",
             Self::Help => "help",
+            Self::ScrollLeft => "scroll-left",
+            Self::ScrollRight => "scroll-right",
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
             Self::MoveTop => "move-top",
@@ -149,7 +155,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 24] = [
+    const ALL: [Self; 26] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -166,6 +172,8 @@ impl Command {
         Self::Yank,
         Self::InsertName,
         Self::Help,
+        Self::ScrollLeft,
+        Self::ScrollRight,
         Self::MoveDown,
         Self::MoveUp,
         Self::MoveTop,
@@ -195,6 +203,8 @@ impl Command {
             Self::Yank => "Copy the selected row/document",
             Self::InsertName => "Insert the selected schema name",
             Self::Help => "Show this help",
+            Self::ScrollLeft => "Scroll the results table left",
+            Self::ScrollRight => "Scroll the results table right",
             Self::MoveDown => "Move down",
             Self::MoveUp => "Move up",
             Self::MoveTop => "Jump to the top",
@@ -344,6 +354,10 @@ impl Default for Keymap {
                 ("y", Command::Yank),
                 ("enter", Command::InsertName),
                 ("?", Command::Help),
+                ("h", Command::ScrollLeft),
+                ("left", Command::ScrollLeft),
+                ("l", Command::ScrollRight),
+                ("right", Command::ScrollRight),
             ]),
         );
         bindings.insert(

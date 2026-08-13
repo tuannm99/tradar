@@ -3,16 +3,46 @@
 //! and its movement/yank methods directly from key handling.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
 
 use tradar_core::theme::theme;
 use tradar_core::ui;
 use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::QueryResult;
+
+/// Width for each column: whatever its widest value needs, capped at
+/// `MAX_COLUMN_WIDTH`, and never narrower than its own header.
+fn column_widths(columns: &[String], rows: &[Vec<String>]) -> Vec<usize> {
+    let mut widths: Vec<usize> = columns
+        .iter()
+        .map(|name| name.chars().count().min(MAX_COLUMN_WIDTH))
+        .collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if let Some(width) = widths.get_mut(i) {
+                *width = (*width).max(cell.chars().count()).min(MAX_COLUMN_WIDTH);
+            }
+        }
+    }
+    widths
+}
+
+/// Cuts `text` to `width` columns, marking the cut with `…` so a truncated
+/// value can't be mistaken for a complete one.
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    text.chars()
+        .take(keep)
+        .chain(std::iter::once('…'))
+        .collect()
+}
 
 /// `1 row` / `2 rows` -- the results title reads as a sentence, so the
 /// plural has to agree.
@@ -24,10 +54,18 @@ fn count(n: usize, noun: &str) -> String {
     }
 }
 
+/// Widest a single column may get before its cells are truncated. Without
+/// a cap one long text column pushes every other column off screen, which
+/// is worse than losing the tail of that one value.
+const MAX_COLUMN_WIDTH: usize = 40;
+
 pub struct ResultsComponent {
     pub last_result: Option<QueryResult>,
     pub last_error: Option<String>,
     pub selected: usize,
+    /// First visible column, for tables too wide to fit -- see
+    /// `scroll_left`/`scroll_right`.
+    col_offset: usize,
     visible_height: usize,
 }
 
@@ -43,6 +81,7 @@ impl ResultsComponent {
             last_result: None,
             last_error: None,
             selected: 0,
+            col_offset: 0,
             visible_height: 0,
         }
     }
@@ -51,6 +90,7 @@ impl ResultsComponent {
         self.last_result = Some(result);
         self.last_error = None;
         self.selected = 0;
+        self.col_offset = 0;
     }
 
     pub fn set_error(&mut self, error: String) {
@@ -99,6 +139,26 @@ impl ResultsComponent {
 
     pub fn move_half_page_up(&mut self) {
         self.apply_move(VimMove::HalfPageUp);
+    }
+
+    /// Column count of the current table result -- `0` for documents or no
+    /// result, since neither scrolls horizontally.
+    fn column_count(&self) -> usize {
+        match &self.last_result {
+            Some(QueryResult::Table { columns, .. }) => columns.len(),
+            _ => 0,
+        }
+    }
+
+    pub fn scroll_left(&mut self) {
+        self.col_offset = self.col_offset.saturating_sub(1);
+    }
+
+    /// Scrolls one column right, always leaving at least the last column
+    /// visible -- scrolling into empty space would just look broken.
+    pub fn scroll_right(&mut self) {
+        let last = self.column_count().saturating_sub(1);
+        self.col_offset = (self.col_offset + 1).min(last);
     }
 
     /// Plain-text form of the currently selected row/document, ready to
@@ -152,40 +212,60 @@ impl ResultsComponent {
 
         match result {
             QueryResult::Table { columns, rows } => {
-                let list_area = if columns.is_empty() {
-                    inner
-                } else {
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([Constraint::Length(1), Constraint::Min(0)])
-                        .split(inner);
-                    frame.render_widget(
-                        Paragraph::new(columns.join("  ")).style(
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        chunks[0],
-                    );
-                    chunks[1]
-                };
-                self.visible_height = list_area.height as usize;
+                // A real table widget, not rows joined by spaces: columns
+                // have to line up or the values can't be read down a column,
+                // which is most of the point of tabular output.
+                self.col_offset = self.col_offset.min(columns.len().saturating_sub(1));
+                let widths = column_widths(columns, rows);
 
-                let items: Vec<ListItem> = rows
+                // The header row is drawn by the widget, so it costs one row
+                // of the body -- account for it or half-page scrolling
+                // overshoots by one.
+                self.visible_height = (inner.height as usize).saturating_sub(1);
+
+                let header = Row::new(
+                    columns
+                        .iter()
+                        .skip(self.col_offset)
+                        .zip(widths.iter().skip(self.col_offset))
+                        .map(|(name, width)| Cell::from(truncate(name, *width)))
+                        .collect::<Vec<_>>(),
+                )
+                .style(
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                );
+
+                let body: Vec<Row> = rows
                     .iter()
                     .map(|row| {
-                        ListItem::new(Span::styled(
-                            row.join("  "),
-                            Style::default().fg(theme.text),
-                        ))
+                        Row::new(
+                            row.iter()
+                                .skip(self.col_offset)
+                                .zip(widths.iter().skip(self.col_offset))
+                                .map(|(cell, width)| Cell::from(truncate(cell, *width)))
+                                .collect::<Vec<_>>(),
+                        )
+                        .style(Style::default().fg(theme.text))
                     })
                     .collect();
-                let mut state = ListState::default();
+
+                let constraints: Vec<Constraint> = widths
+                    .iter()
+                    .skip(self.col_offset)
+                    .map(|w| Constraint::Length(*w as u16))
+                    .collect();
+
+                let mut state = TableState::default();
                 if !rows.is_empty() {
                     state.select(Some(self.selected));
                 }
-                let list = List::new(items).highlight_style(ui::selection_style());
-                frame.render_stateful_widget(list, list_area, &mut state);
+                let table = Table::new(body, constraints)
+                    .header(header)
+                    .column_spacing(2)
+                    .row_highlight_style(ui::selection_style());
+                frame.render_stateful_widget(table, inner, &mut state);
             }
             QueryResult::Documents(docs) => {
                 self.visible_height = inner.height as usize;
@@ -228,6 +308,13 @@ mod tests {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
     }
 
+    /// One rendered row as a string, for asserting on column positions.
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer.cell((x, y)).unwrap().symbol())
+            .collect()
+    }
+
     fn draw_component(component: &mut ResultsComponent, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -242,6 +329,122 @@ mod tests {
             columns: vec!["id".to_string()],
             rows: (0..rows).map(|i| vec![i.to_string()]).collect(),
         }
+    }
+
+    /// Two columns whose values are much wider than their headers -- the
+    /// case that used to render ragged.
+    fn wide_table() -> QueryResult {
+        QueryResult::Table {
+            columns: vec!["id".to_string(), "name".to_string(), "n".to_string()],
+            rows: vec![
+                vec!["1".to_string(), "alice".to_string(), "10".to_string()],
+                vec!["1000".to_string(), "bo".to_string(), "2000".to_string()],
+            ],
+        }
+    }
+
+    #[test]
+    fn columns_line_up_under_their_headers() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| results.draw(frame, Rect::new(0, 0, 40, 8), false))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Column starts, read off the header row, must be where the data
+        // rows start too -- that's what "aligned" means.
+        let header = row_text(&buffer, 1);
+        let first = row_text(&buffer, 2);
+        let second = row_text(&buffer, 3);
+        let name_column = header.find("name").expect("header row was: {header}");
+        assert_eq!(
+            first.find("alice"),
+            Some(name_column),
+            "row 1 was: {first:?}, header: {header:?}"
+        );
+        assert_eq!(
+            second.find("bo"),
+            Some(name_column),
+            "row 2 was: {second:?}, header: {header:?}"
+        );
+    }
+
+    #[test]
+    fn a_value_wider_than_the_column_cap_is_truncated_with_an_ellipsis() {
+        assert_eq!(truncate("alice", 5), "alice");
+        assert_eq!(truncate("alexandra", 5), "alex…");
+        assert_eq!(
+            column_widths(
+                &["v".to_string()],
+                &[vec!["x".repeat(MAX_COLUMN_WIDTH + 10)]]
+            ),
+            vec![MAX_COLUMN_WIDTH],
+            "one huge value must not push the other columns off screen"
+        );
+    }
+
+    #[test]
+    fn column_width_is_the_widest_of_the_header_and_its_values() {
+        let widths = column_widths(
+            &["id".to_string(), "name".to_string()],
+            &[
+                vec!["1".to_string(), "alice".to_string()],
+                vec!["1000".to_string(), "bo".to_string()],
+            ],
+        );
+
+        assert_eq!(widths, vec![4, 5], "id -> '1000', name -> 'alice'");
+    }
+
+    #[test]
+    fn scrolling_right_moves_the_first_visible_column_and_stops_at_the_last() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+
+        results.scroll_right();
+        assert_eq!(results.col_offset, 1);
+
+        results.scroll_right();
+        results.scroll_right();
+        assert_eq!(results.col_offset, 2, "must keep the last column visible");
+
+        results.scroll_left();
+        assert_eq!(results.col_offset, 1);
+        results.scroll_left();
+        results.scroll_left();
+        assert_eq!(
+            results.col_offset, 0,
+            "must not scroll past the first column"
+        );
+    }
+
+    #[test]
+    fn scrolling_right_hides_the_leading_columns() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+
+        results.scroll_right();
+
+        // The `id` column (values 1 / 1000) scrolls off; the rest stays.
+        let text = draw_component(&mut results, 40, 8);
+        assert!(!text.contains("1000"), "buffer was: {text}");
+        assert!(text.contains("alice"), "buffer was: {text}");
+        assert!(text.contains("2000"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn a_new_result_resets_the_horizontal_scroll() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        results.scroll_right();
+
+        results.set_result(wide_table());
+
+        assert_eq!(results.col_offset, 0);
     }
 
     #[test]

@@ -172,7 +172,7 @@ impl QueryScreenComponent {
 /// work from anywhere on this screen.
 fn required_focus(command: Command) -> Option<Focus> {
     match command {
-        Command::Yank => Some(Focus::Results),
+        Command::Yank | Command::ScrollLeft | Command::ScrollRight => Some(Focus::Results),
         Command::InsertName => Some(Focus::Sidebar),
         _ => None,
     }
@@ -287,6 +287,8 @@ impl Component for QueryScreenComponent {
                     yank_to_clipboard(&text);
                 }
             }
+            Command::ScrollLeft => self.results.scroll_left(),
+            Command::ScrollRight => self.results.scroll_right(),
             Command::InsertName => {
                 if let Some(name) = self.schema_sidebar.selected_name() {
                     let name = name.to_string();
