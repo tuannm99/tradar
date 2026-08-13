@@ -62,12 +62,12 @@ User rà lại sau khi dùng thử và chốt danh sách dưới đây. Thứ t�
 
 8. **Xem lại toàn bộ keymap** — user nói "phase đầu xây dựng chưa ưng phần mapping bằng bàn phím", sẽ dùng thử rồi phản hồi cụ thể. **Đừng tự đổi binding khi chưa có phản hồi đó** — hạ tầng remap đã có sẵn (`tradar_core::keymap` + `config.toml`), nên đổi mặc định là việc rẻ khi đã biết muốn đổi gì.
 
-## Query file: giữ nội dung + nhiều câu lệnh (user nêu 2026-08-14, chưa làm)
+## Query file: giữ nội dung + nhiều câu lệnh (user nêu 2026-08-14) — xong
 
 Ưu tiên ngay sau schema Elasticsearch. Hai vấn đề tách biệt nhưng cùng đụng vào query editor:
 
-1. **Không giữ lại nội dung query.** Thoát app là mất những gì đang gõ — session restore hiện chỉ nhớ *connection* của mỗi tab (xem ghi chú "Chưa làm" ở mục 4). Cần quyết: lưu buffer vào session file, hay gắn tab với một file `.sql` trên đĩa và tự lưu?
-2. **Một file chỉ chứa được một câu lệnh.** Thực tế người ta để cả chục câu trong một file rồi chạy từng câu. Yêu cầu:
+1. ~~**Không giữ lại nội dung query.**~~ Xong (2026-08-14). Chọn hướng **lưu buffer vào session file** (không gắn tab với file `.sql` — đơn giản hơn và không phát sinh câu hỏi "file này của ai"). `SessionState.tabs` đổi từ `Vec<String>` sang `Vec<TabState { connection, query }>`. Để lấy/đưa text qua ranh giới connector mà không giả định screen nào cũng là text: thêm `Component::restore_state() -> Option<String>` (screen tự quyết muốn giữ lại gì, mặc định `None`) và `Session::build_screen(..., restore: Option<&str>)` nhận lại đúng chuỗi đó — app chỉ lưu và trả lại, không hiểu nội dung. **Lưu ý tương thích**: `session.toml` định dạng cũ (mảng chuỗi) sẽ parse lỗi → app rơi về phiên mới; đổi lại chỉ mất đúng một lần restore của file vốn được ghi lại mỗi lần thoát, nên không viết code migrate.
+2. ~~**Một file chỉ chứa được một câu lệnh.**~~ Xong (2026-08-14). `F5`/`Ctrl+Enter` chạy **câu tại con trỏ**, `Ctrl+A` chạy **tất cả** (tuần tự, dừng ở câu lỗi đầu tiên và nói rõ câu thứ mấy — chạy tiếp sẽ áp dụng nửa script mà không biết nửa nào). Ranh giới câu do driver tự quyết qua `QueryDriver::split_statements` mới (mặc định "cả buffer là một câu"): SQL dùng chung `query_driver::split_sql_statements` — một lexer tách theo `;` nhưng bỏ qua `;` nằm trong chuỗi `'...'`/`"..."` (kể cả `''` escape), trong comment `--`/`/* */`, và trong dollar-quote `$$`/`$tag$` của Postgres; Redis/Mongo mỗi dòng một câu; Elasticsearch gom `METHOD /path` + body JSON bên dưới thành một request như console của Kibana (nên body pretty-print có dòng trống vẫn nguyên vẹn). Yêu cầu gốc bên dưới giữ nguyên để đối chiếu: Thực tế người ta để cả chục câu trong một file rồi chạy từng câu. Yêu cầu:
    - **Chạy tất cả** (execute all) — chạy tuần tự; cần quyết cách báo kết quả (kết quả câu cuối? tổng hợp? dừng ở câu lỗi đầu tiên?).
    - **Chạy câu tại con trỏ** (inline) — và **tự nhận biết ranh giới câu**, vì một câu có thể trải nhiều dòng nên không thể cắt theo dòng.
 
