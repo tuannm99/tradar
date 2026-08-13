@@ -13,7 +13,7 @@ use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
-    self as query_driver, QueryDriver, QueryResult, SchemaInfo,
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
 
@@ -51,16 +51,32 @@ impl QueryDriver for PostgresDriver {
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+        // Tables and their columns in one round trip, ordered so the
+        // grouping below can just walk the rows: information_schema joins
+        // are cheaper than a query per table.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT t.table_name, c.column_name, c.data_type \
+             FROM information_schema.tables t \
+             JOIN information_schema.columns c \
+               ON c.table_schema = t.table_schema AND c.table_name = t.table_name \
+             WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' \
+             ORDER BY t.table_name, c.ordinal_position",
         )
         .fetch_all(pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(name,)| SchemaInfo { name })
-            .collect())
+
+        let mut schema: Vec<SchemaInfo> = Vec::new();
+        for (table, column, type_name) in rows {
+            if schema.last().map(|s| s.name.as_str()) != Some(table.as_str()) {
+                schema.push(SchemaInfo::new(table));
+            }
+            let entry = schema.last_mut().expect("just pushed");
+            entry.columns.push(ColumnInfo {
+                name: column,
+                type_name,
+            });
+        }
+        Ok(schema)
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {

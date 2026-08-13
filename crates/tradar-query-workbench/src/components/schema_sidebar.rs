@@ -5,7 +5,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use tradar_core::theme::theme;
@@ -14,10 +14,23 @@ use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::SchemaInfo;
 
+/// One visible line of the sidebar. Tables are always listed; a table's
+/// columns appear underneath it only while it's expanded, so the selection
+/// index has to address both kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Row {
+    Table(usize),
+    Column { table: usize, column: usize },
+}
+
 pub struct SchemaSidebarComponent {
     pub schema: Vec<SchemaInfo>,
+    /// Index into the *visible rows* (tables plus the columns of expanded
+    /// tables), not into `schema`.
     pub schema_selected: usize,
     pub schema_error: Option<String>,
+    /// Indices into `schema` whose columns are shown.
+    expanded: std::collections::HashSet<usize>,
     visible_height: usize,
 }
 
@@ -33,6 +46,7 @@ impl SchemaSidebarComponent {
             schema: Vec::new(),
             schema_selected: 0,
             schema_error: None,
+            expanded: std::collections::HashSet::new(),
             visible_height: 0,
         }
     }
@@ -41,6 +55,52 @@ impl SchemaSidebarComponent {
         self.schema = schema;
         self.schema_selected = 0;
         self.schema_error = None;
+        self.expanded.clear();
+    }
+
+    /// The visible lines, in order.
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::with_capacity(self.schema.len());
+        for (table, entry) in self.schema.iter().enumerate() {
+            rows.push(Row::Table(table));
+            if self.expanded.contains(&table) {
+                rows.extend((0..entry.columns.len()).map(|column| Row::Column { table, column }));
+            }
+        }
+        rows
+    }
+
+    fn selected_row(&self) -> Option<Row> {
+        self.rows().get(self.schema_selected).copied()
+    }
+
+    /// Shows the selected table's columns. A table with no column detail
+    /// (Mongo, Redis, or a driver that doesn't report them) has nothing to
+    /// show, so this leaves it alone rather than drawing an empty branch.
+    pub fn expand(&mut self) {
+        if let Some(Row::Table(table)) = self.selected_row()
+            && !self.schema[table].columns.is_empty()
+        {
+            self.expanded.insert(table);
+        }
+    }
+
+    /// Hides the selected table's columns. On a column, collapses its
+    /// parent table and moves the selection there -- otherwise the row you
+    /// were on would vanish from under you.
+    pub fn collapse(&mut self) {
+        match self.selected_row() {
+            Some(Row::Table(table)) => {
+                self.expanded.remove(&table);
+            }
+            Some(Row::Column { table, .. }) => {
+                self.expanded.remove(&table);
+                if let Some(index) = self.rows().iter().position(|r| *r == Row::Table(table)) {
+                    self.schema_selected = index;
+                }
+            }
+            None => {}
+        }
     }
 
     pub fn set_schema_error(&mut self, error: String) {
@@ -50,12 +110,8 @@ impl SchemaSidebarComponent {
     /// Moves the selection. `pub` because `QueryScreenComponent` resolves
     /// the key (it owns focus) and hands the movement down.
     pub fn apply_move(&mut self, mv: VimMove) {
-        vim_list::apply(
-            mv,
-            &mut self.schema_selected,
-            self.schema.len(),
-            self.visible_height,
-        );
+        let len = self.rows().len();
+        vim_list::apply(mv, &mut self.schema_selected, len, self.visible_height);
     }
 
     pub fn move_down(&mut self) {
@@ -82,33 +138,61 @@ impl SchemaSidebarComponent {
         self.apply_move(VimMove::HalfPageUp);
     }
 
+    /// The name under the cursor -- a table's, or a column's when one is
+    /// selected, which is what you want inserted into the query either way.
     pub fn selected_name(&self) -> Option<&str> {
-        self.schema
-            .get(self.schema_selected)
-            .map(|s| s.name.as_str())
+        match self.selected_row()? {
+            Row::Table(table) => Some(self.schema[table].name.as_str()),
+            Row::Column { table, column } => Some(self.schema[table].columns[column].name.as_str()),
+        }
     }
 
     pub fn reset(&mut self) {
         self.schema = Vec::new();
         self.schema_selected = 0;
         self.schema_error = None;
+        self.expanded.clear();
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let theme = theme();
-        let items: Vec<ListItem> = self
-            .schema
+        let rows = self.rows();
+        let items: Vec<ListItem> = rows
             .iter()
-            .map(|entry| {
-                ListItem::new(Span::styled(
-                    format!(" {}", entry.name),
-                    Style::default().fg(theme.text),
-                ))
+            .map(|row| match row {
+                Row::Table(table) => {
+                    let entry = &self.schema[*table];
+                    // A marker only where there's something to open, so an
+                    // un-expandable entry doesn't look broken when `l`
+                    // does nothing.
+                    let marker = match (entry.columns.is_empty(), self.expanded.contains(table)) {
+                        (true, _) => "  ",
+                        (false, true) => "▾ ",
+                        (false, false) => "▸ ",
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(marker.to_string(), Style::default().fg(theme.text_dim)),
+                        Span::styled(entry.name.clone(), Style::default().fg(theme.text)),
+                    ]))
+                }
+                Row::Column { table, column } => {
+                    let column = &self.schema[*table].columns[*column];
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("    {}", column.name),
+                            Style::default().fg(theme.text),
+                        ),
+                        Span::styled(
+                            format!("  {}", column.type_name),
+                            Style::default().fg(theme.text_dim),
+                        ),
+                    ]))
+                }
             })
             .collect();
 
         let mut state = ListState::default();
-        if !self.schema.is_empty() {
+        if !rows.is_empty() {
             state.select(Some(self.schema_selected));
         }
 
@@ -153,7 +237,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
-    use crate::query_driver::SchemaInfo;
+    use crate::query_driver::{ColumnInfo, SchemaInfo};
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
@@ -161,12 +245,8 @@ mod tests {
 
     fn schema() -> Vec<SchemaInfo> {
         vec![
-            SchemaInfo {
-                name: "users".to_string(),
-            },
-            SchemaInfo {
-                name: "orders".to_string(),
-            },
+            SchemaInfo::new("users".to_string()),
+            SchemaInfo::new("orders".to_string()),
         ]
     }
 
@@ -258,24 +338,12 @@ mod tests {
     fn half_page_scroll_moves_by_half_the_visible_rows() {
         let mut sidebar = SchemaSidebarComponent::new();
         sidebar.set_schema(vec![
-            SchemaInfo {
-                name: "a".to_string(),
-            },
-            SchemaInfo {
-                name: "b".to_string(),
-            },
-            SchemaInfo {
-                name: "c".to_string(),
-            },
-            SchemaInfo {
-                name: "d".to_string(),
-            },
-            SchemaInfo {
-                name: "e".to_string(),
-            },
-            SchemaInfo {
-                name: "f".to_string(),
-            },
+            SchemaInfo::new("a".to_string()),
+            SchemaInfo::new("b".to_string()),
+            SchemaInfo::new("c".to_string()),
+            SchemaInfo::new("d".to_string()),
+            SchemaInfo::new("e".to_string()),
+            SchemaInfo::new("f".to_string()),
         ]);
         let backend = TestBackend::new(26, 12);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -289,6 +357,98 @@ mod tests {
 
         sidebar.move_half_page_up();
         assert_eq!(sidebar.schema_selected, 0);
+    }
+
+    fn schema_with_columns() -> Vec<SchemaInfo> {
+        vec![
+            SchemaInfo {
+                name: "users".to_string(),
+                columns: vec![
+                    ColumnInfo {
+                        name: "id".to_string(),
+                        type_name: "INTEGER".to_string(),
+                    },
+                    ColumnInfo {
+                        name: "email".to_string(),
+                        type_name: "TEXT".to_string(),
+                    },
+                ],
+            },
+            SchemaInfo::new("orders"),
+        ]
+    }
+
+    #[test]
+    fn expanding_a_table_inserts_its_columns_as_rows_below_it() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema_with_columns());
+        assert_eq!(sidebar.rows().len(), 2, "collapsed: just the two tables");
+
+        sidebar.expand();
+
+        assert_eq!(sidebar.rows().len(), 4, "users + its 2 columns + orders");
+        sidebar.move_down();
+        assert_eq!(sidebar.selected_name(), Some("id"));
+        sidebar.move_down();
+        assert_eq!(sidebar.selected_name(), Some("email"));
+        sidebar.move_down();
+        assert_eq!(sidebar.selected_name(), Some("orders"));
+    }
+
+    #[test]
+    fn collapsing_from_a_column_returns_to_its_table() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema_with_columns());
+        sidebar.expand();
+        sidebar.move_down();
+        assert_eq!(sidebar.selected_name(), Some("id"));
+
+        sidebar.collapse();
+
+        assert_eq!(sidebar.rows().len(), 2);
+        assert_eq!(
+            sidebar.selected_name(),
+            Some("users"),
+            "the selection must not be left pointing at a row that vanished"
+        );
+    }
+
+    #[test]
+    fn a_table_with_no_column_detail_cannot_be_expanded() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema_with_columns());
+        sidebar.move_to_bottom();
+        assert_eq!(sidebar.selected_name(), Some("orders"));
+
+        sidebar.expand();
+
+        assert_eq!(sidebar.rows().len(), 2, "nothing to expand, nothing added");
+    }
+
+    #[test]
+    fn a_new_schema_collapses_everything() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema_with_columns());
+        sidebar.expand();
+        assert_eq!(sidebar.rows().len(), 4);
+
+        sidebar.set_schema(schema_with_columns());
+
+        assert_eq!(sidebar.rows().len(), 2);
+        assert_eq!(sidebar.schema_selected, 0);
+    }
+
+    #[test]
+    fn draw_shows_columns_with_their_types_when_expanded() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema_with_columns());
+        sidebar.expand();
+
+        let (text, _) = draw_component(&mut sidebar, false);
+
+        assert!(text.contains("users"), "buffer was: {text}");
+        assert!(text.contains("id"), "buffer was: {text}");
+        assert!(text.contains("INTEGER"), "buffer was: {text}");
     }
 
     #[test]
@@ -322,9 +482,7 @@ mod tests {
     #[test]
     fn draw_shows_schema_items() {
         let mut sidebar = SchemaSidebarComponent::new();
-        sidebar.set_schema(vec![SchemaInfo {
-            name: "users".to_string(),
-        }]);
+        sidebar.set_schema(vec![SchemaInfo::new("users".to_string())]);
 
         let (text, _) = draw_component(&mut sidebar, false);
 
@@ -392,15 +550,9 @@ mod tests {
     fn draw_selection_highlight_tracks_schema_selected() {
         let mut sidebar = SchemaSidebarComponent::new();
         sidebar.set_schema(vec![
-            SchemaInfo {
-                name: "aaa".to_string(),
-            },
-            SchemaInfo {
-                name: "bbb".to_string(),
-            },
-            SchemaInfo {
-                name: "ccc".to_string(),
-            },
+            SchemaInfo::new("aaa".to_string()),
+            SchemaInfo::new("bbb".to_string()),
+            SchemaInfo::new("ccc".to_string()),
         ]);
         sidebar.move_down();
         assert_eq!(sidebar.schema_selected, 1);

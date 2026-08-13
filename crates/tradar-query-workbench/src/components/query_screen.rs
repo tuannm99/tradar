@@ -168,16 +168,6 @@ impl QueryScreenComponent {
     }
 }
 
-/// The pane a command needs focused to make sense. `None` for commands that
-/// work from anywhere on this screen.
-fn required_focus(command: Command) -> Option<Focus> {
-    match command {
-        Command::Yank | Command::ScrollLeft | Command::ScrollRight => Some(Focus::Results),
-        Command::InsertName => Some(Focus::Sidebar),
-        _ => None,
-    }
-}
-
 impl Component for QueryScreenComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         if let Some(prompt) = self.prompt.as_mut() {
@@ -228,12 +218,15 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
-        // List navigation applies only when a list actually has focus;
-        // with the editor focused those same keys are the editor's own vim
-        // motions.
+        // Only the focused pane's context is offered, which is what lets
+        // `l` mean "expand this table" in the sidebar and "scroll right" in
+        // the results without the two bindings colliding. With the editor
+        // focused, neither pane's keys (nor list navigation) apply -- those
+        // are the editor's own vim motions.
         let contexts: &[Context] = match self.focus {
             Focus::Editor => &[Context::QueryScreen],
-            Focus::Results | Focus::Sidebar => &[Context::QueryScreen, Context::List],
+            Focus::Sidebar => &[Context::QueryScreen, Context::Sidebar, Context::List],
+            Focus::Results => &[Context::QueryScreen, Context::Results, Context::List],
         };
         let key = KeyPress::new(code, modifiers);
         let command = match keymap().resolve_in(contexts, &mut self.pending, key) {
@@ -243,16 +236,6 @@ impl Component for QueryScreenComponent {
             Resolution::Pending => return None,
             Resolution::None => return self.forward_to_editor(code, modifiers),
         };
-
-        // A few commands only make sense against a specific pane. Invoked
-        // from elsewhere, the key should do whatever it would have done
-        // otherwise -- `enter` inserts a newline in the editor rather than
-        // a schema name.
-        if let Some(required) = required_focus(command)
-            && self.focus != required
-        {
-            return self.forward_to_editor(code, modifiers);
-        }
 
         if let Some(mv) = command.as_vim_move() {
             match self.focus {
@@ -289,6 +272,8 @@ impl Component for QueryScreenComponent {
             }
             Command::ScrollLeft => self.results.scroll_left(),
             Command::ScrollRight => self.results.scroll_right(),
+            Command::Expand => self.schema_sidebar.expand(),
+            Command::Collapse => self.schema_sidebar.collapse(),
             Command::InsertName => {
                 if let Some(name) = self.schema_sidebar.selected_name() {
                     let name = name.to_string();
@@ -388,12 +373,8 @@ mod tests {
 
     fn schema() -> Vec<SchemaInfo> {
         vec![
-            SchemaInfo {
-                name: "users".to_string(),
-            },
-            SchemaInfo {
-                name: "orders".to_string(),
-            },
+            SchemaInfo::new("users".to_string()),
+            SchemaInfo::new("orders".to_string()),
         ]
     }
 
@@ -688,6 +669,70 @@ mod tests {
         screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(screen.query_editor.text(), "\n");
+    }
+
+    #[tokio::test]
+    async fn l_expands_a_table_in_the_sidebar_but_scrolls_the_table_in_results() {
+        let schema_with_columns = vec![SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![crate::query_driver::ColumnInfo {
+                name: "id".to_string(),
+                type_name: "INTEGER".to_string(),
+            }],
+        }];
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(
+            empty_result(),
+            Ok(schema_with_columns),
+        ));
+
+        // Sidebar focused: `l` opens the table's columns.
+        screen.focus = Focus::Sidebar;
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+        screen.schema_sidebar.move_down();
+        assert_eq!(screen.schema_sidebar.selected_name(), Some("id"));
+
+        // Results focused: the same key scrolls the results table instead.
+        screen.focus = Focus::Results;
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["a".to_string(), "b".to_string()],
+            rows: vec![vec!["1".to_string(), "2".to_string()]],
+        });
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+
+        let text = {
+            let backend = ratatui::backend::TestBackend::new(40, 12);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| screen.results.draw(frame, frame.area(), true))
+                .unwrap();
+            buffer_text(terminal.backend().buffer())
+        };
+        assert!(
+            !text.contains(" a "),
+            "column 'a' should have scrolled off: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_a_column_inserts_the_column_name() {
+        let schema_with_columns = vec![SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![crate::query_driver::ColumnInfo {
+                name: "email".to_string(),
+                type_name: "TEXT".to_string(),
+            }],
+        }];
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(
+            empty_result(),
+            Ok(schema_with_columns),
+        ));
+        screen.focus = Focus::Sidebar;
+
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(screen.query_editor.text(), "email");
     }
 
     #[test]

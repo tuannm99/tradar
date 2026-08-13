@@ -11,7 +11,7 @@ use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
-    self as query_driver, QueryDriver, QueryResult, SchemaInfo,
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
 
@@ -41,14 +41,31 @@ impl QueryDriver for SqliteDriver {
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
-        let rows: Vec<(String,)> =
+        let tables: Vec<(String,)> =
             sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table'")
                 .fetch_all(pool)
                 .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(name,)| SchemaInfo { name })
-            .collect())
+
+        // SQLite has no information_schema, so columns come from a
+        // `PRAGMA` per table. That's one round trip each, which is fine
+        // against a local file -- and there's no join to fetch them all at
+        // once the way Postgres has.
+        let mut schema = Vec::with_capacity(tables.len());
+        for (name,) in tables {
+            let columns: Vec<(i64, String, String)> =
+                sqlx::query_as("SELECT cid, name, type FROM pragma_table_info($1)")
+                    .bind(&name)
+                    .fetch_all(pool)
+                    .await?;
+            schema.push(SchemaInfo {
+                name,
+                columns: columns
+                    .into_iter()
+                    .map(|(_, name, type_name)| ColumnInfo { name, type_name })
+                    .collect(),
+            });
+        }
+        Ok(schema)
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {

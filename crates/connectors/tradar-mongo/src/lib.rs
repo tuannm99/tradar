@@ -119,7 +119,7 @@ impl QueryDriver for MongoDriver {
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let names = self.database()?.list_collection_names().await?;
-        Ok(names.into_iter().map(|name| SchemaInfo { name }).collect())
+        Ok(names.into_iter().map(SchemaInfo::new).collect())
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {

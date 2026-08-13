@@ -9,7 +9,32 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemaInfo {
     pub name: String,
-    // extended per-database (columns, indexes, etc.) in a later plan
+    /// The table's columns, for backends where that's a meaningful concept.
+    /// Empty for the document/key-value drivers (MongoDB collections have
+    /// no fixed schema, Redis keys have no columns at all), and for any
+    /// driver that hasn't been taught to report them yet -- the sidebar
+    /// treats an empty list as "nothing to expand", not as an error.
+    pub columns: Vec<ColumnInfo>,
+}
+
+impl SchemaInfo {
+    /// A schema entry with no column detail -- what the non-columnar
+    /// drivers return.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            columns: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnInfo {
+    pub name: String,
+    /// The backend's own type name (`INTEGER`, `character varying`, ...),
+    /// passed through rather than normalized: the point is to show what the
+    /// database actually says.
+    pub type_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

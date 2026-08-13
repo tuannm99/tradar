@@ -89,9 +89,7 @@ impl QueryDriver for ElasticsearchDriver {
                 entry
                     .get("index")
                     .and_then(|v| v.as_str())
-                    .map(|name| SchemaInfo {
-                        name: name.to_string(),
-                    })
+                    .map(SchemaInfo::new)
             })
             .collect())
     }

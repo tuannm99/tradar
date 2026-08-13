@@ -46,7 +46,7 @@ impl QueryDriver for RedisDriver {
             .arg(100)
             .query_async(&mut connection)
             .await?;
-        Ok(keys.into_iter().map(|name| SchemaInfo { name }).collect())
+        Ok(keys.into_iter().map(SchemaInfo::new).collect())
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {

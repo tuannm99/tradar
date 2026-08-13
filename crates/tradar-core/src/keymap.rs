@@ -40,6 +40,14 @@ pub enum Context {
     Global,
     Picker,
     QueryScreen,
+    /// Only while the schema sidebar has focus. Split out from
+    /// `QueryScreen` so the same key can mean different things per pane
+    /// (`l` expands a table here, scrolls the table right in `Results`)
+    /// without the two bindings colliding -- the screen passes only the
+    /// focused pane's context to `resolve_in`.
+    Sidebar,
+    /// Only while the results pane has focus.
+    Results,
     /// Shared by every selectable list: the connection picker, the schema
     /// sidebar, the results pane, and the history overlay.
     List,
@@ -53,6 +61,8 @@ impl Context {
             Self::Global => "global",
             Self::Picker => "picker",
             Self::QueryScreen => "query-screen",
+            Self::Sidebar => "sidebar",
+            Self::Results => "results",
             Self::List => "list",
             Self::Prompt => "prompt",
         }
@@ -63,6 +73,8 @@ impl Context {
             "global" => Self::Global,
             "picker" => Self::Picker,
             "query-screen" => Self::QueryScreen,
+            "sidebar" => Self::Sidebar,
+            "results" => Self::Results,
             "list" => Self::List,
             "prompt" => Self::Prompt,
             _ => return None,
@@ -70,11 +82,13 @@ impl Context {
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 5] {
+    pub fn all() -> [Self; 7] {
         [
             Self::Global,
             Self::Picker,
             Self::QueryScreen,
+            Self::Sidebar,
+            Self::Results,
             Self::List,
             Self::Prompt,
         ]
@@ -110,6 +124,9 @@ pub enum Command {
     /// than fit on screen.
     ScrollLeft,
     ScrollRight,
+    /// Show/hide a table's columns in the schema sidebar.
+    Expand,
+    Collapse,
     // Lists
     MoveDown,
     MoveUp,
@@ -149,6 +166,8 @@ impl Command {
             Self::Help => "help",
             Self::ScrollLeft => "scroll-left",
             Self::ScrollRight => "scroll-right",
+            Self::Expand => "expand",
+            Self::Collapse => "collapse",
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
             Self::MoveTop => "move-top",
@@ -166,7 +185,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 31] = [
+    const ALL: [Self; 33] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -188,6 +207,8 @@ impl Command {
         Self::Help,
         Self::ScrollLeft,
         Self::ScrollRight,
+        Self::Expand,
+        Self::Collapse,
         Self::MoveDown,
         Self::MoveUp,
         Self::MoveTop,
@@ -224,6 +245,8 @@ impl Command {
             Self::Help => "Show this help",
             Self::ScrollLeft => "Scroll the results table left",
             Self::ScrollRight => "Scroll the results table right",
+            Self::Expand => "Show a table's columns",
+            Self::Collapse => "Hide a table's columns",
             Self::MoveDown => "Move down",
             Self::MoveUp => "Move up",
             Self::MoveTop => "Jump to the top",
@@ -375,9 +398,23 @@ impl Default for Keymap {
                 ("ctrl-o", Command::OpenFile),
                 ("ctrl-r", Command::History),
                 ("ctrl-y", Command::ExportCurl),
-                ("y", Command::Yank),
-                ("enter", Command::InsertName),
                 ("?", Command::Help),
+            ]),
+        );
+        bindings.insert(
+            Context::Sidebar,
+            parse_defaults(&[
+                ("enter", Command::InsertName),
+                ("l", Command::Expand),
+                ("right", Command::Expand),
+                ("h", Command::Collapse),
+                ("left", Command::Collapse),
+            ]),
+        );
+        bindings.insert(
+            Context::Results,
+            parse_defaults(&[
+                ("y", Command::Yank),
                 ("h", Command::ScrollLeft),
                 ("left", Command::ScrollLeft),
                 ("l", Command::ScrollRight),
@@ -639,10 +676,10 @@ mod tests {
         let mut pending = None;
 
         let in_picker = keymap.resolve(Context::Picker, &mut pending, press(KeyCode::Enter));
-        let on_screen = keymap.resolve(Context::QueryScreen, &mut pending, press(KeyCode::Enter));
+        let in_sidebar = keymap.resolve(Context::Sidebar, &mut pending, press(KeyCode::Enter));
 
         assert_eq!(in_picker, Resolution::Command(Command::Open));
-        assert_eq!(on_screen, Resolution::Command(Command::InsertName));
+        assert_eq!(in_sidebar, Resolution::Command(Command::InsertName));
     }
 
     #[test]
@@ -680,9 +717,9 @@ mod tests {
         let keymap = Keymap::default();
         let mut pending = None;
 
-        // `enter` is bound in both, and QueryScreen is listed first.
+        // `enter` is bound in both, and Sidebar is listed first.
         let resolution = keymap.resolve_in(
-            &[Context::QueryScreen, Context::Picker],
+            &[Context::Sidebar, Context::Picker],
             &mut pending,
             press(KeyCode::Enter),
         );
@@ -703,6 +740,18 @@ mod tests {
         );
 
         assert_eq!(resolution, Resolution::Command(Command::MoveDown));
+    }
+
+    #[test]
+    fn the_same_key_does_different_things_in_the_sidebar_and_the_results_pane() {
+        let keymap = Keymap::default();
+        let mut pending = None;
+
+        let in_sidebar = keymap.resolve(Context::Sidebar, &mut pending, press(KeyCode::Char('l')));
+        let in_results = keymap.resolve(Context::Results, &mut pending, press(KeyCode::Char('l')));
+
+        assert_eq!(in_sidebar, Resolution::Command(Command::Expand));
+        assert_eq!(in_results, Resolution::Command(Command::ScrollRight));
     }
 
     #[test]
