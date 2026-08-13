@@ -1,0 +1,209 @@
+services:
+  # ============================================================
+  # SQL postgres only
+  # ============================================================
+
+  postgres:
+    image: postgres:17
+    container_name: tui-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mydb
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U user -d mydb']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ============================================================
+
+  # Redis
+  # ============================================================
+
+  redis:
+    image: redis:7
+    container_name: tui-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+
+  # ============================================================
+  # MongoDB
+  # ============================================================
+  mongo:
+    image: mongo:8
+    container_name: tui-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: user
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: mydb
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+
+  # ============================================================
+  # Elasticsearch 5
+  # ============================================================
+  elasticsearch5:
+    image: docker.elastic.co/elasticsearch/elasticsearch:5.6.16
+    container_name: tui-elasticsearch5
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - '9205:9200'
+      - '9305:9300'
+    volumes:
+      - elasticsearch5_data:/usr/share/elasticsearch/data
+
+  # ============================================================
+  # Elasticsearch 7
+  # ============================================================
+  elasticsearch7:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.26
+    container_name: tui-elasticsearch7
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - '9207:9200'
+      - '9307:9300'
+    volumes:
+      - elasticsearch7_data:/usr/share/elasticsearch/data
+
+  # ============================================================
+  # Elasticsearch 8
+  # ============================================================
+  elasticsearch8:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.6
+    container_name: tui-elasticsearch8
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - '9208:9200'
+      - '9308:9300'
+    volumes:
+      - elasticsearch8_data:/usr/share/elasticsearch/data
+
+  # ============================================================
+  # ClickHouse
+  # ============================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    container_name: tui-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: mydb
+
+      CLICKHOUSE_USER: user
+      CLICKHOUSE_PASSWORD: password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1'
+    ports:
+      - '8123:8123'
+      - '9000:9000'
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  # ============================================================
+  # Cassandra
+  # ============================================================
+  cassandra:
+    image: cassandra:5.0
+    container_name: tui-cassandra
+    restart: unless-stopped
+    environment:
+      CASSANDRA_CLUSTER_NAME: tui-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    ports:
+      - '9042:9042'
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+
+  # ============================================================
+  # RabbitMQ
+  # ============================================================
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: tui-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  # ============================================================
+  # Kafka
+  # ============================================================
+
+  kafka:
+    image: apache/kafka:4.0.1
+    container_name: tui-kafka
+    restart: unless-stopped
+    environment:
+      # KRaft
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+
+      # Internal listener
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:29093,EXTERNAL://:9092
+
+      # Client connection from host
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      KAFKA_NUM_PARTITIONS: 3
+
+    ports:
+      - '9092:9092'
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+volumes:
+  postgres_data:
+  redis_data:
+  mongo_data:
+
+  elasticsearch5_data:
+  elasticsearch7_data:
+  elasticsearch8_data:
+
+  clickhouse_data:
+  cassandra_data:
+  rabbitmq_data:
+  kafka_data:
