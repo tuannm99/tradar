@@ -5,7 +5,7 @@
 //! depend on a concrete driver module; only `main.rs` and `connectors.rs`
 //! may.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -78,6 +78,12 @@ pub struct RootComponent {
     pending: Option<KeyPress>,
     /// Present once `with_editing` is called; every tab's picker gets it.
     editing: Option<Editing>,
+    /// Where the tab bar was last drawn, so a click can switch tabs.
+    /// Zero-sized while a single tab means there's no bar to click.
+    tab_bar_area: Rect,
+    /// The tab bar's per-tab label widths, in order -- what turns a click
+    /// column into a tab index.
+    tab_label_widths: Vec<u16>,
 }
 
 impl RootComponent {
@@ -90,6 +96,8 @@ impl RootComponent {
             help: None,
             pending: None,
             editing: None,
+            tab_bar_area: Rect::ZERO,
+            tab_label_widths: Vec::new(),
         }
     }
 
@@ -229,6 +237,29 @@ impl Component for RootComponent {
         }
     }
 
+    fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        // The help overlay covers everything, so nothing behind it is a
+        // legitimate click target.
+        if self.help.is_some() {
+            return None;
+        }
+
+        if event.kind == MouseEventKind::Down(MouseButton::Left)
+            && ui::contains(self.tab_bar_area, event.column, event.row)
+        {
+            if let Some(index) = self.tab_at(event.column) {
+                self.active_tab = index;
+            }
+            return None;
+        }
+
+        let tab = &mut self.tabs[self.active_tab];
+        match &mut tab.screen {
+            ScreenSlot::ConnectionPicker => tab.connection_picker.handle_mouse_event(event),
+            ScreenSlot::Active(screen) => screen.handle_mouse_event(event),
+        }
+    }
+
     fn update(&mut self, action: Action) -> Option<Action> {
         match action {
             Action::Quit => {
@@ -308,9 +339,12 @@ impl Component for RootComponent {
             .constraints(constraints)
             .split(area);
         let (content_area, status_area) = if show_tab_bar {
-            draw_tab_bar(frame, chunks[0], &self.tabs, self.active_tab);
+            self.tab_bar_area = chunks[0];
+            self.tab_label_widths = draw_tab_bar(frame, chunks[0], &self.tabs, self.active_tab);
             (chunks[1], chunks[2])
         } else {
+            self.tab_bar_area = Rect::ZERO;
+            self.tab_label_widths.clear();
             (chunks[0], chunks[1])
         };
 
@@ -330,6 +364,18 @@ impl Component for RootComponent {
 }
 
 impl RootComponent {
+    /// Which tab's label covers screen column `column`.
+    fn tab_at(&self, column: u16) -> Option<usize> {
+        let mut x = self.tab_bar_area.x;
+        for (index, width) in self.tab_label_widths.iter().enumerate() {
+            if column >= x && column < x + width {
+                return Some(index);
+            }
+            x += width;
+        }
+        None
+    }
+
     /// The bottom hint bar. Hints come from the live keymap, so a remapped
     /// key shows its new binding here without this code knowing.
     fn draw_status_bar(&self, frame: &mut Frame, area: Rect) {
@@ -361,13 +407,17 @@ impl RootComponent {
     }
 }
 
-fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) {
+/// Draws the bar and reports each tab label's width, so clicks can be
+/// mapped back to a tab without recomputing the labels.
+fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) -> Vec<u16> {
     let theme = theme();
+    let mut widths = Vec::with_capacity(tabs.len());
     let spans: Vec<Span> = tabs
         .iter()
         .enumerate()
         .map(|(i, tab)| {
             let label = format!(" {}: {} ", i + 1, tab.label());
+            widths.push(label.chars().count() as u16);
             let style = if i == active {
                 Style::default()
                     .bg(theme.tab_active_bg)
@@ -380,6 +430,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) {
         })
         .collect();
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    widths
 }
 
 pub mod connection_form;
@@ -691,6 +742,65 @@ mod tests {
         assert!(text.contains("connect"), "buffer was: {text}");
         assert!(text.contains("ctrl-t"), "buffer was: {text}");
         assert!(text.contains("help"), "buffer was: {text}");
+    }
+
+    fn click_at(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn clicking_the_tab_bar_switches_tabs() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 2);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        // Labels are " 1: picker " etc, laid out left to right on row 0.
+        root.handle_mouse_event(click_at(2, 0));
+
+        assert_eq!(root.active_tab, 0);
+    }
+
+    #[test]
+    fn a_click_past_the_last_tab_label_changes_nothing() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+        assert_eq!(root.active_tab, 1);
+
+        root.handle_mouse_event(click_at(79, 0));
+
+        assert_eq!(root.active_tab, 1);
+    }
+
+    #[test]
+    fn the_help_overlay_swallows_clicks_too() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+        root.update(Action::ShowHelp);
+
+        root.handle_mouse_event(click_at(2, 0));
+
+        assert_eq!(root.active_tab, 1, "the click must not reach the tab bar");
     }
 
     #[test]

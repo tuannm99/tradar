@@ -73,6 +73,27 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+/// Whether `area` covers the given cell -- the hit test every mouse
+/// handler starts with.
+pub fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+/// Which list index sits at screen row `row`, for a list drawn into
+/// `inner` scrolled by `offset`. `None` when the click is outside the list
+/// or past its last item -- clicking empty space below the rows shouldn't
+/// jump the selection to the end.
+pub fn index_at(inner: Rect, offset: usize, row: u16, len: usize) -> Option<usize> {
+    if row < inner.y || row >= inner.y.saturating_add(inner.height) {
+        return None;
+    }
+    let index = offset + (row - inner.y) as usize;
+    (index < len).then_some(index)
+}
+
 /// One `key: label` pair in the status bar.
 pub struct Hint {
     pub key: String,
@@ -382,6 +403,43 @@ mod tests {
         assert_eq!(centered.height, 50);
         assert_eq!(centered.x, 25);
         assert_eq!(centered.y, 25);
+    }
+
+    #[test]
+    fn index_at_maps_a_click_row_to_a_list_index() {
+        let inner = Rect::new(0, 5, 20, 4);
+
+        assert_eq!(index_at(inner, 0, 5, 10), Some(0), "first visible row");
+        assert_eq!(index_at(inner, 0, 7, 10), Some(2));
+        assert_eq!(
+            index_at(inner, 3, 5, 10),
+            Some(3),
+            "a scrolled list offsets the answer"
+        );
+    }
+
+    #[test]
+    fn index_at_ignores_clicks_outside_the_rows() {
+        let inner = Rect::new(0, 5, 20, 4);
+
+        assert_eq!(index_at(inner, 0, 4, 10), None, "above the list");
+        assert_eq!(index_at(inner, 0, 9, 10), None, "below the list");
+        assert_eq!(
+            index_at(inner, 0, 8, 2),
+            None,
+            "empty space past the last item must not select the last item"
+        );
+    }
+
+    #[test]
+    fn contains_is_inclusive_of_the_top_left_and_exclusive_of_the_far_edge() {
+        let area = Rect::new(2, 3, 4, 5);
+
+        assert!(contains(area, 2, 3));
+        assert!(contains(area, 5, 7));
+        assert!(!contains(area, 6, 7), "one past the right edge");
+        assert!(!contains(area, 5, 8), "one past the bottom edge");
+        assert!(!contains(area, 1, 3));
     }
 
     #[test]

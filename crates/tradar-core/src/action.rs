@@ -5,7 +5,7 @@
 //! connector's `Session`, never through this type -- see "Screen không bao
 //! giờ làm IO" in docs/architecture.md.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -45,6 +45,12 @@ pub enum Action {
 
 pub trait Component {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action>;
+    /// Handles a click or scroll. Defaults to ignoring it: a component
+    /// that hasn't been taught where it was drawn can't hit-test, and
+    /// silently doing nothing is better than acting on a guess.
+    fn handle_mouse_event(&mut self, _event: MouseEvent) -> Option<Action> {
+        None
+    }
     fn update(&mut self, action: Action) -> Option<Action>;
     /// Returns whether anything changed that's worth a redraw. The default
     /// (no-op, nothing changed) covers every `Component` that only ever

@@ -69,6 +69,13 @@ pub struct ResultsComponent {
     /// Whether a query is in flight, so the pane can say so: without it a
     /// slow query is indistinguishable from a key that didn't register.
     running: bool,
+    /// Kept between frames so the scroll offset survives, which is what
+    /// makes a click land on the row that was actually pointed at.
+    table_state: TableState,
+    list_state: ListState,
+    /// Where the rows were last drawn, for hit-testing clicks. Excludes
+    /// the border and (for tables) the header row.
+    rows_area: Rect,
     visible_height: usize,
 }
 
@@ -86,6 +93,9 @@ impl ResultsComponent {
             selected: 0,
             col_offset: 0,
             running: false,
+            table_state: TableState::default(),
+            list_state: ListState::default(),
+            rows_area: Rect::ZERO,
             visible_height: 0,
         }
     }
@@ -169,6 +179,22 @@ impl ResultsComponent {
     pub fn scroll_right(&mut self) {
         let last = self.column_count().saturating_sub(1);
         self.col_offset = (self.col_offset + 1).min(last);
+    }
+
+    /// Selects the clicked row. Returns whether the click was inside this
+    /// pane's rows at all.
+    pub fn click(&mut self, column: u16, row: u16) -> bool {
+        if !ui::contains(self.rows_area, column, row) {
+            return false;
+        }
+        let offset = match &self.last_result {
+            Some(QueryResult::Documents(_)) => self.list_state.offset(),
+            _ => self.table_state.offset(),
+        };
+        if let Some(index) = ui::index_at(self.rows_area, offset, row, self.item_count()) {
+            self.selected = index;
+        }
+        true
     }
 
     /// Plain-text form of the currently selected row/document, ready to
@@ -301,15 +327,23 @@ impl ResultsComponent {
                     .map(|w| Constraint::Length(*w as u16))
                     .collect();
 
-                let mut state = TableState::default();
-                if !rows.is_empty() {
-                    state.select(Some(self.selected));
+                if rows.is_empty() {
+                    self.table_state.select(None);
+                } else {
+                    self.table_state.select(Some(self.selected));
                 }
+                // The widget draws its header on the first row, so the
+                // clickable rows start one below.
+                self.rows_area = Rect {
+                    y: inner.y.saturating_add(1),
+                    height: inner.height.saturating_sub(1),
+                    ..inner
+                };
                 let table = Table::new(body, constraints)
                     .header(header)
                     .column_spacing(2)
                     .row_highlight_style(ui::selection_style());
-                frame.render_stateful_widget(table, inner, &mut state);
+                frame.render_stateful_widget(table, inner, &mut self.table_state);
             }
             QueryResult::Affected { rows } => {
                 self.visible_height = 0;
@@ -341,12 +375,14 @@ impl ResultsComponent {
                         ))
                     })
                     .collect();
-                let mut state = ListState::default();
-                if !docs.is_empty() {
-                    state.select(Some(self.selected));
+                if docs.is_empty() {
+                    self.list_state.select(None);
+                } else {
+                    self.list_state.select(Some(self.selected));
                 }
+                self.rows_area = inner;
                 let list = List::new(items).highlight_style(ui::selection_style());
-                frame.render_stateful_widget(list, inner, &mut state);
+                frame.render_stateful_widget(list, inner, &mut self.list_state);
             }
         }
     }

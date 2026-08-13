@@ -111,6 +111,15 @@ impl QueryEditorComponent {
         self.pending_d = false;
     }
 
+    /// Scrolls the viewport by a wheel notch, moving the cursor with it so
+    /// the cursor stays on screen (this editor has no concept of a cursor
+    /// that's scrolled out of view).
+    pub fn scroll(&mut self, mv: tradar_core::vim_list::VimMove) {
+        let mut row = self.cursor_row;
+        vim_list::apply(mv, &mut row, self.lines.len(), self.visible_height);
+        self.move_row_to(row);
+    }
+
     pub fn forward_key(&mut self, key: KeyEvent) {
         match self.mode {
             EditorMode::Normal => self.handle_normal_key(key.code, key.modifiers),

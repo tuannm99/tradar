@@ -2,7 +2,7 @@
 //! request a connect. Implements `Component` because `RootComponent`
 //! routes keys to it directly whenever it's the active screen.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -14,7 +14,7 @@ use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::{ConnectionStore, SavedConnection};
 use tradar_core::theme::theme;
 use tradar_core::ui;
-use tradar_core::vim_list;
+use tradar_core::vim_list::{self, VimMove};
 
 use crate::components::connection_form::{ConnectionFormComponent, FormMode, FormOutcome};
 
@@ -26,6 +26,10 @@ pub struct ConnectionPickerComponent {
     /// Half-finished two-key binding (the first `g` of `gg`), owned here
     /// because it's per-list state -- see `tradar_core::keymap`.
     pending: Option<KeyPress>,
+    /// Kept between frames so the scroll offset survives, which is what
+    /// makes a click land on the row that was actually pointed at.
+    list_state: ListState,
+    list_area: Rect,
     visible_height: usize,
     /// The add/edit form, when open. It takes over key handling entirely.
     form: Option<ConnectionFormComponent>,
@@ -49,6 +53,8 @@ impl ConnectionPickerComponent {
             last_error: None,
             connect_epoch: 0,
             pending: None,
+            list_state: ListState::default(),
+            list_area: Rect::ZERO,
             visible_height: 0,
             form: None,
             confirming_delete: false,
@@ -123,6 +129,15 @@ impl ConnectionPickerComponent {
         self.persist();
     }
 
+    fn apply_move(&mut self, mv: VimMove) {
+        vim_list::apply(
+            mv,
+            &mut self.selected,
+            self.connections.len(),
+            self.visible_height,
+        );
+    }
+
     fn open_selected(&mut self) -> Option<Action> {
         let connection = self.connections.get(self.selected).cloned()?;
         self.connect_epoch += 1;
@@ -167,12 +182,7 @@ impl Component for ConnectionPickerComponent {
         };
 
         if let Some(mv) = command.as_vim_move() {
-            vim_list::apply(
-                mv,
-                &mut self.selected,
-                self.connections.len(),
-                self.visible_height,
-            );
+            self.apply_move(mv);
             return None;
         }
 
@@ -194,6 +204,42 @@ impl Component for ConnectionPickerComponent {
                 if self.store.is_some() && self.selected < self.connections.len() {
                     self.confirming_delete = true;
                 }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        // The form and the delete confirmation are modal: a click behind
+        // them would act on a list the user can't see.
+        if self.form.is_some() || self.confirming_delete {
+            return None;
+        }
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let inner = Rect {
+                    x: self.list_area.x.saturating_add(1),
+                    y: self.list_area.y.saturating_add(1),
+                    width: self.list_area.width.saturating_sub(2),
+                    height: self.list_area.height.saturating_sub(2),
+                };
+                if let Some(index) = ui::index_at(
+                    inner,
+                    self.list_state.offset(),
+                    event.row,
+                    self.connections.len(),
+                ) {
+                    self.selected = index;
+                }
+                None
+            }
+            MouseEventKind::ScrollDown => {
+                self.apply_move(VimMove::Down);
+                None
+            }
+            MouseEventKind::ScrollUp => {
+                self.apply_move(VimMove::Up);
                 None
             }
             _ => None,
@@ -239,11 +285,13 @@ impl Component for ConnectionPickerComponent {
             })
             .collect();
 
-        let mut state = ListState::default();
-        if !self.connections.is_empty() {
-            state.select(Some(self.selected));
+        if self.connections.is_empty() {
+            self.list_state.select(None);
+        } else {
+            self.list_state.select(Some(self.selected));
         }
         self.visible_height = list_area.height.saturating_sub(2) as usize;
+        self.list_area = list_area;
         let title = if self.drivers.is_empty() {
             "Connections".to_string()
         } else {
@@ -265,7 +313,7 @@ impl Component for ConnectionPickerComponent {
         let list = List::new(items)
             .block(ui::panel(&title, true))
             .highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, list_area, &mut state);
+        frame.render_stateful_widget(list, list_area, &mut self.list_state);
 
         if let (Some(error_area), Some(error)) = (error_area, &self.last_error) {
             let error_box = Paragraph::new(Span::styled(
@@ -652,6 +700,44 @@ mod tests {
         picker.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
 
         assert_eq!(picker.selected, 0, "the list must not move under the form");
+    }
+
+    fn click_at(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        // Row 0 is the border; the two connections are on rows 1 and 2.
+        picker.handle_mouse_event(click_at(5, 2));
+
+        assert_eq!(picker.selected, 1);
+    }
+
+    #[test]
+    fn clicking_empty_space_below_the_list_keeps_the_selection() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        picker.handle_mouse_event(click_at(5, 6));
+
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]

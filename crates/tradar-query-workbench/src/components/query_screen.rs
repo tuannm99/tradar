@@ -7,7 +7,7 @@
 use std::io::Write;
 
 use base64::Engine;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,6 +17,7 @@ use tradar_core::action::{Action, Component};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::SavedConnection;
 use tradar_core::ui;
+use tradar_core::vim_list::VimMove;
 
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
@@ -43,6 +44,8 @@ pub struct QueryScreenComponent {
     prompt: Option<FilePromptComponent>,
     last_path: Option<String>,
     history_picker: Option<HistoryPickerComponent>,
+    /// Where the editor was last drawn, so a click there can focus it.
+    editor_area: Rect,
 }
 
 /// Copies `text` to the system clipboard via an OSC52 escape sequence,
@@ -93,6 +96,7 @@ impl QueryScreenComponent {
             prompt: None,
             last_path: None,
             history_picker: None,
+            editor_area: Rect::ZERO,
         }
     }
 
@@ -133,6 +137,18 @@ impl QueryScreenComponent {
                 .forward_key(KeyEvent::new(code, modifiers));
         }
         None
+    }
+
+    /// Scrolls whichever pane the pointer is over, rather than whichever
+    /// has focus -- that's what a wheel is expected to do.
+    fn scroll_under_cursor(&mut self, event: MouseEvent, mv: VimMove) {
+        if self.schema_sidebar.contains(event.column, event.row) {
+            self.schema_sidebar.apply_move(mv);
+        } else if ui::contains(self.editor_area, event.column, event.row) {
+            self.query_editor.scroll(mv);
+        } else {
+            self.results.apply_move(mv);
+        }
     }
 
     fn handle_prompt_confirmed(&mut self, path: String) {
@@ -286,6 +302,32 @@ impl Component for QueryScreenComponent {
                     self.focus = Focus::Editor;
                 }
             }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        // An overlay covers the screen, so a click behind it would act on
+        // something the user can't even see.
+        if self.prompt.is_some() || self.history_picker.is_some() {
+            return None;
+        }
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Clicking a pane focuses it, which is the main thing a
+                // mouse is for here -- and then selects the row hit.
+                if self.schema_sidebar.click(event.column, event.row) {
+                    self.focus = Focus::Sidebar;
+                } else if self.results.click(event.column, event.row) {
+                    self.focus = Focus::Results;
+                } else if ui::contains(self.editor_area, event.column, event.row) {
+                    self.focus = Focus::Editor;
+                }
+            }
+            MouseEventKind::ScrollDown => self.scroll_under_cursor(event, VimMove::Down),
+            MouseEventKind::ScrollUp => self.scroll_under_cursor(event, VimMove::Up),
             _ => {}
         }
         None

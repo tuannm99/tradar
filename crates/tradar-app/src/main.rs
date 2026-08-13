@@ -6,6 +6,7 @@ use crossterm::event::{
     self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -106,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
     if keyboard_enhancement {
         execute!(
@@ -132,7 +133,11 @@ async fn main() -> anyhow::Result<()> {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     // Best-effort -- a failure to persist the session (e.g. an unwritable
@@ -181,13 +186,24 @@ async fn run(
         // still.
         let mut dirty = false;
 
-        if event::poll(std::time::Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            dirty = true;
-            if let Some(action) = root.handle_key_event(key.code, key.modifiers) {
-                let _ = action_tx.send(action);
+        if event::poll(std::time::Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    dirty = true;
+                    if let Some(action) = root.handle_key_event(key.code, key.modifiers) {
+                        let _ = action_tx.send(action);
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    dirty = true;
+                    if let Some(action) = root.handle_mouse_event(mouse) {
+                        let _ = action_tx.send(action);
+                    }
+                }
+                // Resize and the key-release/repeat kinds still need a
+                // redraw, but carry nothing to act on.
+                Event::Resize(_, _) => dirty = true,
+                _ => {}
             }
         }
 

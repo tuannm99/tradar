@@ -14,6 +14,16 @@ use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::SchemaInfo;
 
+/// The drawable area inside a bordered panel.
+fn inner_of(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
 /// One visible line of the sidebar. Tables are always listed; a table's
 /// columns appear underneath it only while it's expanded, so the selection
 /// index has to address both kinds.
@@ -31,6 +41,12 @@ pub struct SchemaSidebarComponent {
     pub schema_error: Option<String>,
     /// Indices into `schema` whose columns are shown.
     expanded: std::collections::HashSet<usize>,
+    /// Kept between frames so ratatui's scroll offset survives -- which is
+    /// also what makes a click land on the row the user actually pointed
+    /// at once the list has scrolled.
+    list_state: ListState,
+    /// Where the list was last drawn, for hit-testing clicks.
+    list_area: Rect,
     visible_height: usize,
 }
 
@@ -47,6 +63,8 @@ impl SchemaSidebarComponent {
             schema_selected: 0,
             schema_error: None,
             expanded: std::collections::HashSet::new(),
+            list_state: ListState::default(),
+            list_area: Rect::ZERO,
             visible_height: 0,
         }
     }
@@ -138,6 +156,24 @@ impl SchemaSidebarComponent {
         self.apply_move(VimMove::HalfPageUp);
     }
 
+    /// Selects whatever row was clicked. Returns whether the click landed
+    /// in this pane at all, so the caller can tell "handled" from "not
+    /// mine".
+    pub fn click(&mut self, column: u16, row: u16) -> bool {
+        if !ui::contains(self.list_area, column, row) {
+            return false;
+        }
+        let inner = inner_of(self.list_area);
+        if let Some(index) = ui::index_at(inner, self.list_state.offset(), row, self.rows().len()) {
+            self.schema_selected = index;
+        }
+        true
+    }
+
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        ui::contains(self.list_area, column, row)
+    }
+
     /// The name under the cursor -- a table's, or a column's when one is
     /// selected, which is what you want inserted into the query either way.
     pub fn selected_name(&self) -> Option<&str> {
@@ -191,19 +227,21 @@ impl SchemaSidebarComponent {
             })
             .collect();
 
-        let mut state = ListState::default();
-        if !rows.is_empty() {
-            state.select(Some(self.schema_selected));
+        if rows.is_empty() {
+            self.list_state.select(None);
+        } else {
+            self.list_state.select(Some(self.schema_selected));
         }
 
         let title = format!("Schema ({})", self.schema.len());
 
         let Some(error) = &self.schema_error else {
             self.visible_height = area.height.saturating_sub(2) as usize;
+            self.list_area = area;
             let list = List::new(items)
                 .block(ui::panel(&title, focused))
                 .highlight_style(ui::selection_style());
-            frame.render_stateful_widget(list, area, &mut state);
+            frame.render_stateful_widget(list, area, &mut self.list_state);
             return;
         };
 
@@ -212,11 +250,12 @@ impl SchemaSidebarComponent {
             .constraints([Constraint::Min(1), Constraint::Length(7)])
             .split(area);
         self.visible_height = chunks[0].height.saturating_sub(2) as usize;
+        self.list_area = chunks[0];
 
         let list = List::new(items)
             .block(ui::panel(&title, focused))
             .highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, chunks[0], &mut state);
+        frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
 
         let error_box = Paragraph::new(Span::styled(
             error.as_str(),
