@@ -62,13 +62,26 @@ User rà lại sau khi dùng thử và chốt danh sách dưới đây. Thứ t�
 
 8. **Xem lại toàn bộ keymap** — user nói "phase đầu xây dựng chưa ưng phần mapping bằng bàn phím", sẽ dùng thử rồi phản hồi cụ thể. **Đừng tự đổi binding khi chưa có phản hồi đó** — hạ tầng remap đã có sẵn (`tradar_core::keymap` + `config.toml`), nên đổi mặc định là việc rẻ khi đã biết muốn đổi gì.
 
+## Query file: giữ nội dung + nhiều câu lệnh (user nêu 2026-08-14, chưa làm)
+
+Ưu tiên ngay sau schema Elasticsearch. Hai vấn đề tách biệt nhưng cùng đụng vào query editor:
+
+1. **Không giữ lại nội dung query.** Thoát app là mất những gì đang gõ — session restore hiện chỉ nhớ *connection* của mỗi tab (xem ghi chú "Chưa làm" ở mục 4). Cần quyết: lưu buffer vào session file, hay gắn tab với một file `.sql` trên đĩa và tự lưu?
+2. **Một file chỉ chứa được một câu lệnh.** Thực tế người ta để cả chục câu trong một file rồi chạy từng câu. Yêu cầu:
+   - **Chạy tất cả** (execute all) — chạy tuần tự; cần quyết cách báo kết quả (kết quả câu cuối? tổng hợp? dừng ở câu lỗi đầu tiên?).
+   - **Chạy câu tại con trỏ** (inline) — và **tự nhận biết ranh giới câu**, vì một câu có thể trải nhiều dòng nên không thể cắt theo dòng.
+
+   Ranh giới câu là phần khó và **phụ thuộc từng driver**: SQL tách theo `;` nhưng phải bỏ qua `;` nằm trong chuỗi `'...'`/`"..."`, trong comment `--`/`/* */`, và trong dollar-quote `$$...$$` của Postgres; Redis mỗi dòng là một lệnh; Elasticsearch một request là `METHOD /path` + body JSON đi kèm; Mongo mỗi `db.<coll>.<method>(...)` là một câu. Nên đi theo đúng cách đã làm với autocomplete: **thêm một method vào `QueryDriver` để mỗi connector tự tách câu của mình**, mặc định "cả buffer là một câu"; phần SQL dùng chung một helper trong `tradar-query-workbench` như `returns_rows`/`SQL_KEYWORDS`.
+
 ## Chưa làm, chưa được scope (2026-08-14)
 
-Gom về một chỗ để không mất: đây là những thứ đã nêu trong lúc trao đổi hoặc phát hiện khi rà code, nhưng **chưa được chốt phạm vi và chưa ai bắt tay vào**. Không có thứ tự ưu tiên — chọn theo nhu cầu thực tế lúc làm.
+Gom về một chỗ để không mất: đây là những thứ đã nêu trong lúc trao đổi hoặc phát hiện khi rà code, nhưng **chưa được chốt phạm vi và chưa ai bắt tay vào**.
+
+**Thứ tự ưu tiên user chốt 2026-08-14:** (1) schema Elasticsearch qua `_mapping` → (2) query file: giữ lại nội dung + chứa được nhiều câu lệnh (mục riêng bên dưới) → ... → **export CSV/JSON làm sau cùng**, user nói rõ "chưa quan trọng".
 
 **Tính năng người dùng thấy được**
 
-- **Export kết quả ra CSV/JSON.** `README.md` đang ghi "export tổng quát chưa được xây dựng" (mới chỉ có curl export riêng của Elasticsearch). Tái dùng được `FilePromptComponent` để hỏi đường dẫn.
+- **Export kết quả ra CSV/JSON** — *làm sau cùng, user hạ ưu tiên 2026-08-14*. `README.md` đang ghi "export tổng quát chưa được xây dựng" (mới chỉ có curl export riêng của Elasticsearch). Tái dùng được `FilePromptComponent` để hỏi đường dẫn.
 - **Tìm kiếm trong kết quả** (lọc/nhảy tới dòng khớp). Chưa có gì.
 - **Trạng thái connection** — hiện không có cách biết một connection còn sống hay đã rớt cho tới khi chạy query và nhận lỗi.
 - **Thêm connector MySQL / MariaDB / ClickHouse.** `README.md` liệt ở mục "Dự kiến". Rẻ nhờ kiến trúc pluggable: thêm crate mới + 1 dòng trong `registry()`, không đụng core. MySQL qua `sqlx` gần như giống hệt connector Postgres đang có.
