@@ -77,7 +77,7 @@ User rà lại sau khi dùng thử và chốt danh sách dưới đây. Thứ t�
 
 Gom về một chỗ để không mất: đây là những thứ đã nêu trong lúc trao đổi hoặc phát hiện khi rà code, nhưng **chưa được chốt phạm vi và chưa ai bắt tay vào**.
 
-**Thứ tự ưu tiên user chốt 2026-08-14:** (1) schema Elasticsearch qua `_mapping` → (2) query file: giữ lại nội dung + chứa được nhiều câu lệnh (mục riêng bên dưới) → ... → **export CSV/JSON làm sau cùng**, user nói rõ "chưa quan trọng".
+**Thứ tự ưu tiên user chốt 2026-08-14:** (1) ~~schema Elasticsearch qua `_mapping`~~ *(xong)* → (2) query file: giữ lại nội dung + chứa được nhiều câu lệnh (mục riêng bên dưới) → ... → **export CSV/JSON làm sau cùng**, user nói rõ "chưa quan trọng".
 
 **Tính năng người dùng thấy được**
 
@@ -93,7 +93,7 @@ Gom về một chỗ để không mất: đây là những thứ đã nêu trong
 
 **Schema đọc được sâu hơn** (nối tiếp mục 2 "Schema sidebar xem được cột")
 
-- **Elasticsearch**: lấy field từ `GET /_mapping` — một call là đủ cho *mọi* index, nên rẻ; hiện ES trả về `columns` rỗng.
+- ~~**Elasticsearch**: lấy field từ `GET /_mapping`~~ — xong (2026-08-14). `list_schema` gọi thêm `GET /_mapping` (một request cho mọi index) và gắn field vào từng index. Field lồng nhau được làm phẳng thành đường dẫn có dấu chấm (`customer.address.city`) đúng như cách viết trong query; node kiểu object không tự nó là field; multi-field (`title.keyword`) bị bỏ qua vì đó là chi tiết đánh index chứ không phải field của document. `_mapping` lỗi thì vẫn giữ nguyên danh sách index thay vì làm hỏng cả việc duyệt schema.
 - **MongoDB**: suy ra tên field bằng cách đọc mẫu một document mỗi collection. Cần cân nhắc chi phí: N collection = N round trip lúc connect, nên có thể phải lazy (chỉ đọc khi user mở collection đó ra).
 - Cả hai đều làm autocomplete tốt lên ngay, vì nguồn gợi ý lấy thẳng từ `SchemaInfo`.
 
