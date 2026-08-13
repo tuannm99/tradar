@@ -66,6 +66,9 @@ pub struct ResultsComponent {
     /// First visible column, for tables too wide to fit -- see
     /// `scroll_left`/`scroll_right`.
     col_offset: usize,
+    /// Whether a query is in flight, so the pane can say so: without it a
+    /// slow query is indistinguishable from a key that didn't register.
+    running: bool,
     visible_height: usize,
 }
 
@@ -82,8 +85,14 @@ impl ResultsComponent {
             last_error: None,
             selected: 0,
             col_offset: 0,
+            running: false,
             visible_height: 0,
         }
+    }
+
+    /// Told by the screen each frame, since the engine owns that state.
+    pub fn draw_running(&mut self, running: bool) {
+        self.running = running;
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
@@ -180,10 +189,42 @@ impl ResultsComponent {
         let theme = theme();
         // The row count belongs in the title: it's the first thing anyone
         // wants to know about a result, and it costs no extra space.
+        if self.running {
+            let block = ui::panel("Results — running…", focused);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            self.visible_height = 0;
+            let cancel = tradar_core::keymap::keymap()
+                .binding_for(
+                    tradar_core::keymap::Context::QueryScreen,
+                    tradar_core::keymap::Command::CancelQuery,
+                )
+                .unwrap_or_default();
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("running… {cancel} to cancel"),
+                    Style::default().fg(theme.text_dim),
+                )),
+                inner,
+            );
+            return;
+        }
+
         let title = match (&self.last_error, &self.last_result) {
             (Some(_), _) => "Results — error".to_string(),
-            (None, Some(QueryResult::Table { rows, .. })) => {
-                format!("Results ({})", count(rows.len(), "row"))
+            (
+                None,
+                Some(QueryResult::Table {
+                    rows, truncated, ..
+                }),
+            ) => {
+                if *truncated {
+                    // Say so loudly: a silently clipped result set is a
+                    // wrong answer you can't see is wrong.
+                    format!("Results (first {} rows — truncated)", rows.len())
+                } else {
+                    format!("Results ({})", count(rows.len(), "row"))
+                }
             }
             (None, Some(QueryResult::Documents(docs))) => {
                 format!("Results ({})", count(docs.len(), "document"))
@@ -214,7 +255,7 @@ impl ResultsComponent {
         };
 
         match result {
-            QueryResult::Table { columns, rows } => {
+            QueryResult::Table { columns, rows, .. } => {
                 // A real table widget, not rows joined by spaces: columns
                 // have to line up or the values can't be read down a column,
                 // which is most of the point of tabular output.
@@ -346,6 +387,7 @@ mod tests {
         QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: (0..rows).map(|i| vec![i.to_string()]).collect(),
+            truncated: false,
         }
     }
 
@@ -358,6 +400,7 @@ mod tests {
                 vec!["1".to_string(), "alice".to_string(), "10".to_string()],
                 vec!["1000".to_string(), "bo".to_string(), "2000".to_string()],
             ],
+            truncated: false,
         }
     }
 
@@ -473,6 +516,7 @@ mod tests {
         results.set_result(QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![vec!["1".to_string()]],
+            truncated: false,
         });
 
         assert!(results.last_error.is_none());
@@ -481,6 +525,7 @@ mod tests {
             Some(QueryResult::Table {
                 columns: vec!["id".to_string()],
                 rows: vec![vec!["1".to_string()]],
+                truncated: false,
             })
         );
     }
@@ -491,6 +536,7 @@ mod tests {
         results.set_result(QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![],
+            truncated: false,
         });
 
         results.set_error("boom".to_string());
@@ -600,6 +646,7 @@ mod tests {
                 vec!["1".to_string(), "Ada".to_string()],
                 vec!["2".to_string(), "Lin".to_string()],
             ],
+            truncated: false,
         });
         results.move_down();
 
@@ -631,6 +678,7 @@ mod tests {
         results.set_result(QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![vec!["42".to_string()]],
+            truncated: false,
         });
 
         let text = draw_component(&mut results, 40, 10);

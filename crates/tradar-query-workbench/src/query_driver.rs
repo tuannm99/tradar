@@ -37,11 +37,22 @@ pub struct ColumnInfo {
     pub type_name: String,
 }
 
+/// How many rows a driver will materialise for one query. A result set is
+/// pulled into memory to be rendered, so an unbounded `SELECT *` against a
+/// large table would otherwise be a straightforward way to exhaust it --
+/// see "Support large result sets efficiently" in CLAUDE.md. Drivers stop
+/// reading at this point and report the result as truncated.
+pub const MAX_ROWS: usize = 10_000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryResult {
     Table {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
+        /// The backend had more rows than `MAX_ROWS`; what's here is a
+        /// prefix. Surfaced in the UI so a truncated result can't be
+        /// mistaken for the whole answer.
+        truncated: bool,
     },
     Documents(Vec<serde_json::Value>),
     /// A statement that changed data instead of returning it -- `INSERT`,

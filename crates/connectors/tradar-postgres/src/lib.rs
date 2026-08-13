@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
 
@@ -92,19 +93,29 @@ impl QueryDriver for PostgresDriver {
             });
         }
 
-        let rows = sqlx::query(query).fetch_all(pool).await?;
+        // Streamed and capped rather than `fetch_all`: the point is to
+        // never pull an unbounded result set into memory. One row past the
+        // cap is read purely to know whether there were more.
+        let mut stream = sqlx::query(query).fetch(pool);
+        let mut columns: Vec<String> = Vec::new();
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut truncated = false;
+        while let Some(row) = stream.try_next().await? {
+            if columns.is_empty() {
+                columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+            }
+            if rows.len() == query_driver::MAX_ROWS {
+                truncated = true;
+                break;
+            }
+            rows.push((0..row.len()).map(|i| stringify_column(&row, i)).collect());
+        }
 
-        let columns = rows
-            .first()
-            .map(|row| row.columns().iter().map(|c| c.name().to_string()).collect())
-            .unwrap_or_default();
-
-        let rows = rows
-            .iter()
-            .map(|row| (0..row.len()).map(|i| stringify_column(row, i)).collect())
-            .collect();
-
-        Ok(QueryResult::Table { columns, rows })
+        Ok(QueryResult::Table {
+            columns,
+            rows,
+            truncated,
+        })
     }
 }
 
@@ -228,6 +239,7 @@ mod tests {
             QueryResult::Table {
                 columns: vec!["id".to_string(), "name".to_string()],
                 rows: vec![vec!["1".to_string(), "Ada".to_string()]],
+                truncated: false,
             }
         );
     }

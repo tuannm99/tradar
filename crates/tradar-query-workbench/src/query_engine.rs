@@ -39,6 +39,9 @@ pub struct QueryEngine {
     history: Vec<String>,
     epoch: u64,
     pending: bool,
+    /// The in-flight query's task, kept so it can be aborted. `None`
+    /// whenever nothing is running.
+    running: Option<tokio::task::JoinHandle<()>>,
     last_outcome: Option<QueryOutcome>,
     outcome_tx: UnboundedSender<TaggedOutcome>,
     outcome_rx: UnboundedReceiver<TaggedOutcome>,
@@ -58,6 +61,7 @@ impl QueryEngine {
             history: Vec::new(),
             epoch: 0,
             pending: false,
+            running: None,
             last_outcome: None,
             outcome_tx,
             outcome_rx,
@@ -97,7 +101,7 @@ impl QueryEngine {
 
         let driver = Arc::clone(&self.driver);
         let tx = self.outcome_tx.clone();
-        tokio::spawn(async move {
+        self.running = Some(tokio::spawn(async move {
             let outcome = match driver.execute(&query).await {
                 Ok(result) => QueryOutcome::Completed { result },
                 Err(e) => QueryOutcome::Failed {
@@ -105,7 +109,22 @@ impl QueryEngine {
                 },
             };
             let _ = tx.send(TaggedOutcome { epoch, outcome });
-        });
+        }));
+    }
+
+    /// Abandons the running query, if any. Aborting the task drops the
+    /// driver future, which is what closes the statement on the backend for
+    /// a driver that supports it; the epoch bump means a reply that was
+    /// already in flight is ignored rather than landing after the fact.
+    pub fn cancel(&mut self) -> bool {
+        let Some(handle) = self.running.take() else {
+            return false;
+        };
+        handle.abort();
+        self.epoch += 1;
+        self.pending = false;
+        self.last_outcome = None;
+        true
     }
 
     /// The most recent outcome for the in-flight query, if `tick()` picked
@@ -123,6 +142,7 @@ impl Session for QueryEngine {
             match self.outcome_rx.try_recv() {
                 Ok(tagged) if tagged.epoch == self.epoch => {
                     self.pending = false;
+                    self.running = None;
                     self.last_outcome = Some(tagged.outcome);
                     changed = true;
                 }
@@ -206,6 +226,7 @@ mod tests {
         let result = QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![vec!["1".to_string()]],
+            truncated: false,
         };
         let mut engine = engine(Arc::new(FakeDriver {
             result: result.clone(),
@@ -240,6 +261,7 @@ mod tests {
             result: QueryResult::Table {
                 columns: vec![],
                 rows: vec![],
+                truncated: false,
             },
         }));
 
@@ -253,12 +275,78 @@ mod tests {
         );
     }
 
+    /// A driver that never finishes, so a cancel has something real to
+    /// interrupt.
+    struct HangingDriver;
+
+    #[async_trait]
+    impl QueryDriver for HangingDriver {
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
+            Ok(Vec::new())
+        }
+        async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
+            std::future::pending::<()>().await;
+            unreachable!("this driver never completes")
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_waiting_on_a_query_that_never_finishes() {
+        let mut engine = engine(Arc::new(HangingDriver));
+        engine.submit_query("SELECT pg_sleep(3600)".to_string());
+        assert!(engine.is_pending());
+
+        let cancelled = engine.cancel();
+
+        assert!(cancelled);
+        assert!(!engine.is_pending(), "nothing is running any more");
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            engine.tick();
+        }
+        assert!(engine.take_outcome().is_none(), "no late result may land");
+    }
+
+    #[tokio::test]
+    async fn cancelling_with_nothing_running_is_a_no_op() {
+        let mut engine = engine(Arc::new(HangingDriver));
+
+        assert!(!engine.cancel());
+    }
+
+    #[tokio::test]
+    async fn a_result_in_flight_when_cancel_lands_is_discarded() {
+        let mut engine = engine(Arc::new(FakeDriver {
+            result: QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+                truncated: false,
+            },
+        }));
+        engine.submit_query("SELECT 1".to_string());
+
+        // Cancel before draining: the task may well have completed and
+        // queued its outcome already, and that reply must not resurface.
+        engine.cancel();
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            engine.tick();
+        }
+
+        assert!(engine.take_outcome().is_none());
+        assert!(!engine.is_pending());
+    }
+
     #[tokio::test]
     async fn submit_query_appends_to_history() {
         let mut engine = engine(Arc::new(FakeDriver {
             result: QueryResult::Table {
                 columns: vec![],
                 rows: vec![],
+                truncated: false,
             },
         }));
 

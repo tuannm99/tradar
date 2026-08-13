@@ -4499,6 +4499,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures-util",
  "sqlx",
  "testcontainers-modules",
  "tokio",
@@ -4546,6 +4547,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures-util",
  "sqlx",
  "tempfile",
  "tokio",

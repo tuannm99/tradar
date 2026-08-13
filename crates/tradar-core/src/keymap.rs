@@ -112,6 +112,8 @@ pub enum Command {
     // Query screen
     Back,
     RunQuery,
+    /// Abandon the query that's currently running.
+    CancelQuery,
     CycleFocus,
     SaveFile,
     OpenFile,
@@ -156,6 +158,7 @@ impl Command {
             Self::DeleteConnection => "delete-connection",
             Self::Back => "back",
             Self::RunQuery => "run-query",
+            Self::CancelQuery => "cancel-query",
             Self::CycleFocus => "cycle-focus",
             Self::SaveFile => "save-file",
             Self::OpenFile => "open-file",
@@ -185,7 +188,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 33] = [
+    const ALL: [Self; 34] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -197,6 +200,7 @@ impl Command {
         Self::DeleteConnection,
         Self::Back,
         Self::RunQuery,
+        Self::CancelQuery,
         Self::CycleFocus,
         Self::SaveFile,
         Self::OpenFile,
@@ -235,6 +239,7 @@ impl Command {
             Self::DeleteConnection => "Delete the selected connection",
             Self::Back => "Back to the connection picker",
             Self::RunQuery => "Run the query",
+            Self::CancelQuery => "Cancel the running query",
             Self::CycleFocus => "Cycle focus: editor / results / schema",
             Self::SaveFile => "Save the query to a file",
             Self::OpenFile => "Load a query from a file",
@@ -393,6 +398,7 @@ impl Default for Keymap {
                 ("esc", Command::Back),
                 ("f5", Command::RunQuery),
                 ("ctrl-enter", Command::RunQuery),
+                ("ctrl-c", Command::CancelQuery),
                 ("tab", Command::CycleFocus),
                 ("ctrl-s", Command::SaveFile),
                 ("ctrl-o", Command::OpenFile),

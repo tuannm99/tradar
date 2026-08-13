@@ -254,6 +254,11 @@ impl Component for QueryScreenComponent {
                     self.engine.submit_query(self.query_editor.text());
                 }
             }
+            Command::CancelQuery => {
+                if self.engine.cancel() {
+                    self.results.set_error("query cancelled".to_string());
+                }
+            }
             Command::CycleFocus => {
                 self.focus = match self.focus {
                     Focus::Editor => Focus::Results,
@@ -329,6 +334,7 @@ impl Component for QueryScreenComponent {
             &connection_name,
             self.focus == Focus::Editor,
         );
+        self.results.draw_running(self.engine.is_pending());
         self.results
             .draw(frame, chunks[1], self.focus == Focus::Results);
 
@@ -410,6 +416,7 @@ mod tests {
         QueryResult::Table {
             columns: vec![],
             rows: vec![],
+            truncated: false,
         }
     }
 
@@ -507,6 +514,7 @@ mod tests {
         let (mut screen, _rx) = screen_with(fake_engine(QueryResult::Table {
             columns: vec!["id".to_string()],
             rows: vec![vec!["1".to_string()]],
+            truncated: false,
         }));
         screen.query_editor.insert_at_cursor("x");
 
@@ -526,6 +534,7 @@ mod tests {
             Some(QueryResult::Table {
                 columns: vec!["id".to_string()],
                 rows: vec![vec!["1".to_string()]],
+                truncated: false,
             })
         );
     }
@@ -696,6 +705,7 @@ mod tests {
         screen.results.set_result(QueryResult::Table {
             columns: vec!["a".to_string(), "b".to_string()],
             rows: vec![vec!["1".to_string(), "2".to_string()]],
+            truncated: false,
         });
         screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
 
