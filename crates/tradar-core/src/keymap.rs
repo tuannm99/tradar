@@ -434,13 +434,11 @@ impl Keymap {
     }
 
     fn starts_a_sequence(&self, context: Context, key: KeyPress) -> bool {
-        self.bindings
-            .get(&context)
-            .is_some_and(|bindings| {
-                bindings
-                    .iter()
-                    .any(|(binding, _)| binding.0.len() > 1 && binding.0[0] == key)
-            })
+        self.bindings.get(&context).is_some_and(|bindings| {
+            bindings
+                .iter()
+                .any(|(binding, _)| binding.0.len() > 1 && binding.0[0] == key)
+        })
     }
 
     /// Every binding in `context`, in declaration order -- what the help
@@ -836,11 +834,15 @@ mod tests {
         let keymap = Keymap::default();
 
         assert_eq!(
-            keymap.binding_for(Context::List, Command::MoveDown).as_deref(),
+            keymap
+                .binding_for(Context::List, Command::MoveDown)
+                .as_deref(),
             Some("j")
         );
         assert_eq!(
-            keymap.binding_for(Context::Global, Command::Quit).as_deref(),
+            keymap
+                .binding_for(Context::Global, Command::Quit)
+                .as_deref(),
             Some("ctrl-q")
         );
     }

@@ -336,8 +336,12 @@ impl Component for QueryScreenComponent {
             .split(outer[1]);
 
         let connection_name = self.active_connection().name.clone();
-        self.query_editor
-            .draw(frame, chunks[0], &connection_name, self.focus == Focus::Editor);
+        self.query_editor.draw(
+            frame,
+            chunks[0],
+            &connection_name,
+            self.focus == Focus::Editor,
+        );
         self.results
             .draw(frame, chunks[1], self.focus == Focus::Results);
 
@@ -630,6 +634,67 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(screen.query_editor.text(), "select 1");
+    }
+
+    #[test]
+    fn typing_a_plain_character_in_insert_mode_reaches_the_editor_not_a_command() {
+        let (mut screen, _rx) = screen();
+        // `y` (yank) and `?` (help) are both bound on this screen -- while
+        // typing they must be plain text, or they'd be un-typeable.
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        for c in "y?".chars() {
+            let action = screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+            assert!(action.is_none(), "'{c}' must not raise an action");
+        }
+
+        assert_eq!(screen.query_editor.text(), "y?");
+    }
+
+    #[test]
+    fn a_modified_key_still_works_from_insert_mode() {
+        let (mut screen, _rx) = screen();
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        screen.handle_key_event(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+        assert!(
+            screen.prompt.is_some(),
+            "ctrl-s can't be confused with typing, so it stays available"
+        );
+        assert_eq!(screen.query_editor.text(), "");
+    }
+
+    #[test]
+    fn yank_and_insert_name_only_fire_from_the_pane_they_belong_to() {
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema())));
+        assert_eq!(screen.focus, Focus::Editor);
+
+        // In Normal mode with the editor focused, `y` is the editor's key
+        // (a no-op there), not the results pane's yank...
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(screen.query_editor.text(), "");
+
+        // ...and `enter` inserts a newline rather than a schema name.
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(screen.query_editor.text(), "\n");
+    }
+
+    #[test]
+    fn question_mark_in_normal_mode_asks_for_the_help_overlay() {
+        let (mut screen, _rx) = screen();
+
+        let action = screen.handle_key_event(KeyCode::Char('?'), KeyModifiers::NONE);
+
+        assert!(matches!(action, Some(Action::ShowHelp)));
     }
 
     #[test]

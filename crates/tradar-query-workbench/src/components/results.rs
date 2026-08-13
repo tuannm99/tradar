@@ -14,6 +14,16 @@ use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::QueryResult;
 
+/// `1 row` / `2 rows` -- the results title reads as a sentence, so the
+/// plural has to agree.
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 pub struct ResultsComponent {
     pub last_result: Option<QueryResult>,
     pub last_error: Option<String>,
@@ -110,9 +120,11 @@ impl ResultsComponent {
         // wants to know about a result, and it costs no extra space.
         let title = match (&self.last_error, &self.last_result) {
             (Some(_), _) => "Results — error".to_string(),
-            (None, Some(QueryResult::Table { rows, .. })) => format!("Results ({} rows)", rows.len()),
+            (None, Some(QueryResult::Table { rows, .. })) => {
+                format!("Results ({})", count(rows.len(), "row"))
+            }
             (None, Some(QueryResult::Documents(docs))) => {
-                format!("Results ({} documents)", docs.len())
+                format!("Results ({})", count(docs.len(), "document"))
             }
             (None, None) => "Results".to_string(),
         };
@@ -207,7 +219,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
 
     use super::*;
     use crate::query_driver::QueryResult;
@@ -427,18 +439,48 @@ mod tests {
         assert!(text.contains("syntax error"), "buffer was: {text}");
     }
 
-    #[test]
-    fn draw_marks_the_title_as_focused() {
-        let mut results = ResultsComponent::new();
+    /// The border color of the panel's top-left corner, which is what
+    /// tells the user where the keyboard focus is now that the title no
+    /// longer spells it out.
+    fn border_color(results: &mut ResultsComponent, focused: bool) -> Option<Color> {
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-
         terminal
-            .draw(|frame| results.draw(frame, frame.area(), true))
+            .draw(|frame| results.draw(frame, frame.area(), focused))
             .unwrap();
+        terminal.backend().buffer().cell((0, 0)).unwrap().fg.into()
+    }
 
-        let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("Results [focused]"), "buffer was: {text}");
+    #[test]
+    fn draw_marks_the_panel_as_focused_with_the_border_color() {
+        let mut results = ResultsComponent::new();
+
+        let focused = border_color(&mut results, true);
+        let unfocused = border_color(&mut results, false);
+
+        assert_eq!(focused, Some(theme().border_focused));
+        assert_eq!(unfocused, Some(theme().border));
+        assert_ne!(focused, unfocused);
+    }
+
+    #[test]
+    fn draw_shows_the_row_count_in_the_title() {
+        let mut results = ResultsComponent::new();
+        results.set_result(table(3));
+
+        let text = draw_component(&mut results, 40, 10);
+
+        assert!(text.contains("3 rows"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn a_single_row_is_not_pluralised() {
+        let mut results = ResultsComponent::new();
+        results.set_result(table(1));
+
+        let text = draw_component(&mut results, 40, 10);
+
+        assert!(text.contains("(1 row)"), "buffer was: {text}");
     }
 
     #[test]
@@ -458,7 +500,8 @@ mod tests {
         // the first data row ("0"), row 3 is the selected row ("1").
         let unselected_cell = buffer.cell((1, 2)).unwrap();
         let selected_cell = buffer.cell((1, 3)).unwrap();
-        assert!(selected_cell.modifier.contains(Modifier::REVERSED));
-        assert!(!unselected_cell.modifier.contains(Modifier::REVERSED));
+        assert_eq!(selected_cell.bg, theme().selection_bg);
+        assert!(selected_cell.modifier.contains(Modifier::BOLD));
+        assert_ne!(unselected_cell.bg, theme().selection_bg);
     }
 }

@@ -314,21 +314,9 @@ impl RootComponent {
             hints.extend(ui::hint(Context::Picker, Command::Open, "connect"));
             hints.extend(ui::hint(Context::List, Command::MoveDown, "move"));
         } else {
-            hints.extend(ui::hint(
-                Context::QueryScreen,
-                Command::RunQuery,
-                "run",
-            ));
-            hints.extend(ui::hint(
-                Context::QueryScreen,
-                Command::CycleFocus,
-                "focus",
-            ));
-            hints.extend(ui::hint(
-                Context::QueryScreen,
-                Command::History,
-                "history",
-            ));
+            hints.extend(ui::hint(Context::QueryScreen, Command::RunQuery, "run"));
+            hints.extend(ui::hint(Context::QueryScreen, Command::CycleFocus, "focus"));
+            hints.extend(ui::hint(Context::QueryScreen, Command::History, "history"));
             hints.extend(ui::hint(Context::QueryScreen, Command::Back, "back"));
         }
         hints.extend(ui::hint(Context::Global, Command::NewTab, "tab"));
@@ -605,6 +593,69 @@ mod tests {
             matches!(root.tabs[0].screen, ScreenSlot::Active(_)),
             "quitting must not first bounce the tab back to the picker"
         );
+    }
+
+    #[test]
+    fn show_help_raises_the_overlay_and_the_next_key_dismisses_it() {
+        let mut root = root();
+
+        root.update(Action::ShowHelp);
+        assert!(root.help.is_some());
+
+        root.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(root.help.is_none());
+    }
+
+    #[test]
+    fn the_help_overlay_swallows_keys_while_it_is_open() {
+        let mut root = root();
+        root.update(Action::ShowHelp);
+
+        // A global binding that would otherwise open a tab.
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+        assert_eq!(root.tabs.len(), 1, "ctrl-t must not reach the tab handling");
+    }
+
+    #[test]
+    fn navigation_keys_scroll_the_help_overlay_without_closing_it() {
+        let mut root = root();
+        root.update(Action::ShowHelp);
+        // `draw` gives the overlay a viewport height to scroll within.
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        root.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+
+        assert!(root.help.is_some(), "j scrolls the overlay, not closes it");
+    }
+
+    #[test]
+    fn draw_renders_a_status_bar_with_the_current_bindings() {
+        let mut root = root();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        // The picker's own hints, plus the global ones -- taken from the
+        // live keymap, not hardcoded here or there.
+        assert!(text.contains("connect"), "buffer was: {text}");
+        assert!(text.contains("ctrl-t"), "buffer was: {text}");
+        assert!(text.contains("help"), "buffer was: {text}");
     }
 
     #[test]

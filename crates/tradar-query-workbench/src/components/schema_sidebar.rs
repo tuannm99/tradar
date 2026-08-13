@@ -332,12 +332,26 @@ mod tests {
     }
 
     #[test]
-    fn draw_marks_the_title_as_focused() {
+    fn draw_marks_the_panel_as_focused_with_the_border_color() {
         let mut sidebar = SchemaSidebarComponent::new();
 
-        let (text, _) = draw_component(&mut sidebar, true);
+        // The top-left corner of the border is what signals focus now that
+        // the title no longer spells it out.
+        let (_, focused) = draw_component(&mut sidebar, true);
+        let (_, unfocused) = draw_component(&mut sidebar, false);
 
-        assert!(text.contains("Schema [focused]"), "buffer was: {text}");
+        assert_eq!(focused.cell((0, 0)).unwrap().fg, theme().border_focused);
+        assert_eq!(unfocused.cell((0, 0)).unwrap().fg, theme().border);
+    }
+
+    #[test]
+    fn draw_shows_the_entry_count_in_the_title() {
+        let mut sidebar = SchemaSidebarComponent::new();
+        sidebar.set_schema(schema());
+
+        let (text, _) = draw_component(&mut sidebar, false);
+
+        assert!(text.contains("Schema (2)"), "buffer was: {text}");
     }
 
     #[test]
@@ -395,7 +409,8 @@ mod tests {
 
         let unselected_cell = buffer.cell((1, 1)).unwrap();
         let selected_cell = buffer.cell((1, 2)).unwrap();
-        assert!(selected_cell.modifier.contains(Modifier::REVERSED));
-        assert!(!unselected_cell.modifier.contains(Modifier::REVERSED));
+        assert_eq!(selected_cell.bg, theme().selection_bg);
+        assert!(selected_cell.modifier.contains(Modifier::BOLD));
+        assert_ne!(unselected_cell.bg, theme().selection_bg);
     }
 }

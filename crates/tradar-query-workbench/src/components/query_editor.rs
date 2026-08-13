@@ -623,14 +623,14 @@ mod tests {
             .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("Normal"), "buffer was: {text}");
+        assert!(text.contains("NORMAL"), "buffer was: {text}");
 
         editor.forward_key(key(KeyCode::Char('i')));
         terminal
             .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("Insert"), "buffer was: {text}");
+        assert!(text.contains("INSERT"), "buffer was: {text}");
     }
 
     #[test]

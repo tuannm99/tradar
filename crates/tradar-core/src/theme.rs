@@ -188,7 +188,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(theme.error, Color::Rgb(255, 0, 0));
-        assert_eq!(theme.border, default_border, "other roles must be untouched");
+        assert_eq!(
+            theme.border, default_border,
+            "other roles must be untouched"
+        );
     }
 
     #[test]

@@ -29,7 +29,9 @@ pub fn panel(title: &str, focused: bool) -> Block<'static> {
     let title = if focused {
         Span::styled(
             format!(" {title} "),
-            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(format!(" {title} "), Style::default().fg(title_color))
@@ -281,6 +283,45 @@ mod tests {
 
         assert_eq!(hint.key, "ctrl-q");
         assert_eq!(hint.label, "quit");
+    }
+
+    #[test]
+    fn the_status_bar_shows_each_hint_and_the_right_hand_status() {
+        let backend = TestBackend::new(60, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let hints = vec![
+            hint(Context::Global, Command::Quit, "quit").unwrap(),
+            hint(Context::List, Command::MoveDown, "move").unwrap(),
+        ];
+
+        terminal
+            .draw(|frame| draw_status_bar(frame, frame.area(), &hints, Some("local-sqlite")))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = buffer_text(buffer);
+        assert!(text.contains("ctrl-q quit"), "buffer was: {text}");
+        assert!(text.contains("j move"), "buffer was: {text}");
+        assert!(text.contains("local-sqlite"), "buffer was: {text}");
+        assert_eq!(
+            buffer.cell((0, 0)).unwrap().bg,
+            theme().status_bar_bg,
+            "the bar's background should span the full width"
+        );
+    }
+
+    #[test]
+    fn a_status_bar_hint_is_skipped_when_its_command_is_unbound() {
+        // `binding_for` returning `None` is how an unbound command shows up;
+        // there's nothing useful to hint in that case.
+        let mut keymap = crate::keymap::Keymap::default();
+        let mut overrides = std::collections::HashMap::new();
+        let mut commands = std::collections::HashMap::new();
+        commands.insert("quit".to_string(), Vec::new());
+        overrides.insert("global".to_string(), commands);
+        keymap.apply_overrides(&overrides).unwrap();
+
+        assert_eq!(keymap.binding_for(Context::Global, Command::Quit), None);
     }
 
     #[test]

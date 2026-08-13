@@ -59,11 +59,9 @@ impl ConnectionPickerComponent {
 impl Component for ConnectionPickerComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         let key = KeyPress::new(code, modifiers);
-        let Resolution::Command(command) = keymap().resolve_in(
-            &[Context::Picker, Context::List],
-            &mut self.pending,
-            key,
-        ) else {
+        let Resolution::Command(command) =
+            keymap().resolve_in(&[Context::Picker, Context::List], &mut self.pending, key)
+        else {
             return None;
         };
 
@@ -345,6 +343,25 @@ mod tests {
         picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(picker.last_error, None);
+    }
+
+    #[test]
+    fn question_mark_asks_for_the_help_overlay() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+
+        let action = picker.handle_key_event(KeyCode::Char('?'), KeyModifiers::NONE);
+
+        assert!(matches!(action, Some(Action::ShowHelp)));
+    }
+
+    #[test]
+    fn an_unbound_key_does_nothing() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+
+        let action = picker.handle_key_event(KeyCode::Char('z'), KeyModifiers::NONE);
+
+        assert!(action.is_none());
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]
