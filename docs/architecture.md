@@ -36,7 +36,8 @@ crates/
                                     crossterm input -> Component actions -> spawn Connector::connect -> Session -> Screen
       components/
         mod.rs                — RootComponent: tabs: Vec<Tab> (mỗi Tab: ScreenSlot::ConnectionPicker | Active(Box<dyn Component>) + connection_picker riêng + title) + active_tab
-        connection_picker.rs  — ConnectionPickerComponent
+        connection_picker.rs  — ConnectionPickerComponent (list + add/edit/delete)
+        connection_form.rs    — ConnectionFormComponent: form 3 field cho add/edit, overlay trên picker
 ```
 
 `Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 5 nhưng không chứa code driver nào.
@@ -107,7 +108,7 @@ Walking skeleton v1 chạy được từ đầu đến cuối: `tradar` load cá
 
 Những phần còn mỏng/thiếu đáng chú ý:
 
-- Chưa có màn hình "add connection" tương tác — connection được thêm bằng cách sửa tay file TOML.
+- ~~Chưa có màn hình "add connection" tương tác~~ — đã có từ 2026-08-14: `a`/`e`/`d` trong connection picker, form ở `crates/tradar-app/src/components/connection_form.rs`; xem `docs/backlog.md` mục 5.5.
 - `QueryDriver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng schema sidebar trên query screen (tự load khi connect; `Tab` để focus, `Enter` để chèn tên được chọn vào query).
 - `config/` là module placeholder rỗng; cấu hình app ngoài file connections chưa tồn tại.
 
@@ -322,6 +323,6 @@ Nêu ra trong lúc review thiết kế, chủ đích để ngoài shape mục ti
 
 - Implement Kafka, RabbitMQ, Cassandra, hay bất kỳ connector mới nào khác — tài liệu này chỉ định nghĩa shape để chúng được xây dựng vào.
 - Dynamic plugin loading (`.so`/`.wasm`, phân phối plugin bên thứ ba).
-- Một UI "add connection" tương tác (vẫn sửa tay TOML).
+- ~~Một UI "add connection" tương tác (vẫn sửa tay TOML).~~ Non-goal này chỉ áp dụng cho phạm vi migration connector pluggable; màn hình đó đã được làm sau, xem `docs/backlog.md` mục 5.5.
 - Bất kỳ UI nào thực sự branch theo `Capability` — enum và descriptor shape được định nghĩa sẵn bây giờ; việc dùng chúng là việc của tương lai.
 - ~~Bất kỳ thay đổi nào cho phần vim-modal query editor ngoài việc `QueryScreenComponent` chuyển vào `tradar-query-workbench`.~~ Không còn đúng — non-goal này chỉ áp dụng cho phạm vi migration connector pluggable (đã xong từ lâu); `QueryEditorComponent` đã được viết lại hoàn toàn (bỏ `edtui`) trong một việc riêng, xem "Đánh bóng UI tổng thể" trong `docs/backlog.md`.
