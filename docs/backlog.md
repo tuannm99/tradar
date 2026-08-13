@@ -62,6 +62,39 @@ User rà lại sau khi dùng thử và chốt danh sách dưới đây. Thứ t�
 
 8. **Xem lại toàn bộ keymap** — user nói "phase đầu xây dựng chưa ưng phần mapping bằng bàn phím", sẽ dùng thử rồi phản hồi cụ thể. **Đừng tự đổi binding khi chưa có phản hồi đó** — hạ tầng remap đã có sẵn (`tradar_core::keymap` + `config.toml`), nên đổi mặc định là việc rẻ khi đã biết muốn đổi gì.
 
+## Chưa làm, chưa được scope (2026-08-14)
+
+Gom về một chỗ để không mất: đây là những thứ đã nêu trong lúc trao đổi hoặc phát hiện khi rà code, nhưng **chưa được chốt phạm vi và chưa ai bắt tay vào**. Không có thứ tự ưu tiên — chọn theo nhu cầu thực tế lúc làm.
+
+**Tính năng người dùng thấy được**
+
+- **Export kết quả ra CSV/JSON.** `README.md` đang ghi "export tổng quát chưa được xây dựng" (mới chỉ có curl export riêng của Elasticsearch). Tái dùng được `FilePromptComponent` để hỏi đường dẫn.
+- **Tìm kiếm trong kết quả** (lọc/nhảy tới dòng khớp). Chưa có gì.
+- **Trạng thái connection** — hiện không có cách biết một connection còn sống hay đã rớt cho tới khi chạy query và nhận lỗi.
+- **Thêm connector MySQL / MariaDB / ClickHouse.** `README.md` liệt ở mục "Dự kiến". Rẻ nhờ kiến trúc pluggable: thêm crate mới + 1 dòng trong `registry()`, không đụng core. MySQL qua `sqlx` gần như giống hệt connector Postgres đang có.
+
+**Editor còn thiếu so với vim thật** (biết trước khi tự viết editor, cố ý bỏ qua ở vòng đầu — xem mục 5 phần "Bỏ `edtui`")
+
+- Undo/redo. Đây là cái thiếu dễ đau nhất khi gõ query dài.
+- Visual mode, search/replace trong buffer, copy/paste nội bộ editor.
+
+**Schema đọc được sâu hơn** (nối tiếp mục 2 "Schema sidebar xem được cột")
+
+- **Elasticsearch**: lấy field từ `GET /_mapping` — một call là đủ cho *mọi* index, nên rẻ; hiện ES trả về `columns` rỗng.
+- **MongoDB**: suy ra tên field bằng cách đọc mẫu một document mỗi collection. Cần cân nhắc chi phí: N collection = N round trip lúc connect, nên có thể phải lazy (chỉ đọc khi user mở collection đó ra).
+- Cả hai đều làm autocomplete tốt lên ngay, vì nguồn gợi ý lấy thẳng từ `SchemaInfo`.
+
+**Chưa được scope, đã nêu ở mục 5 cũ**
+
+- Nhiều theme preset dựng sẵn (hiện: một theme dark + override từng màu).
+- Cho phép remap cả phím vim *bên trong* editor (hiện cố định theo vim chuẩn — xem ghi chú phạm vi ở đầu `crates/tradar-core/src/keymap.rs`).
+- Cột trong bảng kết quả resize được bằng tay (hiện tự tính theo giá trị rộng nhất, cap 40 ký tự).
+
+**Kỹ thuật, không ảnh hưởng người dùng ngay**
+
+- **Timeout connect chỉ có ở Postgres** (`acquire_timeout` 5s). SQLite/Mongo/Redis/Elasticsearch chưa đặt giới hạn — connect tới host không reachable sẽ treo bao lâu tuỳ backend quyết định. Đây đúng là lỗi đã từng sửa cho Postgres (xem "Vấn đề đã biết"), chỉ là chưa nhân ra các driver còn lại.
+- **`Component: Send`** — xem "Đã cân nhắc và gác lại" trong `docs/architecture.md`; lý do gốc (`edtui` giữ `Rc`) đã biến mất nhưng chưa ai verify lại.
+
 ## Vấn đề đã biết (gác lại, không chặn)
 
 Từ các review nhiệm vụ và review toàn nhánh cuối cùng của migration Component Architecture (ghi lại ở đây để không bị mất):
