@@ -73,6 +73,16 @@ User rà lại sau khi dùng thử và chốt danh sách dưới đây. Thứ t�
 
    Ranh giới câu là phần khó và **phụ thuộc từng driver**: SQL tách theo `;` nhưng phải bỏ qua `;` nằm trong chuỗi `'...'`/`"..."`, trong comment `--`/`/* */`, và trong dollar-quote `$$...$$` của Postgres; Redis mỗi dòng là một lệnh; Elasticsearch một request là `METHOD /path` + body JSON đi kèm; Mongo mỗi `db.<coll>.<method>(...)` là một câu. Nên đi theo đúng cách đã làm với autocomplete: **thêm một method vào `QueryDriver` để mỗi connector tự tách câu của mình**, mặc định "cả buffer là một câu"; phần SQL dùng chung một helper trong `tradar-query-workbench` như `returns_rows`/`SQL_KEYWORDS`.
 
+## Quản lý file query (user hỏi 2026-08-14) — đang làm
+
+Trạng thái trước khi làm: `Ctrl+S`/`Ctrl+O` có rồi nhưng **gõ tay đường dẫn**, `last_path` chỉ nằm trong RAM của một screen (mất khi thoát, không chia sẻ giữa tab). Không có thư mục mặc định, không liệt kê được file đã lưu, không có recent list.
+
+Hướng chốt:
+
+- **Thư mục mặc định** `~/.config/tradar/queries/` (dùng chung chỗ với `connections.toml`/`session.toml`/`config.toml`). Gõ tên trần (`report`) thì lưu vào đó và tự thêm `.sql`; gõ đường dẫn có `/` thì dùng nguyên văn, để người quen dùng đường dẫn tuyệt đối không bị chặn.
+- **Recent list** lưu ra đĩa (`~/.config/tradar/recent.toml`), most-recent-first, có giới hạn số lượng; cập nhật cả khi save lẫn khi open. Recent là **toàn cục**, không thuộc session, nên không nhét vào `session.toml`.
+- **`Ctrl+O` mở picker** thay vì ô nhập trống: liệt kê recent trước, rồi các file còn lại trong thư mục queries. Gõ để lọc; nếu không khớp gì thì `Enter` mở luôn cái vừa gõ như một đường dẫn — một widget lo cả hai kiểu dùng.
+
 ## Chưa làm, chưa được scope (2026-08-14)
 
 Gom về một chỗ để không mất: đây là những thứ đã nêu trong lúc trao đổi hoặc phát hiện khi rà code, nhưng **chưa được chốt phạm vi và chưa ai bắt tay vào**.
