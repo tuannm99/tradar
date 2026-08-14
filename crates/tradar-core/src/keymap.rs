@@ -40,12 +40,12 @@ pub enum Context {
     Global,
     Picker,
     QueryScreen,
-    /// Only while the schema sidebar has focus. Split out from
+    /// Only while the database navigator has focus. Split out from
     /// `QueryScreen` so the same key can mean different things per pane
-    /// (`l` expands a table here, scrolls the table right in `Results`)
-    /// without the two bindings colliding -- the screen passes only the
-    /// focused pane's context to `resolve_in`.
-    Sidebar,
+    /// (`l` opens a table here, moves to the next column in `Results`)
+    /// without the two bindings colliding -- each pane's owner passes only
+    /// its own context to `resolve_in`.
+    Navigator,
     /// Only while the results pane has focus.
     Results,
     /// Shared by every selectable list: the connection picker, the schema
@@ -65,7 +65,7 @@ impl Context {
             Self::Global => "global",
             Self::Picker => "picker",
             Self::QueryScreen => "query-screen",
-            Self::Sidebar => "sidebar",
+            Self::Navigator => "navigator",
             Self::Results => "results",
             Self::List => "list",
             Self::Prompt => "prompt",
@@ -78,7 +78,7 @@ impl Context {
             "global" => Self::Global,
             "picker" => Self::Picker,
             "query-screen" => Self::QueryScreen,
-            "sidebar" => Self::Sidebar,
+            "navigator" => Self::Navigator,
             "results" => Self::Results,
             "list" => Self::List,
             "prompt" => Self::Prompt,
@@ -93,7 +93,7 @@ impl Context {
             Self::Global,
             Self::Picker,
             Self::QueryScreen,
-            Self::Sidebar,
+            Self::Navigator,
             Self::Results,
             Self::List,
             Self::Prompt,
@@ -111,6 +111,8 @@ pub enum Command {
     CloseTab,
     NextTab,
     PrevTab,
+    /// Show/hide the database navigator, and move focus into it.
+    ToggleNavigator,
     // Picker
     Open,
     NewConnection,
@@ -140,7 +142,7 @@ pub enum Command {
     EditCell,
     /// Delete the selected row, the same way.
     DeleteRow,
-    /// Show/hide a table's columns in the schema sidebar.
+    /// Open/close a node in the navigator tree.
     Expand,
     Collapse,
     // Lists
@@ -170,6 +172,7 @@ impl Command {
             Self::CloseTab => "close-tab",
             Self::NextTab => "next-tab",
             Self::PrevTab => "prev-tab",
+            Self::ToggleNavigator => "toggle-navigator",
             Self::Open => "open",
             Self::NewConnection => "new-connection",
             Self::EditConnection => "edit-connection",
@@ -212,12 +215,13 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 40] = [
+    const ALL: [Self; 41] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
         Self::NextTab,
         Self::PrevTab,
+        Self::ToggleNavigator,
         Self::Open,
         Self::NewConnection,
         Self::EditConnection,
@@ -263,6 +267,7 @@ impl Command {
             Self::CloseTab => "Close the current tab",
             Self::NextTab => "Go to the next tab",
             Self::PrevTab => "Go to the previous tab",
+            Self::ToggleNavigator => "Show/focus the database navigator",
             Self::Open => "Connect to the selected connection",
             Self::NewConnection => "Add a connection",
             Self::EditConnection => "Edit the selected connection",
@@ -277,14 +282,14 @@ impl Command {
             Self::History => "Browse query history",
             Self::ExportCurl => "Export the request as curl (Elasticsearch)",
             Self::Yank => "Copy the selected row/document",
-            Self::InsertName => "Insert the selected schema name",
+            Self::InsertName => "Insert the selected name into the query",
             Self::Help => "Show this help",
             Self::PrevColumn => "Move to the previous column",
             Self::NextColumn => "Move to the next column",
             Self::EditCell => "Edit the selected cell",
             Self::DeleteRow => "Delete the selected row",
-            Self::Expand => "Show a table's columns",
-            Self::Collapse => "Hide a table's columns",
+            Self::Expand => "Open the selected node",
+            Self::Collapse => "Close the selected node",
             Self::MoveDown => "Move down",
             Self::MoveUp => "Move up",
             Self::MoveTop => "Jump to the top",
@@ -415,6 +420,7 @@ impl Default for Keymap {
                 ("ctrl-w", Command::CloseTab),
                 ("ctrl-right", Command::NextTab),
                 ("ctrl-left", Command::PrevTab),
+                ("ctrl-b", Command::ToggleNavigator),
             ]),
         );
         bindings.insert(
@@ -445,13 +451,15 @@ impl Default for Keymap {
             ]),
         );
         bindings.insert(
-            Context::Sidebar,
+            Context::Navigator,
             parse_defaults(&[
                 ("enter", Command::InsertName),
                 ("l", Command::Expand),
                 ("right", Command::Expand),
                 ("h", Command::Collapse),
                 ("left", Command::Collapse),
+                ("esc", Command::Back),
+                ("?", Command::Help),
             ]),
         );
         bindings.insert(
@@ -731,10 +739,10 @@ mod tests {
         let mut pending = None;
 
         let in_picker = keymap.resolve(Context::Picker, &mut pending, press(KeyCode::Enter));
-        let in_sidebar = keymap.resolve(Context::Sidebar, &mut pending, press(KeyCode::Enter));
+        let in_navigator = keymap.resolve(Context::Navigator, &mut pending, press(KeyCode::Enter));
 
         assert_eq!(in_picker, Resolution::Command(Command::Open));
-        assert_eq!(in_sidebar, Resolution::Command(Command::InsertName));
+        assert_eq!(in_navigator, Resolution::Command(Command::InsertName));
     }
 
     #[test]
@@ -774,7 +782,7 @@ mod tests {
 
         // `enter` is bound in both, and Sidebar is listed first.
         let resolution = keymap.resolve_in(
-            &[Context::Sidebar, Context::Picker],
+            &[Context::Navigator, Context::Picker],
             &mut pending,
             press(KeyCode::Enter),
         );
@@ -802,10 +810,11 @@ mod tests {
         let keymap = Keymap::default();
         let mut pending = None;
 
-        let in_sidebar = keymap.resolve(Context::Sidebar, &mut pending, press(KeyCode::Char('l')));
+        let in_navigator =
+            keymap.resolve(Context::Navigator, &mut pending, press(KeyCode::Char('l')));
         let in_results = keymap.resolve(Context::Results, &mut pending, press(KeyCode::Char('l')));
 
-        assert_eq!(in_sidebar, Resolution::Command(Command::Expand));
+        assert_eq!(in_navigator, Resolution::Command(Command::Expand));
         assert_eq!(in_results, Resolution::Command(Command::NextColumn));
     }
 

@@ -381,7 +381,7 @@ fn context_title(context: Context) -> &'static str {
         Context::Global => "Anywhere",
         Context::Picker => "Connection picker",
         Context::QueryScreen => "Query screen",
-        Context::Sidebar => "Schema sidebar (when focused)",
+        Context::Navigator => "Database navigator (when focused)",
         Context::Results => "Results pane (when focused)",
         Context::List => "Lists (connections, schema, results, history)",
         Context::Prompt => "Prompts and overlays",

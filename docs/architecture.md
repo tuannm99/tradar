@@ -27,7 +27,7 @@ crates/
     src/
       query_driver.rs         — trait QueryDriver (connect, list_schema, execute, export_curl, edit_source/edit_sql) + SchemaInfo/QueryResult/RowEdit
       query_engine.rs         — QueryEngine: nhận một chuỗi query, giao cho QueryDriver đang active, lưu lịch sử; implement Session
-      components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/schema_sidebar.rs/completion.rs/file_prompt.rs/file_picker.rs/history_picker.rs
+      components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/row_edit.rs/completion.rs/file_prompt.rs/file_picker.rs/history_picker.rs
                                   (struct state+draw thuần, do QueryScreenComponent compose và định tuyến phím tới, không tự implement Component)
   connectors/
     tradar-postgres/  tradar-sqlite/  tradar-elasticsearch/  tradar-redis/  tradar-mongo/
@@ -118,7 +118,7 @@ Walking skeleton v1 chạy được từ đầu đến cuối: `tradar` load cá
 Những phần còn mỏng/thiếu đáng chú ý:
 
 - ~~Chưa có màn hình "add connection" tương tác~~ — đã có từ 2026-08-14: `a`/`e`/`d` trong connection picker, form ở `crates/tradar-app/src/components/connection_form.rs`; xem `docs/backlog.md` mục 5.5.
-- `QueryDriver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng schema sidebar trên query screen (tự load khi connect; `Tab` để focus, `Enter` để chèn tên được chọn vào query).
+- `QueryDriver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng **navigator** (`crates/tradar-app/src/components/navigator.rs`) — một cây `connection → bảng → cột` phủ mọi connection đã lưu, không chỉ connection của tab hiện tại. Nó nằm ở app shell chứ không trong screen vì chỉ `RootComponent` biết có những connection nào khác và chúng đang mở ở tab nào; screen chỉ cung cấp dữ liệu qua `Component::outline()`.
 - `config/` là module placeholder rỗng; cấu hình app ngoài file connections chưa tồn tại.
 
 ## Kiến trúc mục tiêu: connector pluggable
@@ -144,7 +144,7 @@ crates/
                                     storage (SavedConnection, ConnectionStore), config
   tradar-connector-api/          — trait Connector, trait Session, ConnectorDescriptor
                                     (SPI dành cho connector — xem "Vì sao tách khỏi tradar-core" bên dưới)
-  tradar-query-workbench/        — QueryScreenComponent, ResultsComponent, SchemaSidebarComponent, QueryEditorComponent,
+  tradar-query-workbench/        — QueryScreenComponent, ResultsComponent, QueryEditorComponent,
                                     QueryEngine (implement Session), trait QueryDriver, SchemaInfo/QueryResult
   connectors/
     tradar-postgres/  tradar-sqlite/  tradar-mongo/  tradar-elasticsearch/  tradar-redis/
@@ -193,7 +193,7 @@ pub trait Session: Send + Sync {
 
 Connector dạng query: `QueryEngine` (trong `tradar-query-workbench`) implement `Session` — `tick()` của nó rút các reply query-completion, `build_screen()` của nó trả về `QueryScreenComponent`. Đây là một cú fit không cần đổi tên; `QueryEngine` đã đóng vai trò này rồi, chỉ cần gắn thêm trait chính thức.
 
-Không cần trait mới cho việc phân biệt Screen/Component/widget — nó chỉ đặt tên cho một pattern code đã dùng sẵn. `QueryScreenComponent` là một Screen (implement `Component`), nhưng bên trong compose `query_editor.rs`, `results.rs`, và `schema_sidebar.rs`, không cái nào tự implement `Component` — chỉ là struct state+draw thuần mà screen sở hữu và gọi trực tiếp. Mọi connector tương lai theo cùng pattern: `KafkaScreen` implement `Component` và compose các struct thuần `TopicList`/`MessageTable`/`Header` tuỳ ý.
+Không cần trait mới cho việc phân biệt Screen/Component/widget — nó chỉ đặt tên cho một pattern code đã dùng sẵn. `QueryScreenComponent` là một Screen (implement `Component`), nhưng bên trong compose `query_editor.rs`, `results.rs`, và `row_edit.rs`, không cái nào tự implement `Component` — chỉ là struct state+draw thuần mà screen sở hữu và gọi trực tiếp. Mọi connector tương lai theo cùng pattern: `KafkaScreen` implement `Component` và compose các struct thuần `TopicList`/`MessageTable`/`Header` tuỳ ý.
 
 ### Screen không bao giờ làm IO — Session là actor
 

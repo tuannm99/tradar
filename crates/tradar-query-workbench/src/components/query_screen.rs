@@ -1,5 +1,6 @@
-//! The post-connect screen: schema sidebar + query editor + results,
-//! composed. Implements `Component` because `RootComponent` routes keys and
+//! The post-connect screen: query editor + results, composed. The schema
+//! tree lives in the app shell's navigator, not here -- see `outline`.
+//! Implements `Component` because `RootComponent` routes keys and
 //! ticks to it directly whenever it's the active screen. Owns the
 //! `QueryEngine` directly (not through `dyn Session`) since this screen only
 //! ever exists for a query-shaped connector's own engine.
@@ -13,7 +14,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
 use tradar_connector_api::Session;
-use tradar_core::action::{Action, Component};
+use tradar_core::action::{Action, Component, OutlineEntry};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::SavedConnection;
 use tradar_core::ui;
@@ -26,7 +27,6 @@ use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
 use crate::components::row_edit::{RowEditComponent, RowEditOutcome};
-use crate::components::schema_sidebar::SchemaSidebarComponent;
 use crate::query_driver::{RowChange, RowEdit};
 use crate::query_engine::{QueryEngine, QueryOutcome};
 
@@ -34,12 +34,10 @@ use crate::query_engine::{QueryEngine, QueryOutcome};
 pub enum Focus {
     Editor,
     Results,
-    Sidebar,
 }
 
 pub struct QueryScreenComponent {
     pub focus: Focus,
-    pub schema_sidebar: SchemaSidebarComponent,
     pub query_editor: QueryEditorComponent,
     pub results: ResultsComponent,
     engine: QueryEngine,
@@ -88,11 +86,6 @@ impl QueryScreenComponent {
     /// yet -- every state change here already goes through `tick()` or a
     /// direct key-driven method call.
     pub fn new(mut engine: QueryEngine, _action_tx: UnboundedSender<Action>) -> Self {
-        let mut schema_sidebar = SchemaSidebarComponent::new();
-        match engine.schema().clone() {
-            Ok(schema) => schema_sidebar.set_schema(schema),
-            Err(e) => schema_sidebar.set_schema_error(e),
-        }
         // `tick()` may already have a query outcome queued up (not possible
         // right after `Connector::connect`, but keeps `engine` in a
         // consistent state regardless of how it was constructed).
@@ -111,7 +104,6 @@ impl QueryScreenComponent {
 
         Self {
             focus: Focus::Editor,
-            schema_sidebar,
             query_editor,
             results: ResultsComponent::new(),
             engine,
@@ -415,9 +407,7 @@ impl QueryScreenComponent {
     /// Scrolls whichever pane the pointer is over, rather than whichever
     /// has focus -- that's what a wheel is expected to do.
     fn scroll_under_cursor(&mut self, event: MouseEvent, mv: VimMove) {
-        if self.schema_sidebar.contains(event.column, event.row) {
-            self.schema_sidebar.apply_move(mv);
-        } else if ui::contains(self.editor_area, event.column, event.row) {
+        if ui::contains(self.editor_area, event.column, event.row) {
             self.query_editor.scroll(mv);
         } else {
             self.results.apply_move(mv);
@@ -570,14 +560,13 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
-        // Only the focused pane's context is offered, which is what lets
-        // `l` mean "expand this table" in the sidebar and "scroll right" in
-        // the results without the two bindings colliding. With the editor
-        // focused, neither pane's keys (nor list navigation) apply -- those
-        // are the editor's own vim motions.
+        // Only the focused pane's context is offered, so `l` can mean
+        // "next column" in the results without colliding with the
+        // navigator's own `l`. With the editor focused, neither the results
+        // keys nor list navigation apply -- those are the editor's own vim
+        // motions.
         let contexts: &[Context] = match self.focus {
             Focus::Editor => &[Context::QueryScreen],
-            Focus::Sidebar => &[Context::QueryScreen, Context::Sidebar, Context::List],
             Focus::Results => &[Context::QueryScreen, Context::Results, Context::List],
         };
         let key = KeyPress::new(code, modifiers);
@@ -591,7 +580,6 @@ impl Component for QueryScreenComponent {
 
         if let Some(mv) = command.as_vim_move() {
             match self.focus {
-                Focus::Sidebar => self.schema_sidebar.apply_move(mv),
                 Focus::Results => self.results.apply_move(mv),
                 Focus::Editor => {}
             }
@@ -611,8 +599,7 @@ impl Component for QueryScreenComponent {
             Command::CycleFocus => {
                 self.focus = match self.focus {
                     Focus::Editor => Focus::Results,
-                    Focus::Results => Focus::Sidebar,
-                    Focus::Sidebar => Focus::Editor,
+                    Focus::Results => Focus::Editor,
                 };
             }
             Command::SaveFile => self.open_prompt(PromptKind::Save),
@@ -628,15 +615,6 @@ impl Component for QueryScreenComponent {
             Command::NextColumn => self.results.next_column(),
             Command::EditCell => self.begin_edit_cell(),
             Command::DeleteRow => self.begin_delete_row(),
-            Command::Expand => self.schema_sidebar.expand(),
-            Command::Collapse => self.schema_sidebar.collapse(),
-            Command::InsertName => {
-                if let Some(name) = self.schema_sidebar.selected_name() {
-                    let name = name.to_string();
-                    self.query_editor.insert_at_cursor(&name);
-                    self.focus = Focus::Editor;
-                }
-            }
             _ => {}
         }
         None
@@ -657,9 +635,7 @@ impl Component for QueryScreenComponent {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Clicking a pane focuses it, which is the main thing a
                 // mouse is for here -- and then selects the row hit.
-                if self.schema_sidebar.click(event.column, event.row) {
-                    self.focus = Focus::Sidebar;
-                } else if self.results.click(event.column, event.row) {
+                if self.results.click(event.column, event.row) {
                     self.focus = Focus::Results;
                 } else if ui::contains(self.editor_area, event.column, event.row) {
                     self.focus = Focus::Editor;
@@ -676,6 +652,48 @@ impl Component for QueryScreenComponent {
         let text = self.query_editor.text();
         // An empty editor has nothing worth carrying to the next run.
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// This connection's schema, flattened for the navigator: each table at
+    /// depth 0 with its columns at depth 1. The navigator decides what to
+    /// show; this only says what there is.
+    fn outline(&self) -> Vec<OutlineEntry> {
+        let Ok(schema) = self.engine.schema() else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        for table in schema {
+            entries.push(OutlineEntry {
+                depth: 0,
+                label: table.name.clone(),
+                detail: String::new(),
+                has_children: !table.columns.is_empty(),
+            });
+            for column in &table.columns {
+                entries.push(OutlineEntry {
+                    depth: 1,
+                    label: column.name.clone(),
+                    // Which columns are the key decides whether the results
+                    // grid can be edited, so it's worth seeing here.
+                    detail: if column.primary_key {
+                        format!("{} pk", column.type_name)
+                    } else {
+                        column.type_name.clone()
+                    },
+                    has_children: false,
+                });
+            }
+        }
+        entries
+    }
+
+    fn outline_error(&self) -> Option<String> {
+        self.engine.schema().as_ref().err().cloned()
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        self.query_editor.insert_at_cursor(text);
+        self.focus = Focus::Editor;
     }
 
     fn update(&mut self, _action: Action) -> Option<Action> {
@@ -699,24 +717,17 @@ impl Component for QueryScreenComponent {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        // Sidebar wide enough for a typical table name, but never more than
-        // a third of a narrow terminal.
-        let sidebar_width = 26.min(area.width / 3);
-        let outer = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(sidebar_width), Constraint::Min(1)])
-            .split(area);
-
-        self.schema_sidebar
-            .draw(frame, outer[0], self.focus == Focus::Sidebar);
-
+        // The schema tree used to live here as a sidebar; it's now the app
+        // shell's navigator, which can show every connection rather than
+        // only this screen's own -- so the screen is just editor + results.
+        //
         // The editor gets a third of the height (min 5 rows, so a short
         // query still has room), results take the rest.
         let editor_height = (area.height / 3).clamp(5, 12);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(editor_height), Constraint::Min(3)])
-            .split(outer[1]);
+            .split(area);
 
         let connection_name = self.active_connection().name.clone();
         self.editor_area = chunks[0];
@@ -856,32 +867,55 @@ mod tests {
 
         assert_eq!(screen.focus, Focus::Editor);
         assert_eq!(screen.active_connection(), &connection());
-        assert_eq!(screen.schema_sidebar.schema, schema());
     }
 
     #[test]
-    fn a_schema_error_is_shown_in_the_sidebar() {
+    fn the_outline_offered_to_the_navigator_is_this_connection_s_schema() {
+        let (screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema())));
+
+        let labels: Vec<String> = screen.outline().into_iter().map(|e| e.label).collect();
+
+        assert_eq!(labels, vec!["users", "orders"]);
+    }
+
+    #[test]
+    fn a_column_is_offered_under_its_table_with_its_type() {
+        let schema = vec![SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![crate::query_driver::ColumnInfo {
+                name: "id".to_string(),
+                type_name: "INTEGER".to_string(),
+                primary_key: true,
+            }],
+        }];
+        let (screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema)));
+
+        let outline = screen.outline();
+
+        assert_eq!(outline[0].depth, 0);
+        assert!(outline[0].has_children);
+        assert_eq!(outline[1].depth, 1);
+        assert_eq!(outline[1].detail, "INTEGER pk");
+    }
+
+    #[test]
+    fn a_schema_error_is_reported_to_the_navigator_rather_than_looking_empty() {
         let (screen, _rx) = screen_with(fake_engine_with_schema(
             empty_result(),
             Err("scan failed".to_string()),
         ));
 
-        assert_eq!(
-            screen.schema_sidebar.schema_error.as_deref(),
-            Some("scan failed")
-        );
+        assert!(screen.outline().is_empty());
+        assert_eq!(screen.outline_error().as_deref(), Some("scan failed"));
     }
 
     #[test]
-    fn tab_cycles_editor_results_sidebar() {
+    fn tab_cycles_editor_and_results() {
         let (mut screen, _rx) = screen();
         assert_eq!(screen.focus, Focus::Editor);
 
         screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(screen.focus, Focus::Results);
-
-        screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(screen.focus, Focus::Sidebar);
 
         screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(screen.focus, Focus::Editor);
@@ -896,9 +930,8 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_the_sidebar_inserts_the_selected_name_at_the_cursor() {
+    fn a_name_from_the_navigator_lands_at_the_cursor_not_at_the_end() {
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema())));
-        screen.schema_sidebar.move_down();
         // Type "ab" then leave Insert mode -- vim leaves the cursor sitting
         // on the last-typed character ("b"), so the inserted name must land
         // between "a" and "b", not appended at the buffer's end.
@@ -906,28 +939,13 @@ mod tests {
         screen
             .query_editor
             .forward_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        screen.focus = Focus::Sidebar;
+        screen.focus = Focus::Results;
 
-        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        screen.insert_text("orders");
 
         assert_eq!(screen.query_editor.text(), "aordersb");
-        assert_eq!(screen.focus, Focus::Editor);
+        assert_eq!(screen.focus, Focus::Editor, "typing has to go somewhere");
         assert_eq!(screen.query_editor.mode, EditorMode::Insert);
-    }
-
-    #[test]
-    fn enter_on_the_sidebar_is_a_no_op_when_schema_is_empty() {
-        let (mut screen, _rx) = screen();
-        screen.focus = Focus::Sidebar;
-
-        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
-
-        assert_eq!(screen.query_editor.text(), "");
-        assert_eq!(
-            screen.focus,
-            Focus::Sidebar,
-            "no-op must not change focus either"
-        );
     }
 
     #[tokio::test]
@@ -960,68 +978,8 @@ mod tests {
         );
     }
 
-    fn sidebar_focused_screen_with_schema() -> QueryScreenComponent {
-        let (mut screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema())));
-        screen.focus = Focus::Sidebar;
-        screen
-    }
-
-    #[tokio::test]
-    async fn ctrl_enter_submits_instead_of_inserting_the_schema_selection_when_sidebar_focused() {
-        let mut screen = sidebar_focused_screen_with_schema();
-        screen.query_editor.insert_at_cursor("x");
-
-        screen.handle_key_event(KeyCode::Enter, KeyModifiers::CONTROL);
-
-        assert_eq!(screen.query_editor.text(), "x");
-    }
-
-    #[tokio::test]
-    async fn f5_submits_instead_of_being_swallowed_by_the_sidebar_guard() {
-        let mut screen = sidebar_focused_screen_with_schema();
-        screen.query_editor.insert_at_cursor("x");
-
-        screen.handle_key_event(KeyCode::F(5), KeyModifiers::NONE);
-
-        assert_eq!(screen.query_editor.text(), "x");
-    }
-
     #[test]
-    fn gg_moves_the_schema_selection_to_the_top_when_sidebar_focused() {
-        let mut screen = sidebar_focused_screen_with_schema();
-        screen.schema_sidebar.move_down();
-        assert_eq!(screen.schema_sidebar.schema_selected, 1);
-
-        let first = screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
-        assert!(first.is_none(), "a lone 'g' should not act yet");
-        assert_eq!(screen.schema_sidebar.schema_selected, 1);
-
-        screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
-        assert_eq!(screen.schema_sidebar.schema_selected, 0);
-    }
-
-    #[test]
-    fn shift_g_moves_the_schema_selection_to_the_bottom_when_sidebar_focused() {
-        let mut screen = sidebar_focused_screen_with_schema();
-
-        screen.handle_key_event(KeyCode::Char('G'), KeyModifiers::NONE);
-
-        assert_eq!(screen.schema_sidebar.schema_selected, 1);
-    }
-
-    #[test]
-    fn ctrl_d_and_ctrl_u_scroll_the_schema_sidebar_when_focused() {
-        let mut screen = sidebar_focused_screen_with_schema();
-
-        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
-        assert_eq!(screen.schema_sidebar.schema_selected, 1);
-
-        screen.handle_key_event(KeyCode::Char('u'), KeyModifiers::CONTROL);
-        assert_eq!(screen.schema_sidebar.schema_selected, 0);
-    }
-
-    #[test]
-    fn g_is_forwarded_to_the_editor_instead_of_the_sidebar_when_editor_focused() {
+    fn g_is_forwarded_to_the_editor_rather_than_being_a_list_motion() {
         let (mut screen, _rx) = screen();
         assert_eq!(screen.focus, Focus::Editor);
 
@@ -1031,18 +989,19 @@ mod tests {
         assert!(first.is_none());
         assert!(
             second.is_none(),
-            "editor-focused 'g'/'gg' is QueryEditorComponent's own vim handling, not a schema action"
+            "editor-focused 'g'/'gg' is QueryEditorComponent's own vim handling, not a list motion"
         );
     }
 
     #[test]
-    fn ctrl_y_exports_curl_even_while_the_sidebar_has_focus() {
-        let mut screen = sidebar_focused_screen_with_schema();
+    fn ctrl_y_exports_curl_even_while_the_results_pane_has_focus() {
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema())));
+        screen.focus = Focus::Results;
         screen.query_editor.insert_at_cursor("select 1");
 
         // The fake driver's `export_curl` defaults to `None`, so this is
         // just confirming the key is consumed here rather than falling
-        // through to the sidebar's Enter/movement handling.
+        // through to the results pane's own key handling.
         let action = screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::CONTROL);
 
         assert!(action.is_none());
@@ -1102,51 +1061,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l_expands_a_table_in_the_sidebar_but_moves_the_cell_cursor_in_results() {
-        let schema_with_columns = vec![SchemaInfo {
-            name: "users".to_string(),
-            columns: vec![crate::query_driver::ColumnInfo::new("id", "INTEGER")],
-        }];
-        let (mut screen, _rx) = screen_with(fake_engine_with_schema(
-            empty_result(),
-            Ok(schema_with_columns),
-        ));
-
-        // Sidebar focused: `l` opens the table's columns.
-        screen.focus = Focus::Sidebar;
-        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
-        screen.schema_sidebar.move_down();
-        assert_eq!(screen.schema_sidebar.selected_name(), Some("id"));
-
-        // Results focused: the same key moves the cell cursor instead.
+    async fn l_moves_the_cell_cursor_when_the_results_pane_has_focus() {
+        let (mut screen, _rx) = screen();
         screen.focus = Focus::Results;
         screen.results.set_result(QueryResult::Table {
             columns: vec!["a".to_string(), "b".to_string()],
             rows: vec![vec!["1".to_string(), "2".to_string()]],
             truncated: false,
         });
+
         screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
 
         assert_eq!(screen.results.selected_cell(), Some(("b", "2")));
-    }
-
-    #[tokio::test]
-    async fn enter_on_a_column_inserts_the_column_name() {
-        let schema_with_columns = vec![SchemaInfo {
-            name: "users".to_string(),
-            columns: vec![crate::query_driver::ColumnInfo::new("email", "TEXT")],
-        }];
-        let (mut screen, _rx) = screen_with(fake_engine_with_schema(
-            empty_result(),
-            Ok(schema_with_columns),
-        ));
-        screen.focus = Focus::Sidebar;
-
-        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
-        screen.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
-        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
-
-        assert_eq!(screen.query_editor.text(), "email");
     }
 
     /// A screen whose schema has a table worth completing.
@@ -1258,10 +1184,11 @@ mod tests {
             .draw(|frame| screen.draw(frame, frame.area()))
             .unwrap();
 
-        // The editor pane starts right of the 26-wide sidebar, at the top.
+        // The editor pane is the top strip of the screen now that the
+        // schema tree has moved out to the navigator.
         screen.handle_mouse_event(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 40,
+            column: 10,
             row: 2,
             modifiers: KeyModifiers::NONE,
         });

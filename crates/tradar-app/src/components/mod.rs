@@ -17,8 +17,10 @@ use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::{ConnectionStore, SavedConnection, SessionState};
 use tradar_core::theme::theme;
 use tradar_core::ui::{self, HelpOverlay};
+use tradar_core::vim_list::VimMove;
 
 use crate::components::connection_picker::ConnectionPickerComponent;
+use crate::components::navigator::{NavConnection, NavOutcome, NavigatorComponent};
 
 pub enum ScreenSlot {
     ConnectionPicker,
@@ -84,6 +86,15 @@ pub struct RootComponent {
     /// The tab bar's per-tab label widths, in order -- what turns a click
     /// column into a tab index.
     tab_label_widths: Vec<u16>,
+    /// The cross-connection tree down the left side. Lives here because
+    /// only this component knows what other connections exist and which tab
+    /// each is open on.
+    navigator: NavigatorComponent,
+    /// Whether the navigator panel is on screen, and whether it has the
+    /// keys. Both off by default: the screen gets the whole terminal until
+    /// you ask for the tree.
+    navigator_open: bool,
+    navigator_focused: bool,
 }
 
 impl RootComponent {
@@ -98,6 +109,9 @@ impl RootComponent {
             editing: None,
             tab_bar_area: Rect::ZERO,
             tab_label_widths: Vec::new(),
+            navigator: NavigatorComponent::new(),
+            navigator_open: false,
+            navigator_focused: false,
         }
     }
 
@@ -187,6 +201,139 @@ impl RootComponent {
         }
         requests
     }
+
+    /// The navigator's view of the world: every saved connection, plus what
+    /// the tab holding it (if any) has to browse. Rebuilt each time it's
+    /// needed -- the alternative is a copy of every schema that has to be
+    /// invalidated whenever a tab connects, disconnects or closes.
+    fn nav_connections(&self) -> Vec<NavConnection> {
+        self.connections
+            .iter()
+            .map(|connection| {
+                let tab = self.tabs.iter().position(|tab| {
+                    tab.title.as_deref() == Some(connection.name.as_str())
+                        && matches!(tab.screen, ScreenSlot::Active(_))
+                });
+                let screen = tab.and_then(|index| match &self.tabs[index].screen {
+                    ScreenSlot::Active(screen) => Some(screen),
+                    ScreenSlot::ConnectionPicker => None,
+                });
+                NavConnection {
+                    name: connection.name.clone(),
+                    tab,
+                    outline: screen.map(|s| s.outline()).unwrap_or_default(),
+                    error: screen.and_then(|s| s.outline_error()),
+                }
+            })
+            .collect()
+    }
+
+    /// One key cycles the navigator through its three states: hidden,
+    /// showing but not taking keys, and focused. Pressing it again from
+    /// focused hides it, so the same key always gets you back to where you
+    /// were.
+    fn toggle_navigator(&mut self) {
+        match (self.navigator_open, self.navigator_focused) {
+            (false, _) => {
+                self.navigator_open = true;
+                self.navigator_focused = true;
+            }
+            (true, false) => self.navigator_focused = true,
+            (true, true) => {
+                self.navigator_open = false;
+                self.navigator_focused = false;
+            }
+        }
+    }
+
+    /// Connects `connection` on a tab of its own -- reusing the active tab
+    /// when it's still sitting on the picker, since an empty tab is exactly
+    /// what a new connection wants.
+    fn open_connection(&mut self, index: usize) -> Option<Action> {
+        let connection = self.connections.get(index)?.clone();
+        if matches!(self.tabs[self.active_tab].screen, ScreenSlot::Active(_)) {
+            self.new_tab();
+        }
+        let tab = self.active_tab;
+        // Go through the picker rather than building the request here: it
+        // owns `connect_epoch`, and a request that doesn't match the epoch
+        // the picker will compare against would be dropped on arrival.
+        self.tabs[tab].connection_picker.selected = index;
+        let action = self.tabs[tab]
+            .connection_picker
+            .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        match action {
+            Some(Action::OpenRequested {
+                connection: _,
+                epoch,
+                ..
+            }) => Some(Action::OpenRequested {
+                connection,
+                epoch,
+                tab,
+            }),
+            _ => None,
+        }
+    }
+
+    fn handle_navigator_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let connections = self.nav_connections();
+        let key = KeyPress::new(code, modifiers);
+        let command =
+            match keymap().resolve_in(&[Context::Navigator, Context::List], &mut self.pending, key)
+            {
+                Resolution::Command(command) => command,
+                Resolution::Pending => return None,
+                // Anything the navigator doesn't claim hands focus back rather
+                // than being swallowed -- a panel that eats every key you press
+                // is a panel you can't get out of.
+                Resolution::None => {
+                    self.navigator_focused = false;
+                    return None;
+                }
+            };
+
+        if let Some(mv) = command.as_vim_move() {
+            self.navigator.apply_move(mv, &connections);
+            return None;
+        }
+
+        let outcome = match command {
+            Command::Expand => self.navigator.expand(&connections),
+            Command::Collapse => {
+                self.navigator.collapse(&connections);
+                None
+            }
+            Command::InsertName | Command::Open => self.navigator.choose(&connections),
+            Command::ToggleNavigator => {
+                self.toggle_navigator();
+                None
+            }
+            Command::Back => {
+                self.navigator_focused = false;
+                None
+            }
+            Command::Help => return Some(Action::ShowHelp),
+            _ => None,
+        };
+
+        match outcome? {
+            NavOutcome::Open(index) => self.open_connection(index),
+            NavOutcome::Focus(tab) => {
+                self.active_tab = tab;
+                self.navigator_focused = false;
+                None
+            }
+            NavOutcome::Insert { tab, name } => {
+                self.active_tab = tab;
+                if let ScreenSlot::Active(screen) = &mut self.tabs[tab].screen {
+                    screen.insert_text(&name);
+                }
+                self.navigator_focused = false;
+                None
+            }
+        }
+    }
 }
 
 impl Component for RootComponent {
@@ -213,9 +360,16 @@ impl Component for RootComponent {
                 Command::CloseTab => self.close_active_tab(),
                 Command::NextTab => self.next_tab(),
                 Command::PrevTab => self.prev_tab(),
+                Command::ToggleNavigator => self.toggle_navigator(),
                 _ => {}
             }
             return None;
+        }
+
+        // The navigator takes the keys while it has focus, ahead of the
+        // tab's own screen.
+        if self.navigator_open && self.navigator_focused {
+            return self.handle_navigator_key(code, modifiers);
         }
 
         let tab_index = self.active_tab;
@@ -255,6 +409,25 @@ impl Component for RootComponent {
                 self.active_tab = index;
             }
             return None;
+        }
+
+        if self.navigator_open && self.navigator.contains(event.column, event.row) {
+            let connections = self.nav_connections();
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.navigator.click(event.column, event.row, &connections);
+                    self.navigator_focused = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.navigator.apply_move(VimMove::Down, &connections)
+                }
+                MouseEventKind::ScrollUp => self.navigator.apply_move(VimMove::Up, &connections),
+                _ => {}
+            }
+            return None;
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.navigator_focused = false;
         }
 
         let tab = &mut self.tabs[self.active_tab];
@@ -352,10 +525,26 @@ impl Component for RootComponent {
             (chunks[0], chunks[1])
         };
 
+        // The navigator takes a fixed column on the left, so the screen
+        // beside it doesn't reflow every time a longer table name shows up.
+        let screen_area = if self.navigator_open {
+            let width = 30.min(content_area.width / 2);
+            let split = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(width), Constraint::Min(1)])
+                .split(content_area);
+            let connections = self.nav_connections();
+            self.navigator
+                .draw(frame, split[0], self.navigator_focused, &connections);
+            split[1]
+        } else {
+            content_area
+        };
+
         let tab = &mut self.tabs[self.active_tab];
         match &mut tab.screen {
-            ScreenSlot::ConnectionPicker => tab.connection_picker.draw(frame, content_area),
-            ScreenSlot::Active(screen) => screen.draw(frame, content_area),
+            ScreenSlot::ConnectionPicker => tab.connection_picker.draw(frame, screen_area),
+            ScreenSlot::Active(screen) => screen.draw(frame, screen_area),
         }
 
         self.draw_status_bar(frame, status_area);
@@ -403,6 +592,11 @@ impl RootComponent {
             hints.extend(ui::hint(Context::QueryScreen, Command::History, "history"));
             hints.extend(ui::hint(Context::QueryScreen, Command::Back, "back"));
         }
+        hints.extend(ui::hint(
+            Context::Global,
+            Command::ToggleNavigator,
+            "navigator",
+        ));
         hints.extend(ui::hint(Context::Global, Command::NewTab, "tab"));
         hints.extend(ui::hint(screen_context, Command::Help, "help"));
 
@@ -439,6 +633,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) -> V
 
 pub mod connection_form;
 pub mod connection_picker;
+pub mod navigator;
 
 #[cfg(test)]
 mod tests {
@@ -983,5 +1178,115 @@ mod tests {
         assert_eq!(root.tabs.len(), 1);
         assert_eq!(root.active_tab, 0);
         assert!(matches!(root.tabs[0].screen, ScreenSlot::ConnectionPicker));
+    }
+
+    /// A screen that reports one table, so the navigator has something to
+    /// show under a connection, and records what got inserted into it.
+    struct OutlineScreen {
+        inserted: Rc<std::cell::RefCell<String>>,
+    }
+
+    impl Component for OutlineScreen {
+        fn handle_key_event(&mut self, _code: KeyCode, _modifiers: KeyModifiers) -> Option<Action> {
+            None
+        }
+        fn update(&mut self, _action: Action) -> Option<Action> {
+            None
+        }
+        fn outline(&self) -> Vec<tradar_core::action::OutlineEntry> {
+            vec![tradar_core::action::OutlineEntry {
+                depth: 0,
+                label: "users".to_string(),
+                detail: String::new(),
+                has_children: false,
+            }]
+        }
+        fn insert_text(&mut self, text: &str) {
+            *self.inserted.borrow_mut() = text.to_string();
+        }
+        fn draw(&mut self, _frame: &mut Frame, _area: Rect) {}
+    }
+
+    /// A root with `local-sqlite` connected on tab 0 and the navigator up
+    /// and focused.
+    fn root_with_navigator() -> (RootComponent, Rc<std::cell::RefCell<String>>) {
+        let mut root = root();
+        let inserted = Rc::new(std::cell::RefCell::new(String::new()));
+        root.tabs[0].screen = ScreenSlot::Active(Box::new(OutlineScreen {
+            inserted: Rc::clone(&inserted),
+        }));
+        root.tabs[0].title = Some("local-sqlite".to_string());
+        root.handle_key_event(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        (root, inserted)
+    }
+
+    #[test]
+    fn the_navigator_key_cycles_hidden_focused_and_back() {
+        let mut root = root();
+        assert!(!root.navigator_open);
+
+        root.handle_key_event(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert!(root.navigator_open && root.navigator_focused);
+
+        root.handle_key_event(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert!(
+            !root.navigator_open && !root.navigator_focused,
+            "the same key has to get you back where you were"
+        );
+    }
+
+    #[test]
+    fn the_navigator_lists_every_saved_connection_not_just_the_open_one() {
+        let (root, _) = root_with_navigator();
+
+        let connections = root.nav_connections();
+
+        assert_eq!(connections.len(), 2);
+        assert_eq!(connections[0].tab, Some(0), "open on tab 0");
+        assert_eq!(connections[1].tab, None, "never connected");
+    }
+
+    #[test]
+    fn choosing_a_table_in_the_navigator_puts_it_into_that_tab_s_editor() {
+        let (mut root, inserted) = root_with_navigator();
+        // Open the connection, move onto its table, choose it.
+        root.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+
+        root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(inserted.borrow().as_str(), "users");
+        assert!(
+            !root.navigator_focused,
+            "focus goes back to where the text landed"
+        );
+    }
+
+    #[test]
+    fn opening_an_unconnected_connection_from_the_navigator_requests_a_connect() {
+        let (mut root, _) = root_with_navigator();
+        root.handle_key_event(KeyCode::Char('G'), KeyModifiers::NONE);
+
+        let action = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let Some(Action::OpenRequested {
+            connection, tab, ..
+        }) = action
+        else {
+            panic!("expected a connect request");
+        };
+        assert_eq!(connection.name, "local-postgres");
+        assert_eq!(tab, 1, "the connected tab 0 is left alone");
+        assert_eq!(root.tabs.len(), 2);
+    }
+
+    #[test]
+    fn a_key_the_navigator_does_not_claim_hands_focus_back_to_the_screen() {
+        let (mut root, _) = root_with_navigator();
+
+        root.handle_key_event(KeyCode::Char('z'), KeyModifiers::NONE);
+
+        assert!(!root.navigator_focused, "must not trap the keys");
+        assert!(root.navigator_open, "but the panel itself stays up");
     }
 }
