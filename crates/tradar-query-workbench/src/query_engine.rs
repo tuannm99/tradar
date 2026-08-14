@@ -100,6 +100,17 @@ impl QueryEngine {
         self.driver.export_curl(query)
     }
 
+    /// The table `query` reads from, when this driver can say -- see
+    /// `QueryDriver::edit_source`.
+    pub fn edit_source(&self, query: &str) -> Option<String> {
+        self.driver.edit_source(query)
+    }
+
+    /// This driver's statement for `edit` -- see `QueryDriver::edit_sql`.
+    pub fn edit_sql(&self, edit: &crate::query_driver::RowEdit) -> Option<String> {
+        self.driver.edit_sql(edit)
+    }
+
     /// Spawns the actual query execution and returns immediately -- the
     /// synchronous command a `Screen` calls from `handle_key_event`. Bumps
     /// an internal epoch so a reply from a superseded call (unreachable

@@ -52,6 +52,14 @@ pub fn selection_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// The cell cursor in a grid, on top of the selected row's own highlight.
+/// Reversed rather than another color of its own: it's the same trick
+/// `TextInput` uses to draw a cursor a terminal won't, and it stays visible
+/// whatever `selection_bg` a user's theme picks.
+pub fn cell_cursor_style() -> Style {
+    selection_style().add_modifier(Modifier::REVERSED)
+}
+
 /// A centered rect covering `percent_x` × `percent_y` of `area` -- the
 /// geometry every overlay (file prompt, history, help) is drawn into.
 pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

@@ -25,7 +25,7 @@ crates/
     src/lib.rs                — trait Connector, trait Session, struct ConnectorDescriptor
   tradar-query-workbench/
     src/
-      query_driver.rs         — trait QueryDriver (connect, list_schema, execute, export_curl) + SchemaInfo/QueryResult
+      query_driver.rs         — trait QueryDriver (connect, list_schema, execute, export_curl, edit_source/edit_sql) + SchemaInfo/QueryResult/RowEdit
       query_engine.rs         — QueryEngine: nhận một chuỗi query, giao cho QueryDriver đang active, lưu lịch sử; implement Session
       components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/schema_sidebar.rs/completion.rs/file_prompt.rs/file_picker.rs/history_picker.rs
                                   (struct state+draw thuần, do QueryScreenComponent compose và định tuyến phím tới, không tự implement Component)
@@ -56,8 +56,14 @@ pub trait QueryDriver: Send + Sync {
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>>;
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult>;
     fn export_curl(&self, _query: &str) -> Option<String> { None }
+    fn edit_source(&self, _query: &str) -> Option<String> { None }
+    fn edit_sql(&self, _edit: &RowEdit) -> Option<String> { None }
 }
 ```
+
+`edit_source`/`edit_sql` (thêm 2026-08-14) là cặp method đứng sau việc **sửa cell / xoá dòng ngay trên bảng kết quả**. Cùng một lý do như `export_curl`: chỉ driver mới biết cú pháp của chính nó, nên `tradar-query-workbench` không bao giờ tự viết câu SQL. `edit_source(query)` trả về tên bảng mà một result đọc từ đó (`None` = không xác định được ⇒ bảng kết quả ở chế độ chỉ đọc); `edit_sql(&RowEdit)` trả về câu lệnh thực hiện thay đổi. Hai connector SQL cùng uỷ quyền cho `query_driver::single_table_source` và `query_driver::build_sql_edit` — được phép dùng chung vì cả hai đều phụ thuộc crate này, còn connector thì không được phụ thuộc lẫn nhau (đúng pattern của `returns_rows`/`SQL_KEYWORDS`/`split_sql_statements`). Mongo/Redis/Elasticsearch giữ mặc định `None`: reply của chúng không phải dòng của một bảng nào có thể địa chỉ hoá được.
+
+`RowEdit` mô tả thay đổi theo ngôn ngữ của *bảng đang nhìn* chứ không theo cú pháp của dialect nào: `{ table, key: Vec<(String, String)>, change: SetValue { column, value } | DeleteRow }`. `key` chính là khoá chính của dòng, lấy từ `SchemaInfo` — đây là lý do `ColumnInfo` có thêm field `primary_key`. Không có khoá chính thì không có mệnh đề `WHERE` nào chỉ đúng một dòng, và một câu lệnh có thể chạm nhiều dòng thì không được tự động chạy thay người dùng.
 
 `export_curl` thay cho `Action::ExportCurl` cũ (một variant trong enum dùng chung mà chỉ Elasticsearch implement, buộc `main.rs` phải special-case theo `DriverKind`) — mặc định `None` ("không hỗ trợ export"), chỉ `ElasticsearchDriver` (trong `tradar-elasticsearch`) override. Curl export giờ nằm gọn trong crate của riêng Elasticsearch (`QueryScreenComponent` chỉ gọi `self.engine.export_curl(query)`, không biết gì về ES) — mức cô lập cuối cùng đã đạt được, không còn "chờ bước 4" như ghi chú trước đây.
 

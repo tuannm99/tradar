@@ -5,4 +5,5 @@ pub mod history_picker;
 pub mod query_editor;
 pub mod query_screen;
 pub mod results;
+pub mod row_edit;
 pub mod schema_sidebar;

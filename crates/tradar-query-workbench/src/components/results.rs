@@ -59,12 +59,36 @@ fn count(n: usize, noun: &str) -> String {
 /// is worse than losing the tail of that one value.
 const MAX_COLUMN_WIDTH: usize = 40;
 
+/// Blank columns between two rendered columns.
+const COLUMN_SPACING: u16 = 2;
+
+/// The columns from `offset` on that fit in `total` once the row-number
+/// gutter has taken its share. Always at least one, even when it doesn't
+/// fit: a column too wide for the terminal still has to be reachable.
+fn fitting_columns(widths: &[usize], offset: usize, total: u16, gutter: u16) -> Vec<usize> {
+    let mut used = gutter as usize;
+    let mut visible = Vec::new();
+    for (index, width) in widths.iter().enumerate().skip(offset) {
+        let next = used + COLUMN_SPACING as usize + width;
+        if !visible.is_empty() && next > total as usize {
+            break;
+        }
+        used = next;
+        visible.push(index);
+    }
+    visible
+}
+
 pub struct ResultsComponent {
     pub last_result: Option<QueryResult>,
     pub last_error: Option<String>,
     pub selected: usize,
-    /// First visible column, for tables too wide to fit -- see
-    /// `scroll_left`/`scroll_right`.
+    /// The selected column, so the grid has a *cell* cursor rather than
+    /// only a row cursor -- what "edit this value" needs to point at.
+    pub selected_col: usize,
+    /// First visible column, for tables too wide to fit. Derived rather
+    /// than driven: `draw` scrolls it just far enough to keep
+    /// `selected_col` on screen, the way a spreadsheet follows its cursor.
     col_offset: usize,
     /// Whether a query is in flight, so the pane can say so: without it a
     /// slow query is indistinguishable from a key that didn't register.
@@ -76,6 +100,9 @@ pub struct ResultsComponent {
     /// Where the rows were last drawn, for hit-testing clicks. Excludes
     /// the border and (for tables) the header row.
     rows_area: Rect,
+    /// Each visible column as `(index, x, width)`, recorded at draw time so
+    /// a click can land on a *cell* and not just a row.
+    column_spans: Vec<(usize, u16, u16)>,
     visible_height: usize,
 }
 
@@ -91,11 +118,13 @@ impl ResultsComponent {
             last_result: None,
             last_error: None,
             selected: 0,
+            selected_col: 0,
             col_offset: 0,
             running: false,
             table_state: TableState::default(),
             list_state: ListState::default(),
             rows_area: Rect::ZERO,
+            column_spans: Vec::new(),
             visible_height: 0,
         }
     }
@@ -109,7 +138,19 @@ impl ResultsComponent {
         self.last_result = Some(result);
         self.last_error = None;
         self.selected = 0;
+        self.selected_col = 0;
         self.col_offset = 0;
+    }
+
+    /// Same as `set_result`, but leaves the cell cursor where it was --
+    /// used when a result is *re-read* rather than replaced (the refresh
+    /// after an edit), so the row you just changed is still under the
+    /// cursor instead of the view jumping back to the top.
+    pub fn set_result_keeping_cursor(&mut self, result: QueryResult) {
+        let (row, column) = (self.selected, self.selected_col);
+        self.set_result(result);
+        self.selected = row.min(self.item_count().saturating_sub(1));
+        self.selected_col = column.min(self.column_count().saturating_sub(1));
     }
 
     pub fn set_error(&mut self, error: String) {
@@ -170,18 +211,43 @@ impl ResultsComponent {
         }
     }
 
-    pub fn scroll_left(&mut self) {
-        self.col_offset = self.col_offset.saturating_sub(1);
+    /// Moves the cell cursor one column left. Horizontal scrolling follows
+    /// the cursor at draw time, so there's no separate "scroll" to do.
+    pub fn prev_column(&mut self) {
+        self.selected_col = self.selected_col.saturating_sub(1);
     }
 
-    /// Scrolls one column right, always leaving at least the last column
-    /// visible -- scrolling into empty space would just look broken.
-    pub fn scroll_right(&mut self) {
+    pub fn next_column(&mut self) {
         let last = self.column_count().saturating_sub(1);
-        self.col_offset = (self.col_offset + 1).min(last);
+        self.selected_col = (self.selected_col + 1).min(last);
     }
 
-    /// Selects the clicked row. Returns whether the click was inside this
+    /// The column names of the current table result, for whoever needs to
+    /// name the selected cell's column. Empty for anything else.
+    pub fn columns(&self) -> &[String] {
+        match &self.last_result {
+            Some(QueryResult::Table { columns, .. }) => columns,
+            _ => &[],
+        }
+    }
+
+    /// The selected row's values, in column order -- the raw strings as
+    /// fetched, not the truncated forms on screen.
+    pub fn selected_row(&self) -> Option<&Vec<String>> {
+        match &self.last_result {
+            Some(QueryResult::Table { rows, .. }) => rows.get(self.selected),
+            _ => None,
+        }
+    }
+
+    /// The selected cell as `(column name, value)`.
+    pub fn selected_cell(&self) -> Option<(&str, &str)> {
+        let column = self.columns().get(self.selected_col)?;
+        let value = self.selected_row()?.get(self.selected_col)?;
+        Some((column.as_str(), value.as_str()))
+    }
+
+    /// Selects the clicked cell. Returns whether the click was inside this
     /// pane's rows at all.
     pub fn click(&mut self, column: u16, row: u16) -> bool {
         if !ui::contains(self.rows_area, column, row) {
@@ -193,6 +259,15 @@ impl ResultsComponent {
         };
         if let Some(index) = ui::index_at(self.rows_area, offset, row, self.item_count()) {
             self.selected = index;
+        }
+        // Clicking to the left of the first column (the row-number gutter)
+        // or past the last one keeps whichever column was already current.
+        if let Some((index, ..)) = self
+            .column_spans
+            .iter()
+            .find(|(_, x, width)| column >= *x && column < x.saturating_add(*width))
+        {
+            self.selected_col = *index;
         }
         true
     }
@@ -262,6 +337,10 @@ impl ResultsComponent {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        // Only a table has columns to click on; anything else must not
+        // leave last frame's hit-boxes lying around.
+        self.column_spans.clear();
+
         if let Some(error) = &self.last_error {
             self.visible_height = 0;
             frame.render_widget(
@@ -285,7 +364,7 @@ impl ResultsComponent {
                 // A real table widget, not rows joined by spaces: columns
                 // have to line up or the values can't be read down a column,
                 // which is most of the point of tabular output.
-                self.col_offset = self.col_offset.min(columns.len().saturating_sub(1));
+                self.selected_col = self.selected_col.min(columns.len().saturating_sub(1));
                 let widths = column_widths(columns, rows);
 
                 // The header row is drawn by the widget, so it costs one row
@@ -293,12 +372,35 @@ impl ResultsComponent {
                 // overshoots by one.
                 self.visible_height = (inner.height as usize).saturating_sub(1);
 
+                // A row-number gutter, wide enough for the highest number
+                // there is: on a screen full of rows, "which one am I on"
+                // is otherwise something you have to count.
+                let gutter = (rows.len().to_string().chars().count() as u16).max(1);
+
+                // Scroll only as far as it takes to keep the cell cursor on
+                // screen, then take as many further columns as fit.
+                // Rendering columns that don't fit would make the layout
+                // shrink every column to make room, and then nothing lines
+                // up.
+                if self.selected_col < self.col_offset {
+                    self.col_offset = self.selected_col;
+                }
+                let visible = loop {
+                    let visible = fitting_columns(&widths, self.col_offset, inner.width, gutter);
+                    if self.col_offset >= self.selected_col || visible.contains(&self.selected_col)
+                    {
+                        break visible;
+                    }
+                    self.col_offset += 1;
+                };
+
                 let header = Row::new(
-                    columns
-                        .iter()
-                        .skip(self.col_offset)
-                        .zip(widths.iter().skip(self.col_offset))
-                        .map(|(name, width)| Cell::from(truncate(name, *width)))
+                    std::iter::once(Cell::from("#"))
+                        .chain(
+                            visible
+                                .iter()
+                                .map(|&index| Cell::from(truncate(&columns[index], widths[index]))),
+                        )
                         .collect::<Vec<_>>(),
                 )
                 .style(
@@ -309,28 +411,53 @@ impl ResultsComponent {
 
                 let body: Vec<Row> = rows
                     .iter()
-                    .map(|row| {
+                    .enumerate()
+                    .map(|(number, row)| {
                         Row::new(
-                            row.iter()
-                                .skip(self.col_offset)
-                                .zip(widths.iter().skip(self.col_offset))
-                                .map(|(cell, width)| Cell::from(truncate(cell, *width)))
-                                .collect::<Vec<_>>(),
+                            std::iter::once(
+                                Cell::from((number + 1).to_string())
+                                    .style(Style::default().fg(theme.text_dim)),
+                            )
+                            .chain(visible.iter().map(|&index| {
+                                Cell::from(truncate(
+                                    row.get(index).map_or("", String::as_str),
+                                    widths[index],
+                                ))
+                            }))
+                            .collect::<Vec<_>>(),
                         )
                         .style(Style::default().fg(theme.text))
                     })
                     .collect();
 
-                let constraints: Vec<Constraint> = widths
-                    .iter()
-                    .skip(self.col_offset)
-                    .map(|w| Constraint::Length(*w as u16))
+                let constraints: Vec<Constraint> = std::iter::once(Constraint::Length(gutter))
+                    .chain(
+                        visible
+                            .iter()
+                            .map(|&index| Constraint::Length(widths[index] as u16)),
+                    )
                     .collect();
 
+                // Where each visible column landed, so a click can pick a
+                // cell. The gutter is column 0 and belongs to nobody.
+                let mut x = inner
+                    .x
+                    .saturating_add(gutter)
+                    .saturating_add(COLUMN_SPACING);
+                for &index in &visible {
+                    let width = widths[index] as u16;
+                    self.column_spans.push((index, x, width));
+                    x = x.saturating_add(width).saturating_add(COLUMN_SPACING);
+                }
+
                 if rows.is_empty() {
-                    self.table_state.select(None);
+                    self.table_state.select_cell(None);
                 } else {
-                    self.table_state.select(Some(self.selected));
+                    let column = visible
+                        .iter()
+                        .position(|&index| index == self.selected_col)
+                        .map_or(0, |offset| offset + 1);
+                    self.table_state.select_cell(Some((self.selected, column)));
                 }
                 // The widget draws its header on the first row, so the
                 // clickable rows start one below.
@@ -341,8 +468,9 @@ impl ResultsComponent {
                 };
                 let table = Table::new(body, constraints)
                     .header(header)
-                    .column_spacing(2)
-                    .row_highlight_style(ui::selection_style());
+                    .column_spacing(COLUMN_SPACING)
+                    .row_highlight_style(ui::selection_style())
+                    .cell_highlight_style(ui::cell_cursor_style());
                 frame.render_stateful_widget(table, inner, &mut self.table_state);
             }
             QueryResult::Affected { rows } => {
@@ -498,50 +626,98 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_right_moves_the_first_visible_column_and_stops_at_the_last() {
+    fn moving_sideways_walks_the_cell_cursor_and_stops_at_the_ends() {
         let mut results = ResultsComponent::new();
         results.set_result(wide_table());
 
-        results.scroll_right();
-        assert_eq!(results.col_offset, 1);
+        results.next_column();
+        assert_eq!(results.selected_col, 1);
 
-        results.scroll_right();
-        results.scroll_right();
-        assert_eq!(results.col_offset, 2, "must keep the last column visible");
+        results.next_column();
+        results.next_column();
+        assert_eq!(results.selected_col, 2, "must stop at the last column");
 
-        results.scroll_left();
-        assert_eq!(results.col_offset, 1);
-        results.scroll_left();
-        results.scroll_left();
-        assert_eq!(
-            results.col_offset, 0,
-            "must not scroll past the first column"
+        results.prev_column();
+        assert_eq!(results.selected_col, 1);
+        results.prev_column();
+        results.prev_column();
+        assert_eq!(results.selected_col, 0, "must not move past the first");
+    }
+
+    #[test]
+    fn the_selected_cell_reports_its_column_and_the_untruncated_value() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        results.move_down();
+        results.next_column();
+
+        assert_eq!(results.selected_cell(), Some(("name", "bo")));
+    }
+
+    #[test]
+    fn the_view_scrolls_only_as_far_as_it_takes_to_show_the_cell_cursor() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+
+        // Narrow enough that `id`, `name` and `n` can't all be shown at
+        // once, so reaching the last column has to scroll the first off.
+        results.next_column();
+        results.next_column();
+        let text = draw_component(&mut results, 18, 8);
+
+        assert!(text.contains("2000"), "the cursor's column: {text}");
+        assert!(
+            !text.contains("1000"),
+            "the leading column should have scrolled off: {text}"
         );
     }
 
     #[test]
-    fn scrolling_right_hides_the_leading_columns() {
+    fn every_row_is_numbered_so_you_never_have_to_count() {
         let mut results = ResultsComponent::new();
-        results.set_result(wide_table());
+        results.set_result(table(3));
 
-        results.scroll_right();
+        let buffer_text = draw_component(&mut results, 20, 8);
 
-        // The `id` column (values 1 / 1000) scrolls off; the rest stays.
-        let text = draw_component(&mut results, 40, 8);
-        assert!(!text.contains("1000"), "buffer was: {text}");
-        assert!(text.contains("alice"), "buffer was: {text}");
-        assert!(text.contains("2000"), "buffer was: {text}");
+        assert!(buffer_text.contains('#'), "buffer was: {buffer_text}");
+        // Rows are numbered from one; the `id` values here are 0..2, so a
+        // "3" can only be the third row's number.
+        assert!(buffer_text.contains('3'), "buffer was: {buffer_text}");
     }
 
     #[test]
-    fn a_new_result_resets_the_horizontal_scroll() {
+    fn a_new_result_resets_the_cell_cursor() {
         let mut results = ResultsComponent::new();
         results.set_result(wide_table());
-        results.scroll_right();
+        results.next_column();
 
         results.set_result(wide_table());
 
+        assert_eq!(results.selected_col, 0);
         assert_eq!(results.col_offset, 0);
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_cell_cursor_where_it_was() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        results.move_down();
+        results.next_column();
+
+        results.set_result_keeping_cursor(wide_table());
+
+        assert_eq!((results.selected, results.selected_col), (1, 1));
+    }
+
+    #[test]
+    fn a_refresh_that_returns_fewer_rows_clamps_the_cursor_into_range() {
+        let mut results = ResultsComponent::new();
+        results.set_result(table(5));
+        results.move_to_bottom();
+
+        results.set_result_keeping_cursor(table(2));
+
+        assert_eq!(results.selected, 1);
     }
 
     #[test]

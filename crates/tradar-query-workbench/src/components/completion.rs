@@ -237,22 +237,13 @@ mod tests {
             SchemaInfo {
                 name: "users".to_string(),
                 columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        type_name: "INTEGER".to_string(),
-                    },
-                    ColumnInfo {
-                        name: "user_email".to_string(),
-                        type_name: "TEXT".to_string(),
-                    },
+                    ColumnInfo::new("id", "INTEGER"),
+                    ColumnInfo::new("user_email", "TEXT"),
                 ],
             },
             SchemaInfo {
                 name: "orders".to_string(),
-                columns: vec![ColumnInfo {
-                    name: "id".to_string(),
-                    type_name: "INTEGER".to_string(),
-                }],
+                columns: vec![ColumnInfo::new("id", "INTEGER")],
             },
         ]
     }

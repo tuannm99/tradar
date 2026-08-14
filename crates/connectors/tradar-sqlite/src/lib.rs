@@ -48,6 +48,14 @@ impl QueryDriver for SqliteDriver {
         query_driver::split_sql_statements(text)
     }
 
+    fn edit_sql(&self, edit: &query_driver::RowEdit) -> Option<String> {
+        Some(query_driver::build_sql_edit(edit))
+    }
+
+    fn edit_source(&self, query: &str) -> Option<String> {
+        query_driver::single_table_source(query)
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
         let tables: Vec<(String,)> =
@@ -61,8 +69,12 @@ impl QueryDriver for SqliteDriver {
         // once the way Postgres has.
         let mut schema = Vec::with_capacity(tables.len());
         for (name,) in tables {
-            let columns: Vec<(i64, String, String)> =
-                sqlx::query_as("SELECT cid, name, type FROM pragma_table_info($1)")
+            // `pk` is 0 for an ordinary column and 1-based position within
+            // the primary key otherwise -- so any non-zero means "part of
+            // the key", which is what the results grid needs to address a
+            // row it wants to change.
+            let columns: Vec<(i64, String, String, i64)> =
+                sqlx::query_as("SELECT cid, name, type, pk FROM pragma_table_info($1)")
                     .bind(&name)
                     .fetch_all(pool)
                     .await?;
@@ -70,7 +82,11 @@ impl QueryDriver for SqliteDriver {
                 name,
                 columns: columns
                     .into_iter()
-                    .map(|(_, name, type_name)| ColumnInfo { name, type_name })
+                    .map(|(_, name, type_name, pk)| ColumnInfo {
+                        name,
+                        type_name,
+                        primary_key: pk != 0,
+                    })
                     .collect(),
             });
         }
@@ -199,6 +215,57 @@ mod tests {
 
         assert_eq!(schema.len(), 1);
         assert_eq!(schema[0].name, "users");
+    }
+
+    #[tokio::test]
+    async fn list_schema_marks_the_primary_key_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+            .execute(driver.pool.as_ref().unwrap())
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let key: Vec<&str> = schema[0]
+            .columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            key,
+            vec!["id"],
+            "without this the results grid can't build a WHERE clause"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_composite_primary_key_reports_every_one_of_its_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        sqlx::query(
+            "CREATE TABLE memberships (user_id INTEGER, group_id INTEGER, role TEXT, \
+             PRIMARY KEY (user_id, group_id))",
+        )
+        .execute(driver.pool.as_ref().unwrap())
+        .await
+        .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let key: Vec<&str> = schema[0]
+            .columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(key, vec!["user_id", "group_id"]);
     }
 
     #[tokio::test]

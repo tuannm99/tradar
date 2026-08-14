@@ -58,16 +58,37 @@ impl QueryDriver for PostgresDriver {
         query_driver::split_sql_statements(text)
     }
 
+    fn edit_sql(&self, edit: &query_driver::RowEdit) -> Option<String> {
+        Some(query_driver::build_sql_edit(edit))
+    }
+
+    fn edit_source(&self, query: &str) -> Option<String> {
+        query_driver::single_table_source(query)
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
         // Tables and their columns in one round trip, ordered so the
         // grouping below can just walk the rows: information_schema joins
         // are cheaper than a query per table.
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT t.table_name, c.column_name, c.data_type \
+        // The primary-key columns ride along in the same round trip: the
+        // results grid needs them to address a row it wants to change, and
+        // asking for them separately would mean a second query per table.
+        let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+            "SELECT t.table_name, c.column_name, c.data_type, (k.column_name IS NOT NULL) \
              FROM information_schema.tables t \
              JOIN information_schema.columns c \
                ON c.table_schema = t.table_schema AND c.table_name = t.table_name \
+             LEFT JOIN ( \
+               SELECT kcu.table_schema, kcu.table_name, kcu.column_name \
+               FROM information_schema.table_constraints tc \
+               JOIN information_schema.key_column_usage kcu \
+                 ON kcu.constraint_name = tc.constraint_name \
+                AND kcu.table_schema = tc.table_schema \
+               WHERE tc.constraint_type = 'PRIMARY KEY' \
+             ) k ON k.table_schema = c.table_schema \
+               AND k.table_name = c.table_name \
+               AND k.column_name = c.column_name \
              WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' \
              ORDER BY t.table_name, c.ordinal_position",
         )
@@ -75,7 +96,7 @@ impl QueryDriver for PostgresDriver {
         .await?;
 
         let mut schema: Vec<SchemaInfo> = Vec::new();
-        for (table, column, type_name) in rows {
+        for (table, column, type_name, primary_key) in rows {
             if schema.last().map(|s| s.name.as_str()) != Some(table.as_str()) {
                 schema.push(SchemaInfo::new(table));
             }
@@ -83,6 +104,7 @@ impl QueryDriver for PostgresDriver {
             entry.columns.push(ColumnInfo {
                 name: column,
                 type_name,
+                primary_key,
             });
         }
         Ok(schema)

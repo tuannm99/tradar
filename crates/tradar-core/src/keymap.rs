@@ -131,10 +131,15 @@ pub enum Command {
     Yank,
     InsertName,
     Help,
-    /// Horizontal scrolling for the results table, when it has more columns
-    /// than fit on screen.
-    ScrollLeft,
-    ScrollRight,
+    /// Move the cell cursor sideways in the results grid. The table
+    /// scrolls to follow it, so this covers horizontal scrolling too.
+    PrevColumn,
+    NextColumn,
+    /// Change the selected cell's value, by generating and running the
+    /// statement that does it.
+    EditCell,
+    /// Delete the selected row, the same way.
+    DeleteRow,
     /// Show/hide a table's columns in the schema sidebar.
     Expand,
     Collapse,
@@ -181,8 +186,10 @@ impl Command {
             Self::Yank => "yank",
             Self::InsertName => "insert-name",
             Self::Help => "help",
-            Self::ScrollLeft => "scroll-left",
-            Self::ScrollRight => "scroll-right",
+            Self::PrevColumn => "prev-column",
+            Self::NextColumn => "next-column",
+            Self::EditCell => "edit-cell",
+            Self::DeleteRow => "delete-row",
             Self::Expand => "expand",
             Self::Collapse => "collapse",
             Self::MoveDown => "move-down",
@@ -205,7 +212,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 38] = [
+    const ALL: [Self; 40] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -227,8 +234,10 @@ impl Command {
         Self::Yank,
         Self::InsertName,
         Self::Help,
-        Self::ScrollLeft,
-        Self::ScrollRight,
+        Self::PrevColumn,
+        Self::NextColumn,
+        Self::EditCell,
+        Self::DeleteRow,
         Self::Expand,
         Self::Collapse,
         Self::MoveDown,
@@ -270,8 +279,10 @@ impl Command {
             Self::Yank => "Copy the selected row/document",
             Self::InsertName => "Insert the selected schema name",
             Self::Help => "Show this help",
-            Self::ScrollLeft => "Scroll the results table left",
-            Self::ScrollRight => "Scroll the results table right",
+            Self::PrevColumn => "Move to the previous column",
+            Self::NextColumn => "Move to the next column",
+            Self::EditCell => "Edit the selected cell",
+            Self::DeleteRow => "Delete the selected row",
             Self::Expand => "Show a table's columns",
             Self::Collapse => "Hide a table's columns",
             Self::MoveDown => "Move down",
@@ -447,10 +458,12 @@ impl Default for Keymap {
             Context::Results,
             parse_defaults(&[
                 ("y", Command::Yank),
-                ("h", Command::ScrollLeft),
-                ("left", Command::ScrollLeft),
-                ("l", Command::ScrollRight),
-                ("right", Command::ScrollRight),
+                ("h", Command::PrevColumn),
+                ("left", Command::PrevColumn),
+                ("l", Command::NextColumn),
+                ("right", Command::NextColumn),
+                ("enter", Command::EditCell),
+                ("d", Command::DeleteRow),
             ]),
         );
         bindings.insert(
@@ -793,7 +806,7 @@ mod tests {
         let in_results = keymap.resolve(Context::Results, &mut pending, press(KeyCode::Char('l')));
 
         assert_eq!(in_sidebar, Resolution::Command(Command::Expand));
-        assert_eq!(in_results, Resolution::Command(Command::ScrollRight));
+        assert_eq!(in_results, Resolution::Command(Command::NextColumn));
     }
 
     #[test]

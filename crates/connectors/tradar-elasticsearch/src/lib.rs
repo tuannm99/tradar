@@ -271,14 +271,13 @@ fn flatten_properties(prefix: &str, properties: &serde_json::Value, out: &mut Ve
         };
         match definition.get("properties") {
             Some(nested) => flatten_properties(&path, nested, out),
-            None => out.push(ColumnInfo {
-                name: path,
-                type_name: definition
+            None => out.push(ColumnInfo::new(
+                path,
+                definition
                     .get("type")
                     .and_then(|t| t.as_str())
-                    .unwrap_or("object")
-                    .to_string(),
-            }),
+                    .unwrap_or("object"),
+            )),
         }
     }
 }

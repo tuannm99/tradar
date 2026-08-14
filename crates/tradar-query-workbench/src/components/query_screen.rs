@@ -25,7 +25,9 @@ use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutc
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
+use crate::components::row_edit::{RowEditComponent, RowEditOutcome};
 use crate::components::schema_sidebar::SchemaSidebarComponent;
+use crate::query_driver::{RowChange, RowEdit};
 use crate::query_engine::{QueryEngine, QueryOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,15 @@ pub struct QueryScreenComponent {
     /// The suggestion list, present only while there is something to
     /// suggest -- so "no popup" and "no matches" are one state.
     completion: Option<CompletionPopup>,
+    /// The statement whose result is on screen, kept so an edit made in the
+    /// grid knows which table those rows came from -- and so the grid can
+    /// be re-read after the edit.
+    last_query: Option<String>,
+    /// The edit-a-row overlay, when up.
+    row_edit: Option<RowEditComponent>,
+    /// The next result is a re-read of the same query after an edit, so the
+    /// cell cursor should stay where it is instead of jumping to the top.
+    refreshing: bool,
 }
 
 /// Copies `text` to the system clipboard via an OSC52 escape sequence,
@@ -112,6 +123,9 @@ impl QueryScreenComponent {
             editor_area: Rect::ZERO,
             completions,
             completion: None,
+            last_query: None,
+            row_edit: None,
+            refreshing: false,
         }
     }
 
@@ -213,6 +227,7 @@ impl QueryScreenComponent {
             .find(|s| cursor >= s.start && cursor <= s.end)
             .or_else(|| statements.last());
         if let Some(statement) = statement {
+            self.last_query = Some(statement.text.clone());
             self.engine.submit_query(statement.text.clone());
         }
     }
@@ -229,8 +244,138 @@ impl QueryScreenComponent {
             .map(|s| s.text)
             .collect();
         if !statements.is_empty() {
+            // The result on screen is the last statement's, so that's the
+            // one an edit in the grid would be editing through.
+            self.last_query = statements.last().cloned();
             self.engine.submit_all(statements);
         }
+    }
+
+    /// The table the result on screen can be edited through, and the
+    /// key columns identifying the selected row. `Err` carries the reason
+    /// it can't be, phrased for the user -- a grid that refuses a keystroke
+    /// without saying why reads as broken.
+    fn editable_row(&self) -> Result<(String, Vec<(String, String)>), String> {
+        let query = self
+            .last_query
+            .as_deref()
+            .ok_or("nothing has been run yet")?;
+        let table = self.engine.edit_source(query).ok_or(
+            "only a plain SELECT from a single table can be edited here — \
+             a join, a grouped result or a subquery has no one row to change",
+        )?;
+
+        let schema = self
+            .engine
+            .schema()
+            .as_ref()
+            .map_err(|e| format!("the schema for this connection wasn't read: {e}"))?;
+        // A Postgres source is schema-qualified (`public.users`) while the
+        // sidebar lists bare names, so match on the last part.
+        let bare = table.rsplit('.').next().unwrap_or(&table);
+        let info = schema
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(bare))
+            .ok_or_else(|| format!("'{table}' isn't in this connection's schema"))?;
+
+        let key_columns: Vec<&str> = info
+            .columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name.as_str())
+            .collect();
+        if key_columns.is_empty() {
+            return Err(format!(
+                "'{table}' has no primary key — there is no WHERE clause that names exactly one row"
+            ));
+        }
+
+        let columns = self.results.columns();
+        let row = self.results.selected_row().ok_or("no row is selected")?;
+        let mut key = Vec::with_capacity(key_columns.len());
+        for name in key_columns {
+            let index = columns
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    format!("the key column '{name}' isn't in this result — select it too")
+                })?;
+            let value = row.get(index).cloned().unwrap_or_default();
+            key.push((name.to_string(), value));
+        }
+        Ok((table, key))
+    }
+
+    fn begin_edit_cell(&mut self) {
+        let Some((column, value)) = self
+            .results
+            .selected_cell()
+            .map(|(column, value)| (column.to_string(), value.to_string()))
+        else {
+            return;
+        };
+        self.row_edit = Some(match self.editable_row() {
+            Ok(_) => RowEditComponent::value(&column, &value),
+            Err(reason) => RowEditComponent::blocked("Edit cell", reason),
+        });
+    }
+
+    fn begin_delete_row(&mut self) {
+        if self.results.selected_row().is_none() {
+            return;
+        }
+        self.row_edit = Some(match self.build_edit(RowChange::DeleteRow) {
+            Ok(sql) => RowEditComponent::confirm("Delete row", sql),
+            Err(reason) => RowEditComponent::blocked("Delete row", reason),
+        });
+    }
+
+    /// The statement for `change` against the selected row, as this
+    /// driver would write it.
+    fn build_edit(&self, change: RowChange) -> Result<String, String> {
+        let (table, key) = self.editable_row()?;
+        self.engine
+            .edit_sql(&RowEdit { table, key, change })
+            .ok_or_else(|| "this connection's results can't be edited in place".to_string())
+    }
+
+    fn handle_row_edit(&mut self, outcome: RowEditOutcome) {
+        match outcome {
+            RowEditOutcome::Cancelled => self.row_edit = None,
+            RowEditOutcome::ValueEntered(value) => {
+                let Some((column, _)) = self.results.selected_cell() else {
+                    self.row_edit = None;
+                    return;
+                };
+                let built = self.build_edit(RowChange::SetValue {
+                    column: column.to_string(),
+                    value,
+                });
+                if let Some(overlay) = &mut self.row_edit {
+                    match built {
+                        Ok(sql) => overlay.show_statement(sql),
+                        Err(reason) => overlay.show_problem(reason),
+                    }
+                }
+            }
+            RowEditOutcome::Confirmed(sql) => {
+                self.row_edit = None;
+                self.run_edit(sql);
+            }
+        }
+    }
+
+    /// Runs the edit and then re-reads the query behind the grid, as one
+    /// submission: otherwise the pane would replace the table with "OK — 1
+    /// row affected" and you'd have to re-run the SELECT by hand to see
+    /// what you just did. Running them together also means a failed edit
+    /// stops before the re-read, so the error is what's left on screen.
+    fn run_edit(&mut self, sql: String) {
+        let Some(query) = self.last_query.clone() else {
+            return;
+        };
+        self.refreshing = true;
+        self.engine.submit_all(vec![sql, query]);
     }
 
     /// Rebuilds the suggestion list for the word under the cursor. Only
@@ -326,6 +471,13 @@ impl Component for QueryScreenComponent {
                 Some(PromptOutcome::Cancelled) => self.prompt = None,
                 Some(PromptOutcome::Confirmed(path)) => self.handle_prompt_confirmed(path),
                 None => {}
+            }
+            return None;
+        }
+
+        if let Some(row_edit) = self.row_edit.as_mut() {
+            if let Some(outcome) = row_edit.handle_key_event(code, modifiers) {
+                self.handle_row_edit(outcome);
             }
             return None;
         }
@@ -472,8 +624,10 @@ impl Component for QueryScreenComponent {
                     yank_to_clipboard(&text);
                 }
             }
-            Command::ScrollLeft => self.results.scroll_left(),
-            Command::ScrollRight => self.results.scroll_right(),
+            Command::PrevColumn => self.results.prev_column(),
+            Command::NextColumn => self.results.next_column(),
+            Command::EditCell => self.begin_edit_cell(),
+            Command::DeleteRow => self.begin_delete_row(),
             Command::Expand => self.schema_sidebar.expand(),
             Command::Collapse => self.schema_sidebar.collapse(),
             Command::InsertName => {
@@ -491,7 +645,11 @@ impl Component for QueryScreenComponent {
     fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
         // An overlay covers the screen, so a click behind it would act on
         // something the user can't even see.
-        if self.prompt.is_some() || self.history_picker.is_some() || self.picker.is_some() {
+        if self.prompt.is_some()
+            || self.history_picker.is_some()
+            || self.picker.is_some()
+            || self.row_edit.is_some()
+        {
             return None;
         }
 
@@ -527,7 +685,11 @@ impl Component for QueryScreenComponent {
     fn tick(&mut self) -> bool {
         let outcome_arrived = self.engine.tick();
         if outcome_arrived {
+            let refreshing = std::mem::take(&mut self.refreshing);
             match self.engine.take_outcome() {
+                Some(QueryOutcome::Completed { result }) if refreshing => {
+                    self.results.set_result_keeping_cursor(result)
+                }
                 Some(QueryOutcome::Completed { result }) => self.results.set_result(result),
                 Some(QueryOutcome::Failed { error }) => self.results.set_error(error),
                 None => {}
@@ -590,6 +752,12 @@ impl Component for QueryScreenComponent {
             frame.render_widget(ratatui::widgets::Clear, popup);
             history_picker.draw(frame, popup);
         }
+
+        if let Some(row_edit) = &self.row_edit {
+            let popup = ui::centered_rect(70, 30, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            row_edit.draw(frame, popup);
+        }
     }
 }
 
@@ -639,6 +807,12 @@ mod tests {
         }
         fn split_statements(&self, text: &str) -> Vec<crate::query_driver::Statement> {
             crate::query_driver::split_sql_statements(text)
+        }
+        fn edit_sql(&self, edit: &crate::query_driver::RowEdit) -> Option<String> {
+            Some(crate::query_driver::build_sql_edit(edit))
+        }
+        fn edit_source(&self, query: &str) -> Option<String> {
+            crate::query_driver::single_table_source(query)
         }
         async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
             Ok(Vec::new())
@@ -928,13 +1102,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l_expands_a_table_in_the_sidebar_but_scrolls_the_table_in_results() {
+    async fn l_expands_a_table_in_the_sidebar_but_moves_the_cell_cursor_in_results() {
         let schema_with_columns = vec![SchemaInfo {
             name: "users".to_string(),
-            columns: vec![crate::query_driver::ColumnInfo {
-                name: "id".to_string(),
-                type_name: "INTEGER".to_string(),
-            }],
+            columns: vec![crate::query_driver::ColumnInfo::new("id", "INTEGER")],
         }];
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(
             empty_result(),
@@ -947,7 +1118,7 @@ mod tests {
         screen.schema_sidebar.move_down();
         assert_eq!(screen.schema_sidebar.selected_name(), Some("id"));
 
-        // Results focused: the same key scrolls the results table instead.
+        // Results focused: the same key moves the cell cursor instead.
         screen.focus = Focus::Results;
         screen.results.set_result(QueryResult::Table {
             columns: vec!["a".to_string(), "b".to_string()],
@@ -956,28 +1127,14 @@ mod tests {
         });
         screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
 
-        let text = {
-            let backend = ratatui::backend::TestBackend::new(40, 12);
-            let mut terminal = ratatui::Terminal::new(backend).unwrap();
-            terminal
-                .draw(|frame| screen.results.draw(frame, frame.area(), true))
-                .unwrap();
-            buffer_text(terminal.backend().buffer())
-        };
-        assert!(
-            !text.contains(" a "),
-            "column 'a' should have scrolled off: {text}"
-        );
+        assert_eq!(screen.results.selected_cell(), Some(("b", "2")));
     }
 
     #[tokio::test]
     async fn enter_on_a_column_inserts_the_column_name() {
         let schema_with_columns = vec![SchemaInfo {
             name: "users".to_string(),
-            columns: vec![crate::query_driver::ColumnInfo {
-                name: "email".to_string(),
-                type_name: "TEXT".to_string(),
-            }],
+            columns: vec![crate::query_driver::ColumnInfo::new("email", "TEXT")],
         }];
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(
             empty_result(),
@@ -1483,5 +1640,165 @@ mod tests {
         let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert!(matches!(action, Some(Action::BackToPicker)));
+    }
+
+    /// A screen whose driver returns a two-column `users` table and whose
+    /// schema says `id` is the primary key -- the setup every row edit
+    /// needs.
+    fn editable_screen() -> (QueryScreenComponent, mpsc::UnboundedReceiver<Action>) {
+        let result = QueryResult::Table {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![
+                vec!["1".to_string(), "Ada".to_string()],
+                vec!["2".to_string(), "Lin".to_string()],
+            ],
+            truncated: false,
+        };
+        let schema = vec![SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![
+                crate::query_driver::ColumnInfo {
+                    name: "id".to_string(),
+                    type_name: "INTEGER".to_string(),
+                    primary_key: true,
+                },
+                crate::query_driver::ColumnInfo::new("name", "TEXT"),
+            ],
+        }];
+        screen_with(fake_engine_with_schema(result, Ok(schema)))
+    }
+
+    #[tokio::test]
+    async fn editing_a_cell_generates_an_update_keyed_on_the_primary_key() {
+        let (mut screen, _rx) = editable_screen();
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+        screen.focus = Focus::Results;
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('!'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert!(screen.row_edit.is_none(), "the overlay closes once it runs");
+        assert_eq!(
+            screen.engine.history().last().map(String::as_str),
+            Some("SELECT id, name FROM users"),
+            "the grid is re-read after the edit, so you see what changed"
+        );
+        assert_eq!(
+            screen.engine.history()[1],
+            "UPDATE \"users\" SET \"name\" = 'Ada!' WHERE \"id\" = '1'"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_runs_until_the_statement_is_approved() {
+        let (mut screen, _rx) = editable_screen();
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(screen.row_edit.is_some(), "a delete has to be confirmed");
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.row_edit.is_none());
+        assert_eq!(
+            screen.engine.history(),
+            &["SELECT id, name FROM users"],
+            "a cancelled delete must not have run anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_row_generates_a_delete_for_the_selected_row() {
+        let (mut screen, _rx) = editable_screen();
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+        screen.focus = Focus::Results;
+        screen.results.move_down();
+
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.engine.history()[1],
+            "DELETE FROM \"users\" WHERE \"id\" = '2'"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_that_is_not_one_table_refuses_the_edit_and_says_why() {
+        let (mut screen, _rx) = editable_screen();
+        submit_and_settle(
+            &mut screen,
+            "SELECT id, name FROM users JOIN orders ON orders.user_id = users.id",
+        )
+        .await;
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let backend = TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("single table"),
+            "the refusal must explain itself: {text}"
+        );
+        assert_eq!(
+            screen.engine.history().len(),
+            1,
+            "nothing may have been run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_table_with_no_primary_key_cannot_be_edited() {
+        let result = QueryResult::Table {
+            columns: vec!["name".to_string()],
+            rows: vec![vec!["Ada".to_string()]],
+            truncated: false,
+        };
+        let schema = vec![SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![crate::query_driver::ColumnInfo::new("name", "TEXT")],
+        }];
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
+        submit_and_settle(&mut screen, "SELECT name FROM users").await;
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        // Any key dismisses the explanation; none of them may run anything.
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert_eq!(screen.engine.history().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_after_an_edit_leaves_the_cell_cursor_where_it_was() {
+        let (mut screen, _rx) = editable_screen();
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+        screen.focus = Focus::Results;
+        screen.results.move_down();
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if !screen.engine.is_pending() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            (screen.results.selected, screen.results.selected_col),
+            (1, 1),
+            "a re-read is not a new result: the cursor must not jump home"
+        );
     }
 }

@@ -222,6 +222,13 @@ impl SchemaSidebarComponent {
                             format!("  {}", column.type_name),
                             Style::default().fg(theme.text_dim),
                         ),
+                        // Which columns are the key is what decides whether
+                        // the results grid can be edited, so it's worth
+                        // seeing before you try.
+                        Span::styled(
+                            if column.primary_key { " pk" } else { "" },
+                            Style::default().fg(theme.accent),
+                        ),
                     ]))
                 }
             })
@@ -403,14 +410,8 @@ mod tests {
             SchemaInfo {
                 name: "users".to_string(),
                 columns: vec![
-                    ColumnInfo {
-                        name: "id".to_string(),
-                        type_name: "INTEGER".to_string(),
-                    },
-                    ColumnInfo {
-                        name: "email".to_string(),
-                        type_name: "TEXT".to_string(),
-                    },
+                    ColumnInfo::new("id", "INTEGER"),
+                    ColumnInfo::new("email", "TEXT"),
                 ],
             },
             SchemaInfo::new("orders"),

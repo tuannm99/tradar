@@ -35,6 +35,23 @@ pub struct ColumnInfo {
     /// passed through rather than normalized: the point is to show what the
     /// database actually says.
     pub type_name: String,
+    /// Part of this table's primary key. What makes an edit in the results
+    /// grid expressible as SQL: without a key there is no `WHERE` that
+    /// names exactly the row the user is pointing at, and a statement that
+    /// might hit several rows is not one to run on their behalf.
+    pub primary_key: bool,
+}
+
+impl ColumnInfo {
+    /// A column with no key information -- what the drivers that don't
+    /// report one return.
+    pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            type_name: type_name.into(),
+            primary_key: false,
+        }
+    }
 }
 
 /// How many rows a driver will materialise for one query. A result set is
@@ -221,6 +238,259 @@ fn strip_leading_comments(sql: &str) -> &str {
     }
 }
 
+/// A change to one row the user already has on screen, described in terms
+/// of the grid rather than any dialect's syntax: the screen fills this in
+/// from what's selected, and the driver turns it into a statement it can
+/// run (`QueryDriver::edit_sql`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowEdit {
+    pub table: String,
+    /// Column/value pairs that identify the row -- its primary key, taken
+    /// from the row as fetched.
+    pub key: Vec<(String, String)>,
+    pub change: RowChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowChange {
+    SetValue { column: String, value: String },
+    DeleteRow,
+}
+
+/// Turns a `RowEdit` into standard SQL, shared by the SQL connectors for
+/// the same reason as `SQL_KEYWORDS`: both need the same answer and neither
+/// may depend on the other.
+///
+/// Values are always written as string literals. Postgres and SQLite both
+/// coerce `'1'` to a number where a number is wanted, so one shape covers
+/// every column type without this code having to know any of them -- the
+/// single exception is the literal `NULL`, which is written unquoted
+/// because that is exactly how the grid renders a null.
+pub fn build_sql_edit(edit: &RowEdit) -> String {
+    let table = quote_identifier(&edit.table);
+    let where_clause = edit
+        .key
+        .iter()
+        .map(|(column, value)| {
+            if value == "NULL" {
+                // `= NULL` is never true; a key column can't be null
+                // anyway, so this only shows up if the grid is lying about
+                // which columns are the key.
+                format!("{} IS NULL", quote_identifier(column))
+            } else {
+                format!("{} = {}", quote_identifier(column), sql_literal(value))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    match &edit.change {
+        RowChange::SetValue { column, value } => format!(
+            "UPDATE {table} SET {} = {} WHERE {where_clause}",
+            quote_identifier(column),
+            sql_literal(value)
+        ),
+        RowChange::DeleteRow => format!("DELETE FROM {table} WHERE {where_clause}"),
+    }
+}
+
+/// Double-quotes an identifier, one dotted part at a time so a
+/// schema-qualified `public.users` stays two identifiers rather than
+/// becoming one strangely named table.
+fn quote_identifier(name: &str) -> String {
+    name.split('.')
+        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn sql_literal(value: &str) -> String {
+    if value == "NULL" {
+        return "NULL".to_string();
+    }
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// The one table a `SELECT` reads from, or `None` when the answer isn't a
+/// single table -- a join, a union, a subquery, a grouped or distinct
+/// result, or anything that isn't a `SELECT` at all.
+///
+/// Deliberately conservative: this is what decides whether a keystroke in
+/// the results grid may write to the database, so every case it can't read
+/// with certainty has to come back `None`. Being wrong the other way means
+/// generating an `UPDATE` against the wrong table.
+pub fn single_table_source(sql: &str) -> Option<String> {
+    let tokens = sql_tokens(strip_leading_comments(sql));
+    let first = tokens.first()?;
+    if !first.word.eq_ignore_ascii_case("select") {
+        return None;
+    }
+    // A second `select` means a subquery or a set operation: either way the
+    // rows on screen no longer map to one table's rows.
+    if tokens
+        .iter()
+        .skip(1)
+        .any(|t| t.word.eq_ignore_ascii_case("select"))
+    {
+        return None;
+    }
+    for token in &tokens {
+        if token.depth == 0
+            && matches!(
+                token.word.to_ascii_lowercase().as_str(),
+                "join" | "union" | "intersect" | "except" | "group" | "having" | "distinct"
+            )
+        {
+            return None;
+        }
+    }
+
+    let from = tokens
+        .iter()
+        .position(|t| t.depth == 0 && t.word.eq_ignore_ascii_case("from"))?;
+    let table = tokens.get(from + 1)?;
+    if !is_identifier(&table.word) {
+        return None;
+    }
+
+    // Skip an alias (`FROM users u`, `FROM users AS u`) -- it changes
+    // nothing about which table the rows came from.
+    let mut next = from + 2;
+    if tokens
+        .get(next)
+        .is_some_and(|t| t.word.eq_ignore_ascii_case("as"))
+    {
+        next += 1;
+    }
+    if tokens
+        .get(next)
+        .is_some_and(|t| is_identifier(&t.word) && !is_clause_keyword(&t.word))
+    {
+        next += 1;
+    }
+    // A comma here is the old-style join syntax; anything else that isn't a
+    // clause this code recognises means the query does something it hasn't
+    // been taught to read.
+    match tokens.get(next) {
+        None => Some(table.word.clone()),
+        Some(t) if is_clause_keyword(&t.word) => Some(table.word.clone()),
+        Some(_) => None,
+    }
+}
+
+/// Words that start a clause after the `FROM` list, so they can't be an
+/// alias for the table that precedes them.
+fn is_clause_keyword(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "where" | "order" | "limit" | "offset" | "fetch" | "for"
+    )
+}
+
+fn is_identifier(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$')
+        && !word.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+struct SqlToken {
+    word: String,
+    /// Parenthesis nesting, so a keyword inside a function call or a
+    /// subquery isn't mistaken for a top-level clause.
+    depth: usize,
+}
+
+/// Splits SQL into words and punctuation, tracking parenthesis depth and
+/// skipping over string and comment contents. The same lexer-not-parser
+/// tradeoff as `split_sql_statements`: enough structure to answer one
+/// narrow question, no grammar to keep up to date.
+fn sql_tokens(sql: &str) -> Vec<SqlToken> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut tokens = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' | '"' => {
+                let quote = c;
+                let start = i;
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == quote {
+                        if chars.get(i + 1) == Some(&quote) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+                // A double-quoted name is an identifier; a single-quoted
+                // one is a value, and neither is a keyword.
+                let word: String = chars[start..i.min(chars.len())].iter().collect();
+                tokens.push(SqlToken { word, depth });
+            }
+            '-' if chars.get(i + 1) == Some(&'-') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(chars.len());
+            }
+            '(' => {
+                depth += 1;
+                tokens.push(SqlToken {
+                    word: "(".to_string(),
+                    depth,
+                });
+                i += 1;
+            }
+            ')' => {
+                tokens.push(SqlToken {
+                    word: ")".to_string(),
+                    depth,
+                });
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            c if c.is_whitespace() => i += 1,
+            c if c.is_alphanumeric() || c == '_' || c == '.' || c == '$' => {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_alphanumeric()
+                        || chars[i] == '_'
+                        || chars[i] == '.'
+                        || chars[i] == '$')
+                {
+                    i += 1;
+                }
+                tokens.push(SqlToken {
+                    word: chars[start..i].iter().collect(),
+                    depth,
+                });
+            }
+            other => {
+                tokens.push(SqlToken {
+                    word: other.to_string(),
+                    depth,
+                });
+                i += 1;
+            }
+        }
+    }
+    tokens
+}
+
 /// The SQL words worth completing, shared by the SQL connectors -- they
 /// can't depend on each other, but both depend on this crate. Not a full
 /// grammar's worth: the point is to save typing on the words you write
@@ -329,6 +599,23 @@ pub trait QueryDriver: Send + Sync {
     /// only Elasticsearch, via `curl`). `None` means "not supported" rather
     /// than an error -- most drivers just don't implement this.
     fn export_curl(&self, _query: &str) -> Option<String> {
+        None
+    }
+
+    /// This driver's statement for a row edit made in the results grid.
+    /// `None` -- the default -- leaves the grid read-only, which is right
+    /// for a backend whose results aren't rows of a table anyone can
+    /// address (Redis replies, an Elasticsearch response body). Only the
+    /// driver knows its own syntax, so nothing outside one writes SQL; the
+    /// SQL connectors all delegate to `build_sql_edit`.
+    fn edit_sql(&self, _edit: &RowEdit) -> Option<String> {
+        None
+    }
+
+    /// The table a result came from, for `edit_sql` to aim at -- `None`
+    /// when this driver can't tell, which keeps the grid read-only for that
+    /// result. SQL connectors delegate to `single_table_source`.
+    fn edit_source(&self, _query: &str) -> Option<String> {
         None
     }
 }
@@ -499,5 +786,139 @@ mod tests {
         assert!(!returns_rows(""));
         assert!(!returns_rows("   \n  "));
         assert!(!returns_rows("-- only a comment"));
+    }
+
+    fn key(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(c, v)| (c.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn an_update_names_the_column_the_table_and_the_key() {
+        let sql = build_sql_edit(&RowEdit {
+            table: "users".to_string(),
+            key: key(&[("id", "7")]),
+            change: RowChange::SetValue {
+                column: "name".to_string(),
+                value: "Ada".to_string(),
+            },
+        });
+
+        assert_eq!(
+            sql,
+            "UPDATE \"users\" SET \"name\" = 'Ada' WHERE \"id\" = '7'"
+        );
+    }
+
+    #[test]
+    fn a_delete_uses_every_column_of_a_composite_key() {
+        let sql = build_sql_edit(&RowEdit {
+            table: "memberships".to_string(),
+            key: key(&[("user_id", "1"), ("group_id", "2")]),
+            change: RowChange::DeleteRow,
+        });
+
+        assert_eq!(
+            sql,
+            "DELETE FROM \"memberships\" WHERE \"user_id\" = '1' AND \"group_id\" = '2'"
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_value_is_escaped_rather_than_ending_the_literal() {
+        let sql = build_sql_edit(&RowEdit {
+            table: "users".to_string(),
+            key: key(&[("id", "1")]),
+            change: RowChange::SetValue {
+                column: "name".to_string(),
+                value: "O'Brien".to_string(),
+            },
+        });
+
+        assert_eq!(
+            sql, "UPDATE \"users\" SET \"name\" = 'O''Brien' WHERE \"id\" = '1'",
+            "an unescaped quote here would be an injection, not a typo"
+        );
+    }
+
+    #[test]
+    fn a_null_is_written_unquoted_the_way_the_grid_shows_it() {
+        let sql = build_sql_edit(&RowEdit {
+            table: "users".to_string(),
+            key: key(&[("id", "1")]),
+            change: RowChange::SetValue {
+                column: "nickname".to_string(),
+                value: "NULL".to_string(),
+            },
+        });
+
+        assert_eq!(
+            sql,
+            "UPDATE \"users\" SET \"nickname\" = NULL WHERE \"id\" = '1'"
+        );
+    }
+
+    #[test]
+    fn a_schema_qualified_table_stays_two_identifiers() {
+        let sql = build_sql_edit(&RowEdit {
+            table: "public.users".to_string(),
+            key: key(&[("id", "1")]),
+            change: RowChange::DeleteRow,
+        });
+
+        assert_eq!(sql, "DELETE FROM \"public\".\"users\" WHERE \"id\" = '1'");
+    }
+
+    #[test]
+    fn a_plain_select_reports_the_table_it_reads() {
+        assert_eq!(
+            single_table_source("SELECT * FROM users"),
+            Some("users".to_string())
+        );
+        assert_eq!(
+            single_table_source("select id, name from public.users where id = 1 order by id"),
+            Some("public.users".to_string())
+        );
+        assert_eq!(
+            single_table_source("SELECT * FROM users u WHERE u.id = 1"),
+            Some("users".to_string()),
+            "an alias doesn't change which table the rows came from"
+        );
+        assert_eq!(
+            single_table_source("-- yesterday's numbers\nSELECT * FROM users"),
+            Some("users".to_string())
+        );
+    }
+
+    #[test]
+    fn a_result_that_is_not_one_table_has_no_editable_source() {
+        for sql in [
+            "SELECT * FROM users JOIN orders ON orders.user_id = users.id",
+            "SELECT * FROM users, orders",
+            "SELECT * FROM users UNION SELECT * FROM admins",
+            "SELECT count(*) FROM users GROUP BY country",
+            "SELECT DISTINCT country FROM users",
+            "SELECT * FROM (SELECT * FROM users) t",
+            "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)",
+            "INSERT INTO users VALUES (1)",
+            "UPDATE users SET name = 'x'",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                single_table_source(sql),
+                None,
+                "must not be editable: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyword_inside_parentheses_does_not_disqualify_the_source() {
+        assert_eq!(
+            single_table_source("SELECT coalesce(name, 'x') FROM users WHERE id = 1"),
+            Some("users".to_string())
+        );
     }
 }
