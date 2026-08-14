@@ -64,6 +64,10 @@ pub struct QueryScreenComponent {
     /// The next result is a re-read of the same query after an edit, so the
     /// cell cursor should stay where it is instead of jumping to the top.
     refreshing: bool,
+    /// The results filter being typed. A one-line bar rather than a
+    /// centered overlay: it filters what's behind it, so covering that up
+    /// would hide the only feedback there is.
+    search: Option<ui::TextInput>,
 }
 
 /// Copies `text` to the system clipboard via an OSC52 escape sequence,
@@ -118,6 +122,7 @@ impl QueryScreenComponent {
             last_query: None,
             row_edit: None,
             refreshing: false,
+            search: None,
         }
     }
 
@@ -465,6 +470,27 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        // Typed straight into the filter, refiltering on every key: a
+        // search you have to confirm before seeing anything is a search you
+        // can't correct while typing.
+        if let Some(search) = self.search.as_mut() {
+            match code {
+                KeyCode::Esc => {
+                    self.search = None;
+                    // Esc undoes the whole search, so the grid is back to
+                    // exactly what it was before `/`.
+                    self.results.set_filter("");
+                }
+                KeyCode::Enter => self.search = None,
+                _ => {
+                    search.handle_key_event(code, modifiers);
+                    let text = search.text();
+                    self.results.set_filter(&text);
+                }
+            }
+            return None;
+        }
+
         if let Some(row_edit) = self.row_edit.as_mut() {
             if let Some(outcome) = row_edit.handle_key_event(code, modifiers) {
                 self.handle_row_edit(outcome);
@@ -615,6 +641,9 @@ impl Component for QueryScreenComponent {
             Command::NextColumn => self.results.next_column(),
             Command::EditCell => self.begin_edit_cell(),
             Command::DeleteRow => self.begin_delete_row(),
+            Command::Search => {
+                self.search = Some(ui::TextInput::new(self.results.filter()));
+            }
             _ => {}
         }
         None
@@ -738,8 +767,32 @@ impl Component for QueryScreenComponent {
             self.focus == Focus::Editor,
         );
         self.results.draw_running(self.engine.is_pending());
+        let results_area = match &self.search {
+            Some(_) => Rect {
+                height: chunks[1].height.saturating_sub(1),
+                ..chunks[1]
+            },
+            None => chunks[1],
+        };
         self.results
-            .draw(frame, chunks[1], self.focus == Focus::Results);
+            .draw(frame, results_area, self.focus == Focus::Results);
+        if let Some(search) = &self.search {
+            let bar = Rect {
+                y: results_area.y.saturating_add(results_area.height),
+                height: 1,
+                ..chunks[1]
+            };
+            let theme = tradar_core::theme::theme();
+            let mut spans = vec![ratatui::text::Span::styled(
+                "/",
+                ratatui::style::Style::default().fg(theme.accent),
+            )];
+            spans.extend(search.spans(true));
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans)),
+                bar,
+            );
+        }
 
         if let Some(completion) = &mut self.completion {
             let cursor = self.query_editor.cursor_screen_position(self.editor_area);
@@ -1567,6 +1620,86 @@ mod tests {
         let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert!(matches!(action, Some(Action::BackToPicker)));
+    }
+
+    fn screen_showing_cities() -> (QueryScreenComponent, mpsc::UnboundedReceiver<Action>) {
+        let (mut screen, rx) = screen();
+        screen.focus = Focus::Results;
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["id".to_string(), "city".to_string()],
+            rows: vec![
+                vec!["1".to_string(), "Hanoi".to_string()],
+                vec!["2".to_string(), "Da Nang".to_string()],
+            ],
+            truncated: false,
+        });
+        (screen, rx)
+    }
+
+    #[test]
+    fn slash_filters_the_results_as_you_type() {
+        let (mut screen, _rx) = screen_showing_cities();
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "nang".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(screen.results.filter(), "nang");
+        assert_eq!(
+            screen.results.selected_row().map(|r| r[1].clone()),
+            Some("Da Nang".to_string())
+        );
+    }
+
+    #[test]
+    fn enter_keeps_the_filter_and_esc_undoes_it() {
+        let (mut screen, _rx) = screen_showing_cities();
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('h'), KeyModifiers::NONE);
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(screen.search.is_none(), "the bar closes");
+        assert_eq!(screen.results.filter(), "h", "but the filter stays");
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(
+            screen.results.filter(),
+            "",
+            "esc puts the grid back the way it was"
+        );
+    }
+
+    #[test]
+    fn reopening_the_filter_starts_from_what_is_already_applied() {
+        let (mut screen, _rx) = screen_showing_cities();
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('h'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.results.filter(),
+            "ha",
+            "the second `/` refines rather than starting over"
+        );
+    }
+
+    #[test]
+    fn a_key_bound_elsewhere_is_plain_text_while_the_filter_bar_is_open() {
+        let (mut screen, _rx) = screen_showing_cities();
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        // `d` deletes a row and `y` yanks one when Results has focus; while
+        // typing a filter they have to be letters.
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert_eq!(screen.results.filter(), "dy");
+        assert!(screen.row_edit.is_none(), "no delete may have started");
     }
 
     /// A screen whose driver returns a two-column `users` table and whose

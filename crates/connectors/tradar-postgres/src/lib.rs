@@ -3,26 +3,19 @@
 //! else in this crate is `pub`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
 
-use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
+use tradar_connector_api::{CONNECT_TIMEOUT, Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
     self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
-
-/// How long to wait for the initial connection before giving up. sqlx's own
-/// default (`PgPool::connect`'s `acquire_timeout`) is 30s, which against an
-/// unreachable host makes the TUI look hung rather than reporting a fast,
-/// clear connection error.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PostgresDriver {
     connection_string: String,
@@ -41,6 +34,11 @@ impl PostgresDriver {
 #[async_trait]
 impl QueryDriver for PostgresDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
+        // sqlx's own default here is 30s, which against an unreachable
+        // host made the TUI look hung rather than reporting a failed
+        // connect. Set from the shared budget every connector now honours
+        // -- and kept on the pool rather than left to the caller's wrapper,
+        // because it also bounds acquires made later, mid-query.
         self.pool = Some(
             PgPoolOptions::new()
                 .acquire_timeout(CONNECT_TIMEOUT)
@@ -183,7 +181,7 @@ impl Connector for PostgresConnector {
 
     async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
         let mut driver = PostgresDriver::new(&connection.target);
-        driver.connect().await?;
+        tradar_connector_api::with_connect_timeout(&connection.target, driver.connect()).await?;
         let driver: Arc<dyn QueryDriver> = Arc::new(driver);
         let schema = driver.list_schema().await.map_err(|e| e.to_string());
         Ok(Box::new(QueryEngine::new(driver, connection, schema)))

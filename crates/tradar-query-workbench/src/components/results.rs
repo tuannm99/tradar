@@ -86,6 +86,12 @@ pub struct ResultsComponent {
     /// The selected column, so the grid has a *cell* cursor rather than
     /// only a row cursor -- what "edit this value" needs to point at.
     pub selected_col: usize,
+    /// Rows not matching this are hidden. Filtering rather than jumping
+    /// between matches: on a result you can't see all of, "show me only
+    /// these" is the question people actually have, and it composes with
+    /// everything else the grid does (yank, edit, delete all act on what's
+    /// under the cursor either way).
+    filter: String,
     /// First visible column, for tables too wide to fit. Derived rather
     /// than driven: `draw` scrolls it just far enough to keep
     /// `selected_col` on screen, the way a spreadsheet follows its cursor.
@@ -119,6 +125,7 @@ impl ResultsComponent {
             last_error: None,
             selected: 0,
             selected_col: 0,
+            filter: String::new(),
             col_offset: 0,
             running: false,
             table_state: TableState::default(),
@@ -140,17 +147,76 @@ impl ResultsComponent {
         self.selected = 0;
         self.selected_col = 0;
         self.col_offset = 0;
+        // A filter from the last result would silently hide rows of this
+        // one, and you'd be reading a subset without knowing it.
+        self.filter.clear();
     }
 
-    /// Same as `set_result`, but leaves the cell cursor where it was --
-    /// used when a result is *re-read* rather than replaced (the refresh
-    /// after an edit), so the row you just changed is still under the
-    /// cursor instead of the view jumping back to the top.
+    /// Same as `set_result`, but leaves the cell cursor and the filter
+    /// where they were -- used when a result is *re-read* rather than
+    /// replaced (the refresh after an edit), so the row you just changed is
+    /// still under the cursor instead of the view jumping back to the top.
     pub fn set_result_keeping_cursor(&mut self, result: QueryResult) {
-        let (row, column) = (self.selected, self.selected_col);
+        let (row, column, filter) = (
+            self.selected,
+            self.selected_col,
+            std::mem::take(&mut self.filter),
+        );
         self.set_result(result);
+        self.filter = filter;
         self.selected = row.min(self.item_count().saturating_sub(1));
         self.selected_col = column.min(self.column_count().saturating_sub(1));
+    }
+
+    /// Narrows the grid to rows containing `filter`, case-insensitively,
+    /// anywhere in them. An empty string shows everything again.
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = filter.to_string();
+        // The row that was under the cursor may not be in the new set, and
+        // a cursor pointing past the end selects nothing at all.
+        self.selected = self.selected.min(self.item_count().saturating_sub(1));
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Indices into the underlying rows/documents that survive the filter,
+    /// in order. This is what `selected` indexes -- everything that acts on
+    /// "the selected row" goes through here, so an edit made while filtered
+    /// still lands on the row the user is pointing at.
+    fn visible_items(&self) -> Vec<usize> {
+        let needle = self.filter.to_lowercase();
+        match &self.last_result {
+            Some(QueryResult::Table { rows, .. }) => rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    needle.is_empty()
+                        || row.iter().any(|cell| cell.to_lowercase().contains(&needle))
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            Some(QueryResult::Documents(docs)) => docs
+                .iter()
+                .enumerate()
+                .filter(|(_, doc)| {
+                    needle.is_empty()
+                        || serde_json::to_string(doc)
+                            .unwrap_or_default()
+                            .to_lowercase()
+                            .contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            Some(QueryResult::Affected { .. }) | None => Vec::new(),
+        }
+    }
+
+    /// Where the selected row sits in the *unfiltered* result -- what the
+    /// row-number gutter shows, so the numbers stay honest while filtered.
+    fn selected_item(&self) -> Option<usize> {
+        self.visible_items().get(self.selected).copied()
     }
 
     pub fn set_error(&mut self, error: String) {
@@ -159,7 +225,14 @@ impl ResultsComponent {
         self.selected = 0;
     }
 
+    /// How many rows are selectable right now -- after filtering, since
+    /// that's what's on screen to move through.
     fn item_count(&self) -> usize {
+        self.visible_items().len()
+    }
+
+    /// How many there are in total, filter or no filter.
+    fn total_count(&self) -> usize {
         match &self.last_result {
             Some(QueryResult::Table { rows, .. }) => rows.len(),
             Some(QueryResult::Documents(docs)) => docs.len(),
@@ -234,8 +307,9 @@ impl ResultsComponent {
     /// The selected row's values, in column order -- the raw strings as
     /// fetched, not the truncated forms on screen.
     pub fn selected_row(&self) -> Option<&Vec<String>> {
+        let index = self.selected_item()?;
         match &self.last_result {
-            Some(QueryResult::Table { rows, .. }) => rows.get(self.selected),
+            Some(QueryResult::Table { rows, .. }) => rows.get(index),
             _ => None,
         }
     }
@@ -277,10 +351,11 @@ impl ResultsComponent {
     /// result yet, or the last response was an error). Table rows are
     /// tab-separated, matching what spreadsheets expect when pasted.
     pub fn selected_text(&self) -> Option<String> {
+        let index = self.selected_item()?;
         match self.last_result.as_ref()? {
-            QueryResult::Table { rows, .. } => rows.get(self.selected).map(|row| row.join("\t")),
+            QueryResult::Table { rows, .. } => rows.get(index).map(|row| row.join("\t")),
             QueryResult::Documents(docs) => docs
-                .get(self.selected)
+                .get(index)
                 .map(|doc| serde_json::to_string_pretty(doc).unwrap_or_default()),
             QueryResult::Affected { .. } => None,
         }
@@ -313,22 +388,37 @@ impl ResultsComponent {
 
         let title = match (&self.last_error, &self.last_result) {
             (Some(_), _) => "Results — error".to_string(),
-            (
-                None,
-                Some(QueryResult::Table {
-                    rows, truncated, ..
-                }),
-            ) => {
-                if *truncated {
+            (None, Some(QueryResult::Table { truncated, .. })) => {
+                let total = self.total_count();
+                if !self.filter.is_empty() {
+                    // Both numbers, so a filtered view can never be read as
+                    // the whole result.
+                    format!(
+                        "Results ({} of {} — filter: {})",
+                        self.item_count(),
+                        count(total, "row"),
+                        self.filter
+                    )
+                } else if *truncated {
                     // Say so loudly: a silently clipped result set is a
                     // wrong answer you can't see is wrong.
-                    format!("Results (first {} rows — truncated)", rows.len())
+                    format!("Results (first {total} rows — truncated)")
                 } else {
-                    format!("Results ({})", count(rows.len(), "row"))
+                    format!("Results ({})", count(total, "row"))
                 }
             }
-            (None, Some(QueryResult::Documents(docs))) => {
-                format!("Results ({})", count(docs.len(), "document"))
+            (None, Some(QueryResult::Documents(_))) => {
+                let total = self.total_count();
+                if self.filter.is_empty() {
+                    format!("Results ({})", count(total, "document"))
+                } else {
+                    format!(
+                        "Results ({} of {} — filter: {})",
+                        self.item_count(),
+                        count(total, "document"),
+                        self.filter
+                    )
+                }
             }
             (None, Some(QueryResult::Affected { .. })) => "Results".to_string(),
             (None, None) => "Results".to_string(),
@@ -375,6 +465,7 @@ impl ResultsComponent {
                 // A row-number gutter, wide enough for the highest number
                 // there is: on a screen full of rows, "which one am I on"
                 // is otherwise something you have to count.
+                let visible_rows = self.visible_items();
                 let gutter = (rows.len().to_string().chars().count() as u16).max(1);
 
                 // Scroll only as far as it takes to keep the cell cursor on
@@ -409,11 +500,14 @@ impl ResultsComponent {
                         .add_modifier(Modifier::BOLD),
                 );
 
-                let body: Vec<Row> = rows
+                let body: Vec<Row> = visible_rows
                     .iter()
-                    .enumerate()
-                    .map(|(number, row)| {
+                    .map(|&number| {
+                        let row = &rows[number];
                         Row::new(
+                            // Numbered by position in the whole result, not
+                            // in the filtered view: while filtered, "row 4"
+                            // still means the fourth row of the query.
                             std::iter::once(
                                 Cell::from((number + 1).to_string())
                                     .style(Style::default().fg(theme.text_dim)),
@@ -450,7 +544,7 @@ impl ResultsComponent {
                     x = x.saturating_add(width).saturating_add(COLUMN_SPACING);
                 }
 
-                if rows.is_empty() {
+                if visible_rows.is_empty() {
                     self.table_state.select_cell(None);
                 } else {
                     let column = visible
@@ -491,9 +585,11 @@ impl ResultsComponent {
             QueryResult::Documents(docs) => {
                 self.visible_height = inner.height as usize;
 
-                let items: Vec<ListItem> = docs
+                let visible = self.visible_items();
+                let items: Vec<ListItem> = visible
                     .iter()
-                    .map(|doc| {
+                    .map(|&index| {
+                        let doc = &docs[index];
                         let pretty = serde_json::to_string_pretty(doc).unwrap_or_default();
                         ListItem::new(Text::from(
                             pretty
@@ -503,7 +599,7 @@ impl ResultsComponent {
                         ))
                     })
                     .collect();
-                if docs.is_empty() {
+                if visible.is_empty() {
                     self.list_state.select(None);
                 } else {
                     self.list_state.select(Some(self.selected));
@@ -988,6 +1084,154 @@ mod tests {
         let text = draw_component(&mut results, 40, 10);
 
         assert!(text.contains("(1 row)"), "buffer was: {text}");
+    }
+
+    /// Three cities, two of them containing "han" (Hanoi twice) -- enough
+    /// to tell filtering from jumping.
+    fn cities() -> QueryResult {
+        QueryResult::Table {
+            columns: vec!["id".to_string(), "city".to_string()],
+            rows: vec![
+                vec!["1".to_string(), "Hanoi".to_string()],
+                vec!["2".to_string(), "Da Nang".to_string()],
+                vec!["3".to_string(), "Hanoi".to_string()],
+            ],
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_filter_hides_the_rows_that_do_not_match() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+
+        results.set_filter("han");
+
+        let text = draw_component(&mut results, 30, 8);
+        assert!(text.contains("Hanoi"), "buffer was: {text}");
+        assert!(!text.contains("Da Nang"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn filtering_is_case_insensitive_and_matches_any_column() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+
+        results.set_filter("DA NA");
+
+        assert_eq!(results.selected_text().as_deref(), Some("2\tDa Nang"));
+    }
+
+    #[test]
+    fn row_numbers_stay_the_ones_from_the_whole_result() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+        results.set_filter("nang");
+
+        let backend = TestBackend::new(30, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| results.draw(frame, Rect::new(0, 0, 30, 8), false))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Row 0 is the border, row 1 the header, row 2 the only surviving
+        // data row -- whose gutter must read 2, its place in the whole
+        // result, not 1, its place in the filtered view.
+        let line = row_text(&buffer, 2);
+        assert!(line.contains("Da Nang"), "row was: {line:?}");
+        assert_eq!(
+            line.trim_start_matches('\u{2502}')
+                .trim_start()
+                .chars()
+                .next(),
+            Some('2'),
+            "the surviving row must keep its own number: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_title_says_how_much_is_being_hidden() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+        results.set_filter("han");
+
+        let text = draw_component(&mut results, 50, 8);
+
+        assert!(text.contains("2 of 3 rows"), "buffer was: {text}");
+        assert!(text.contains("filter: han"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn acting_on_the_selection_while_filtered_uses_the_row_you_can_see() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+        results.set_filter("han");
+
+        results.move_down();
+
+        assert_eq!(
+            results.selected_row().map(|r| r[0].as_str()),
+            Some("3"),
+            "the second visible row is the third row of the result"
+        );
+    }
+
+    #[test]
+    fn a_cursor_past_the_end_of_a_narrower_filter_is_pulled_back_into_range() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+        results.move_to_bottom();
+        assert_eq!(results.selected, 2);
+
+        results.set_filter("nang");
+
+        assert_eq!(results.selected, 0, "only one row survives");
+        assert!(
+            results.selected_row().is_some(),
+            "and it must be selectable"
+        );
+    }
+
+    #[test]
+    fn a_new_result_drops_the_filter_rather_than_hiding_rows_of_it() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+        results.set_filter("han");
+
+        results.set_result(cities());
+
+        assert_eq!(results.filter(), "");
+        assert_eq!(results.item_count(), 3);
+    }
+
+    #[test]
+    fn a_refresh_after_an_edit_keeps_the_filter() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+        results.set_filter("han");
+
+        results.set_result_keeping_cursor(cities());
+
+        assert_eq!(results.filter(), "han");
+        assert_eq!(results.item_count(), 2);
+    }
+
+    #[test]
+    fn documents_are_filtered_on_their_json_text() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Documents(vec![
+            serde_json::json!({"name": "Ada"}),
+            serde_json::json!({"name": "Lin"}),
+        ]));
+
+        results.set_filter("lin");
+
+        assert_eq!(results.item_count(), 1);
+        assert!(
+            results.selected_text().unwrap().contains("Lin"),
+            "the surviving document has to be the matching one"
+        );
     }
 
     #[test]

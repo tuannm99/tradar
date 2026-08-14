@@ -22,7 +22,8 @@ crates/
       ui.rs                   — widget dùng chung: panel có viền/focus, selection style, centered_rect, status hint bar, HelpOverlay
       vim_list.rs             — phép toán di chuyển selection dùng chung cho mọi list (và cho row movement của editor)
   tradar-connector-api/
-    src/lib.rs                — trait Connector, trait Session, struct ConnectorDescriptor
+    src/lib.rs                — trait Connector, trait Session, struct ConnectorDescriptor,
+                                  CONNECT_TIMEOUT + with_connect_timeout (giới hạn mở kết nối, mọi connector bọc qua)
   tradar-query-workbench/
     src/
       query_driver.rs         — trait QueryDriver (connect, list_schema, execute, export_curl, edit_source/edit_sql) + SchemaInfo/QueryResult/RowEdit
@@ -43,7 +44,7 @@ crates/
         connection_form.rs    — ConnectionFormComponent: form 3 field cho add/edit, overlay trên picker
 ```
 
-`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 5 nhưng không chứa code driver nào.
+`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`, cùng với `CONNECT_TIMEOUT`/`with_connect_timeout` — giới hạn thời gian mở kết nối mà **mọi** connector đều bọc qua, đặt chung một chỗ vì client bên dưới của mỗi backend bất đồng hoàn toàn về hành vi khi host không trả lời (sqlx có timeout riêng, `redis`/`mongodb` có default riêng, `reqwest` không có gì), mà TUI thì đứng im trong lúc connect nên treo lâu sẽ bị đọc là app hỏng. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 5 nhưng không chứa code driver nào.
 
 ### Trait `QueryDriver`
 
@@ -142,7 +143,7 @@ Cargo.toml                       [workspace]
 crates/
   tradar-core/                   — Action, trait Component, Capability,
                                     storage (SavedConnection, ConnectionStore), config
-  tradar-connector-api/          — trait Connector, trait Session, ConnectorDescriptor
+  tradar-connector-api/          — trait Connector, trait Session, ConnectorDescriptor, CONNECT_TIMEOUT
                                     (SPI dành cho connector — xem "Vì sao tách khỏi tradar-core" bên dưới)
   tradar-query-workbench/        — QueryScreenComponent, ResultsComponent, QueryEditorComponent,
                                     QueryEngine (implement Session), trait QueryDriver, SchemaInfo/QueryResult

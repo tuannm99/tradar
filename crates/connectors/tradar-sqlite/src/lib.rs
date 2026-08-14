@@ -164,7 +164,7 @@ impl Connector for SqliteConnector {
 
     async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
         let mut driver = SqliteDriver::new(&connection.target);
-        driver.connect().await?;
+        tradar_connector_api::with_connect_timeout(&connection.target, driver.connect()).await?;
         let driver: std::sync::Arc<dyn QueryDriver> = std::sync::Arc::new(driver);
         let schema = driver.list_schema().await.map_err(|e| e.to_string());
         Ok(Box::new(QueryEngine::new(driver, connection, schema)))

@@ -233,7 +233,7 @@ impl Connector for RedisConnector {
 
     async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
         let mut driver = RedisDriver::new(&connection.target);
-        driver.connect().await?;
+        tradar_connector_api::with_connect_timeout(&connection.target, driver.connect()).await?;
         let driver: Arc<dyn QueryDriver> = Arc::new(driver);
         let schema = driver.list_schema().await.map_err(|e| e.to_string());
         Ok(Box::new(QueryEngine::new(driver, connection, schema)))
