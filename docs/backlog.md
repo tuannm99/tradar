@@ -112,8 +112,8 @@ Gom về một chỗ để không mất: đây là những thứ đã nêu trong
 
 **Editor còn thiếu so với vim thật** (biết trước khi tự viết editor, cố ý bỏ qua ở vòng đầu — xem mục 5 phần "Bỏ `edtui`")
 
-- Undo/redo. Đây là cái thiếu dễ đau nhất khi gõ query dài.
-- Visual mode, search/replace trong buffer, copy/paste nội bộ editor.
+- ~~Undo/redo.~~ Xong (2026-08-15). `u` undo, **`U`** redo — không phải `Ctrl-r` chuẩn vim, vì `Ctrl-r` đã là "mở query history" ở `Context::QueryScreen` và bị chặn ở tầng đó trước khi bao giờ tới được editor (`QueryScreenComponent::handle_key_event` luôn đưa `Context::QueryScreen` vào danh sách context bất kể focus đang ở đâu). `u`/`U` không đụng gì có sẵn: `vim_list::recognize` chỉ nhận `Ctrl-u` (half-page-up), không nhận `u` trần. Checkpoint lưu lại **một lần mỗi lệnh rời rạc**, không phải mỗi ký tự: bấm vào lúc vào Insert mode (`i`/`a`/`I`/`A`/`o`/`O`), trước `x`, trước `dd`, và trong `insert_at_cursor`/`replace_word_before_cursor` (chèn tên từ navigator, load từ history, nhận completion) — nên gõ cả câu rồi `Esc` thì `u` một phát lùi về trạng thái trước khi gõ, đúng hành vi vim thật (không phải xoá từng ký tự). `set_text` (mở file, chọn history, restore session) **xoá sạch undo history** vì buffer mới không liên quan gì tới buffer cũ — không thì `u` có thể hồi sinh lại query đã bị thay thế. Một edit mới sau khi undo thì xoá redo stack (nhánh cũ bị bỏ, đúng quy tắc undo/redo chuẩn). Cap 500 bước (`MAX_UNDO_HISTORY`) để không phình bộ nhớ vô hạn. Verify tay qua tmux: gõ cả câu SELECT rồi Esc → `u` xoá sạch → `U` khôi phục; `x` xoá 1 ký tự rồi `u` khôi phục; `dd` xoá cả dòng rồi `u` khôi phục dòng.
+- Visual mode, search/replace trong buffer, copy/paste nội bộ editor. Vẫn chưa làm — không nằm trong scope lần này.
 
 **Schema đọc được sâu hơn** (nối tiếp mục 2 "Schema sidebar xem được cột" — panel đó nay là navigator)
 

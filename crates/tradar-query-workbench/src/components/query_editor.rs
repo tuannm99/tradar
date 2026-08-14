@@ -48,6 +48,23 @@ pub enum Dialect {
     Sql,
 }
 
+/// A buffer + cursor position, captured before an edit so `undo` has
+/// something to restore. Cheap enough to clone freely: query buffers are
+/// small, and a checkpoint is taken once per discrete edit (an entire
+/// Insert session, not per keystroke), not per character.
+#[derive(Clone)]
+struct Snapshot {
+    lines: Vec<Vec<char>>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+/// Caps how many edits back `u` can reach, so an extremely long editing
+/// session can't grow the undo stack without bound -- see "Support large
+/// result sets efficiently" in CLAUDE.md, same low-memory principle applied
+/// to editor history rather than query results.
+const MAX_UNDO_HISTORY: usize = 500;
+
 pub struct QueryEditorComponent {
     pub mode: EditorMode,
     dialect: Dialect,
@@ -58,6 +75,8 @@ pub struct QueryEditorComponent {
     pending_d: bool,
     scroll: usize,
     visible_height: usize,
+    undo_stack: Vec<Snapshot>,
+    redo_stack: Vec<Snapshot>,
 }
 
 impl Default for QueryEditorComponent {
@@ -78,6 +97,8 @@ impl QueryEditorComponent {
             pending_d: false,
             scroll: 0,
             visible_height: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -94,8 +115,10 @@ impl QueryEditorComponent {
     }
 
     /// Inserts `text` at the cursor and switches to Insert mode -- used to
-    /// splice a schema name in from the sidebar or replay a history entry.
+    /// splice a schema name in from the navigator or replay a history
+    /// entry. One undo step, same as any other single edit.
     pub fn insert_at_cursor(&mut self, text: &str) {
+        self.checkpoint();
         for c in text.chars() {
             self.insert_char(c);
         }
@@ -116,6 +139,11 @@ impl QueryEditorComponent {
         self.mode = EditorMode::Normal;
         self.pending_g = false;
         self.pending_d = false;
+        // A freshly loaded buffer (a file, a history entry, a restored
+        // session) has no relationship to whatever was undoable before --
+        // undoing into it would silently resurrect the previous query.
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 
     /// Scrolls the viewport by a wheel notch, moving the cursor with it so
@@ -143,6 +171,7 @@ impl QueryEditorComponent {
     /// Swaps the word before the cursor for `text` and leaves the cursor
     /// after it -- accepting a completion.
     pub fn replace_word_before_cursor(&mut self, text: &str) {
+        self.checkpoint();
         let line = &self.lines[self.cursor_row];
         let end = self.cursor_col.min(line.len());
         let start = line[..end]
@@ -209,6 +238,56 @@ impl QueryEditorComponent {
         self.cursor_col = self.cursor_col.min(max);
     }
 
+    /// Records the buffer as it stands right now, so `undo` can get back to
+    /// it. Called once per discrete edit -- on entering Insert mode rather
+    /// than per keystroke, so an entire typing session collapses into a
+    /// single undo step, the same as real vim's `i...Esc`.
+    fn checkpoint(&mut self) {
+        self.undo_stack.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+        });
+        if self.undo_stack.len() > MAX_UNDO_HISTORY {
+            self.undo_stack.remove(0);
+        }
+        // A new edit starting from here makes whatever was undone no longer
+        // reachable by redo -- the same branch-is-discarded rule every
+        // undo/redo stack follows.
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self) {
+        let Some(previous) = self.undo_stack.pop() else {
+            return;
+        };
+        self.redo_stack.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+        });
+        self.restore(previous);
+    }
+
+    fn redo(&mut self) {
+        let Some(next) = self.redo_stack.pop() else {
+            return;
+        };
+        self.undo_stack.push(Snapshot {
+            lines: self.lines.clone(),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+        });
+        self.restore(next);
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.lines = snapshot.lines;
+        self.cursor_row = snapshot.cursor_row.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = snapshot.cursor_col;
+        self.clamp_col();
+    }
+
     fn move_row_to(&mut self, row: usize) {
         self.cursor_row = row.min(self.lines.len().saturating_sub(1));
         self.clamp_col();
@@ -239,6 +318,7 @@ impl QueryEditorComponent {
         // a pending `g`).
         if std::mem::take(&mut self.pending_d) {
             if code == KeyCode::Char('d') {
+                self.checkpoint();
                 self.delete_current_line();
             }
             return;
@@ -263,39 +343,56 @@ impl QueryEditorComponent {
             KeyCode::Char('$') => {
                 self.cursor_col = self.current_line_len().saturating_sub(1);
             }
-            KeyCode::Char('i') => self.mode = EditorMode::Insert,
+            KeyCode::Char('i') => {
+                self.checkpoint();
+                self.mode = EditorMode::Insert;
+            }
             KeyCode::Char('a') => {
+                self.checkpoint();
                 if self.current_line_len() > 0 {
                     self.cursor_col += 1;
                 }
                 self.mode = EditorMode::Insert;
             }
             KeyCode::Char('I') => {
+                self.checkpoint();
                 self.cursor_col = 0;
                 self.mode = EditorMode::Insert;
             }
             KeyCode::Char('A') => {
+                self.checkpoint();
                 self.cursor_col = self.current_line_len();
                 self.mode = EditorMode::Insert;
             }
             KeyCode::Char('o') => {
+                self.checkpoint();
                 self.lines.insert(self.cursor_row + 1, Vec::new());
                 self.cursor_row += 1;
                 self.cursor_col = 0;
                 self.mode = EditorMode::Insert;
             }
             KeyCode::Char('O') => {
+                self.checkpoint();
                 self.lines.insert(self.cursor_row, Vec::new());
                 self.cursor_col = 0;
                 self.mode = EditorMode::Insert;
             }
             KeyCode::Char('x') => {
                 if self.cursor_col < self.current_line_len() {
+                    self.checkpoint();
                     self.lines[self.cursor_row].remove(self.cursor_col);
                     self.clamp_col();
                 }
             }
             KeyCode::Char('d') => self.pending_d = true,
+            // Real vim's redo key, `ctrl-r`, is already query-screen's
+            // "open history" and is intercepted before it ever reaches
+            // this editor (see `Context::QueryScreen` in
+            // `tradar_core::keymap`) -- `U` is the substitute. `u` itself
+            // is free: `vim_list::recognize` only claims `ctrl-u`
+            // (half-page-up), not the bare key.
+            KeyCode::Char('u') => self.undo(),
+            KeyCode::Char('U') => self.redo(),
             _ => {}
         }
     }
@@ -669,6 +766,155 @@ mod tests {
         type_str(&mut editor, "a");
 
         assert_eq!(editor.text(), "a\nb\nc");
+    }
+
+    #[test]
+    fn u_undoes_a_whole_insert_session_as_one_step() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+        type_str(&mut editor, "abc");
+        editor.forward_key(key(KeyCode::Esc));
+
+        editor.forward_key(key(KeyCode::Char('u')));
+
+        assert_eq!(
+            editor.text(),
+            "",
+            "the entire typing session undoes at once, not one character at a time"
+        );
+    }
+
+    #[test]
+    fn shift_u_redoes_what_was_just_undone() {
+        let mut editor = QueryEditorComponent::new();
+        editor.insert_at_cursor("abc");
+        editor.forward_key(key(KeyCode::Esc));
+        editor.forward_key(key(KeyCode::Char('u')));
+        assert_eq!(editor.text(), "");
+
+        editor.forward_key(key(KeyCode::Char('U')));
+
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn u_undoes_x() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('x')));
+        assert_eq!(editor.text(), "bc");
+
+        editor.forward_key(key(KeyCode::Char('u')));
+
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn u_undoes_dd() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nb\nc");
+        editor.forward_key(key(KeyCode::Char('j')));
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('d')));
+        assert_eq!(editor.text(), "a\nc");
+
+        editor.forward_key(key(KeyCode::Char('u')));
+
+        assert_eq!(editor.text(), "a\nb\nc");
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('u')));
+
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn redo_with_nothing_to_redo_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('U')));
+
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn multiple_undos_walk_back_through_several_edits() {
+        let mut editor = QueryEditorComponent::new();
+        editor.insert_at_cursor("a");
+        editor.forward_key(key(KeyCode::Esc));
+        editor.forward_key(key(KeyCode::Char('A')));
+        type_str(&mut editor, "b");
+        editor.forward_key(key(KeyCode::Esc));
+        editor.forward_key(key(KeyCode::Char('A')));
+        type_str(&mut editor, "c");
+        editor.forward_key(key(KeyCode::Esc));
+        assert_eq!(editor.text(), "abc");
+
+        editor.forward_key(key(KeyCode::Char('u')));
+        assert_eq!(editor.text(), "ab");
+        editor.forward_key(key(KeyCode::Char('u')));
+        assert_eq!(editor.text(), "a");
+        editor.forward_key(key(KeyCode::Char('u')));
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn a_new_edit_after_undoing_discards_the_redo_branch() {
+        let mut editor = QueryEditorComponent::new();
+        editor.insert_at_cursor("abc");
+        editor.forward_key(key(KeyCode::Esc));
+        editor.forward_key(key(KeyCode::Char('u')));
+        assert_eq!(editor.text(), "");
+
+        editor.insert_at_cursor("xyz");
+        editor.forward_key(key(KeyCode::Esc));
+
+        editor.forward_key(key(KeyCode::Char('U')));
+        assert_eq!(
+            editor.text(),
+            "xyz",
+            "redo must not resurrect the abandoned 'abc' branch"
+        );
+    }
+
+    #[test]
+    fn set_text_clears_undo_history_so_a_loaded_file_cannot_be_undone_away() {
+        let mut editor = QueryEditorComponent::new();
+        editor.insert_at_cursor("old query");
+        editor.forward_key(key(KeyCode::Esc));
+
+        editor.set_text("select 1");
+        editor.forward_key(key(KeyCode::Char('u')));
+
+        assert_eq!(
+            editor.text(),
+            "select 1",
+            "undo must not reach back into the buffer that was replaced"
+        );
+    }
+
+    #[test]
+    fn undo_restores_the_cursor_position_along_with_the_text() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("ab\ncd");
+        editor.forward_key(key(KeyCode::Char('j'))); // row 1
+        editor.forward_key(key(KeyCode::Char('l'))); // col 1
+        editor.forward_key(key(KeyCode::Char('x'))); // deletes 'd' on row 1
+
+        editor.forward_key(key(KeyCode::Char('u')));
+        editor.insert_at_cursor("X");
+
+        // Cursor must be back on row 1 col 1 (before 'd'), not wherever `x`
+        // left it after clamping onto a shorter line.
+        assert_eq!(editor.text(), "ab\ncXd");
     }
 
     #[test]
