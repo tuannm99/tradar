@@ -33,6 +33,12 @@ pub struct NavConnection {
     pub tab: Option<usize>,
     pub outline: Vec<OutlineEntry>,
     pub error: Option<String>,
+    /// Whether the open tab's connection is still reachable, straight from
+    /// `Component::connection_alive`. `None` for a connection with no open
+    /// tab -- there's nothing to be alive or dead yet, distinct from a tab
+    /// whose screen doesn't report a status at all (also `None`, but that
+    /// can't happen in practice since every screen here is a query screen).
+    pub alive: Option<bool>,
 }
 
 /// One visible line.
@@ -261,6 +267,15 @@ impl NavigatorComponent {
                             },
                         ),
                     ];
+                    // Quiet when alive (a healthy connection needs no
+                    // badge), called out when it's dropped -- the whole
+                    // point is noticing that without running a query first.
+                    if connection.alive == Some(false) {
+                        spans.push(Span::styled(
+                            "  ✗ disconnected",
+                            Style::default().fg(theme.error),
+                        ));
+                    }
                     if let Some(error) = &connection.error {
                         spans.push(Span::styled(
                             format!("  {error}"),
@@ -318,7 +333,15 @@ impl NavigatorComponent {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
     use super::*;
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
 
     fn entry(depth: u8, label: &str, has_children: bool) -> OutlineEntry {
         OutlineEntry {
@@ -338,12 +361,14 @@ mod tests {
                 tab: Some(0),
                 outline: vec![entry(0, "users", true), entry(1, "id", false)],
                 error: None,
+                alive: Some(true),
             },
             NavConnection {
                 name: "remote".to_string(),
                 tab: None,
                 outline: Vec::new(),
                 error: None,
+                alive: None,
             },
         ]
     }
@@ -485,5 +510,29 @@ mod tests {
             2,
             "a stale expansion must not outlive the connection it described"
         );
+    }
+
+    #[test]
+    fn draw_calls_out_a_dropped_connection_and_stays_quiet_for_a_live_one() {
+        let mut conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| navigator.draw(frame, frame.area(), true, &conns))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            !text.contains("disconnected"),
+            "a live connection needs no badge: {text}"
+        );
+
+        conns[0].alive = Some(false);
+        terminal
+            .draw(|frame| navigator.draw(frame, frame.area(), true, &conns))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("disconnected"), "buffer was: {text}");
     }
 }

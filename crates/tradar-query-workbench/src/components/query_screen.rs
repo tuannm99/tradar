@@ -720,6 +720,10 @@ impl Component for QueryScreenComponent {
         self.engine.schema().as_ref().err().cloned()
     }
 
+    fn connection_alive(&self) -> Option<bool> {
+        Some(self.engine.alive())
+    }
+
     fn insert_text(&mut self, text: &str) {
         self.query_editor.insert_at_cursor(text);
         self.focus = Focus::Editor;
@@ -730,19 +734,22 @@ impl Component for QueryScreenComponent {
     }
 
     fn tick(&mut self) -> bool {
-        let outcome_arrived = self.engine.tick();
-        if outcome_arrived {
+        // `true` here covers two unrelated things settling: a query outcome
+        // (handled below) and the periodic ping's alive/dead flip (nothing
+        // more to do for that one -- `draw()` reads `engine.alive()` fresh
+        // every time).
+        let changed = self.engine.tick();
+        if let Some(outcome) = self.engine.take_outcome() {
             let refreshing = std::mem::take(&mut self.refreshing);
-            match self.engine.take_outcome() {
-                Some(QueryOutcome::Completed { result }) if refreshing => {
+            match outcome {
+                QueryOutcome::Completed { result } if refreshing => {
                     self.results.set_result_keeping_cursor(result)
                 }
-                Some(QueryOutcome::Completed { result }) => self.results.set_result(result),
-                Some(QueryOutcome::Failed { error }) => self.results.set_error(error),
-                None => {}
+                QueryOutcome::Completed { result } => self.results.set_result(result),
+                QueryOutcome::Failed { error } => self.results.set_error(error),
             }
         }
-        outcome_arrived
+        changed
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
@@ -765,6 +772,7 @@ impl Component for QueryScreenComponent {
             chunks[0],
             &connection_name,
             self.focus == Focus::Editor,
+            self.engine.alive(),
         );
         self.results.draw_running(self.engine.is_pending());
         let results_area = match &self.search {

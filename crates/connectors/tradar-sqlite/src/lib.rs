@@ -56,6 +56,12 @@ impl QueryDriver for SqliteDriver {
         query_driver::single_table_source(query)
     }
 
+    async fn ping(&self) -> anyhow::Result<()> {
+        let pool = self.pool.as_ref().expect("connect() must be called first");
+        sqlx::query("SELECT 1").execute(pool).await?;
+        Ok(())
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
         let tables: Vec<(String,)> =

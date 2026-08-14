@@ -12,7 +12,9 @@ use mongodb::bson::{Bson, Document};
 use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo, Statement};
+use tradar_query_workbench::query_driver::{
+    ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
+};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 struct ParsedQuery {
@@ -173,9 +175,42 @@ impl QueryDriver for MongoDriver {
         statements
     }
 
+    async fn ping(&self) -> anyhow::Result<()> {
+        self.database()?
+            .run_command(mongodb::bson::doc! { "ping": 1 })
+            .await?;
+        Ok(())
+    }
+
+    /// A collection has no fixed schema, so this reads one document per
+    /// collection and reports the fields it happened to have -- a guess,
+    /// not a guarantee, but still a real improvement over an empty list for
+    /// autocomplete and for browsing the navigator. One round trip per
+    /// collection is the cost of that guess; acceptable against a normal
+    /// instance's collection count, same trade-off SQLite already makes
+    /// with its own per-table `PRAGMA` round trip. A collection that fails
+    /// to sample (empty, or a transient error) just reports no columns
+    /// rather than failing schema browsing for every other collection.
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
-        let names = self.database()?.list_collection_names().await?;
-        Ok(names.into_iter().map(SchemaInfo::new).collect())
+        let db = self.database()?;
+        let names = db.list_collection_names().await?;
+        let mut schema = Vec::with_capacity(names.len());
+        for name in names {
+            let sample = db
+                .collection::<Document>(&name)
+                .find_one(Document::new())
+                .await;
+            let columns = match sample {
+                Ok(Some(doc)) => {
+                    let mut columns = Vec::new();
+                    flatten_document("", &doc, &mut columns);
+                    columns
+                }
+                Ok(None) | Err(_) => Vec::new(),
+            };
+            schema.push(SchemaInfo { name, columns });
+        }
+        Ok(schema)
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
@@ -300,6 +335,42 @@ fn json_to_document(value: serde_json::Value) -> anyhow::Result<Document> {
         .ok_or_else(|| anyhow::anyhow!("expected a JSON object"))
 }
 
+/// Flattens a sampled document into `parent.child` paths, the same way
+/// `tradar-elasticsearch` flattens a mapping's `properties` -- a nested
+/// field is addressed that way in a query anyway. Arrays are reported as a
+/// single `array` field rather than expanded per element: a doc's array
+/// entries aren't guaranteed to share a shape, so there's no one type to
+/// report for "the third element of every document's tags array".
+fn flatten_document(prefix: &str, doc: &Document, out: &mut Vec<ColumnInfo>) {
+    for (name, value) in doc {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        match value {
+            Bson::Document(nested) => flatten_document(&path, nested, out),
+            other => {
+                let mut column = ColumnInfo::new(path, bson_type_name(other));
+                // `_id` is the closest thing a MongoDB document has to a
+                // primary key -- every collection has exactly one, and it's
+                // what a row edit in the results grid would key on if that
+                // were ever built for Mongo.
+                column.primary_key = name == "_id";
+                out.push(column);
+            }
+        }
+    }
+}
+
+/// The BSON element type's own name (`Bson`'s `Debug` derive already spells
+/// it exactly this way: `Int32`, `ObjectId`, `String`, ...), passed through
+/// rather than normalized -- same philosophy as `ColumnInfo::type_name`
+/// elsewhere: show what the database actually says.
+fn bson_type_name(value: &Bson) -> String {
+    format!("{:?}", value.element_type())
+}
+
 const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
     id: "mongo",
     display_name: "MongoDB",
@@ -373,6 +444,69 @@ mod tests {
     #[test]
     fn rejects_malformed_json_arguments() {
         assert!(parse_shell_query("db.users.find({not json})").is_err());
+    }
+
+    fn doc_from_json(json: serde_json::Value) -> Document {
+        json_to_document(json).unwrap()
+    }
+
+    #[test]
+    fn flatten_document_reports_a_column_per_top_level_field() {
+        let doc = doc_from_json(serde_json::json!({
+            "_id": 1,
+            "name": "Ada",
+            "active": true,
+        }));
+        let mut columns = Vec::new();
+
+        flatten_document("", &doc, &mut columns);
+
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["_id", "name", "active"]);
+    }
+
+    #[test]
+    fn flatten_document_marks_only_id_as_the_primary_key() {
+        let doc = doc_from_json(serde_json::json!({"_id": 1, "name": "Ada"}));
+        let mut columns = Vec::new();
+
+        flatten_document("", &doc, &mut columns);
+
+        let key: Vec<&str> = columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(key, vec!["_id"]);
+    }
+
+    #[test]
+    fn flatten_document_turns_a_nested_object_into_dotted_paths() {
+        let doc = doc_from_json(serde_json::json!({
+            "address": {"city": "Hanoi", "zip": "100000"},
+        }));
+        let mut columns = Vec::new();
+
+        flatten_document("", &doc, &mut columns);
+
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["address.city", "address.zip"]);
+    }
+
+    #[test]
+    fn flatten_document_does_not_expand_array_elements() {
+        let doc = doc_from_json(serde_json::json!({"tags": ["a", "b", "c"]}));
+        let mut columns = Vec::new();
+
+        flatten_document("", &doc, &mut columns);
+
+        assert_eq!(
+            columns.len(),
+            1,
+            "one field for the array, not one per element"
+        );
+        assert_eq!(columns[0].name, "tags");
+        assert_eq!(columns[0].type_name, "Array");
     }
 
     use testcontainers_modules::mongo::Mongo;
@@ -477,6 +611,79 @@ mod tests {
             "schema was: {:?}",
             schema.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn list_schema_reports_the_fields_of_a_sampled_document() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada", "age": 36})"#)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        let names: Vec<&str> = users.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"_id"), "columns were: {names:?}");
+        assert!(names.contains(&"name"), "columns were: {names:?}");
+        assert!(names.contains(&"age"), "columns were: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn list_schema_marks_underscore_id_as_the_primary_key() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        let key: Vec<&str> = users
+            .columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(key, vec!["_id"]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_collection_reports_no_columns_rather_than_failing() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        // Creates the collection without inserting a document to sample.
+        driver
+            .database()
+            .unwrap()
+            .create_collection("empty")
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let empty = schema.iter().find(|s| s.name == "empty").unwrap();
+        assert!(empty.columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ping_succeeds_against_a_reachable_mongo() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+
+        assert!(driver.ping().await.is_ok());
     }
 
     #[tokio::test]

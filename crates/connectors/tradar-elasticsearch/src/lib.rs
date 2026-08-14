@@ -158,6 +158,17 @@ impl QueryDriver for ElasticsearchDriver {
         statements
     }
 
+    async fn ping(&self) -> anyhow::Result<()> {
+        let response = reqwest::get(format!("{}/", self.base_url)).await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "elasticsearch ping failed with status {}",
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let url = format!("{}/_cat/indices?format=json", self.base_url);
         let indices: Vec<serde_json::Value> = reqwest::get(&url).await?.json().await?;

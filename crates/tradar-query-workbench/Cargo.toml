@@ -7,7 +7,7 @@ edition = "2024"
 tradar-core = { path = "../tradar-core" }
 tradar-connector-api = { path = "../tradar-connector-api" }
 
-tokio = { version = "1", features = ["sync", "rt", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "rt-multi-thread", "time"] }
 ratatui = "0.30"
 crossterm = "0.29"
 async-trait = "0.1"
@@ -19,3 +19,4 @@ tree-sitter-highlight = "0.26.12"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

@@ -618,6 +618,17 @@ pub trait QueryDriver: Send + Sync {
     fn edit_source(&self, _query: &str) -> Option<String> {
         None
     }
+
+    /// A cheap round trip that only proves the connection still answers --
+    /// run periodically in the background (see `QueryEngine`) so a dropped
+    /// connection shows up in the UI before the user runs into it via a
+    /// failed query. `Ok(())` by default: a driver that doesn't override
+    /// this is assumed alive, same as every driver behaved before this
+    /// existed. Each real connector overrides it with its own cheapest
+    /// "are you there" call, since only the driver knows what that is.
+    async fn ping(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

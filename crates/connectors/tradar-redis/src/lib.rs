@@ -101,6 +101,15 @@ impl QueryDriver for RedisDriver {
         statements
     }
 
+    async fn ping(&self) -> anyhow::Result<()> {
+        let mut connection = self
+            .connection
+            .clone()
+            .expect("connect() must be called first");
+        let _: String = redis::cmd("PING").query_async(&mut connection).await?;
+        Ok(())
+    }
+
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let mut connection = self
             .connection

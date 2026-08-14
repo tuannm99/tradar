@@ -223,6 +223,7 @@ impl RootComponent {
                     tab,
                     outline: screen.map(|s| s.outline()).unwrap_or_default(),
                     error: screen.and_then(|s| s.outline_error()),
+                    alive: screen.and_then(|s| s.connection_alive()),
                 }
             })
             .collect()
@@ -1204,6 +1205,9 @@ mod tests {
         fn insert_text(&mut self, text: &str) {
             *self.inserted.borrow_mut() = text.to_string();
         }
+        fn connection_alive(&self) -> Option<bool> {
+            Some(true)
+        }
         fn draw(&mut self, _frame: &mut Frame, _area: Rect) {}
     }
 
@@ -1244,6 +1248,23 @@ mod tests {
         assert_eq!(connections.len(), 2);
         assert_eq!(connections[0].tab, Some(0), "open on tab 0");
         assert_eq!(connections[1].tab, None, "never connected");
+    }
+
+    #[test]
+    fn nav_connections_carries_the_open_screen_s_alive_status() {
+        let (root, _) = root_with_navigator();
+
+        let connections = root.nav_connections();
+
+        assert_eq!(
+            connections[0].alive,
+            Some(true),
+            "the open screen reports it"
+        );
+        assert_eq!(
+            connections[1].alive, None,
+            "nothing to be alive or dead without a tab"
+        );
     }
 
     #[test]

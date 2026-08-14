@@ -500,8 +500,22 @@ impl QueryEditorComponent {
         Line::from(spans)
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, connection_name: &str, focused: bool) {
-        let block = ui::panel(&format!("Query — {connection_name}"), focused);
+    pub fn draw(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        connection_name: &str,
+        focused: bool,
+        alive: bool,
+    ) {
+        let theme = theme();
+        let mut block = ui::panel(&format!("Query — {connection_name}"), focused);
+        if !alive {
+            // A dropped connection outranks focus for attention, so it
+            // overrides the usual focused/unfocused border color rather
+            // than competing with it.
+            block = block.border_style(Style::default().fg(theme.error));
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -532,7 +546,6 @@ impl QueryEditorComponent {
         frame.render_widget(Paragraph::new(Text::from(lines)), text_area);
 
         if inner.height > text_height {
-            let theme = theme();
             let (mode_label, mode_color) = match self.mode {
                 EditorMode::Normal => (" NORMAL ", theme.accent),
                 EditorMode::Insert => (" INSERT ", theme.warning),
@@ -544,19 +557,26 @@ impl QueryEditorComponent {
                 height: 1,
             };
             let position = format!(" {}:{} ", self.cursor_row + 1, self.cursor_col + 1);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        mode_label,
-                        Style::default()
-                            .bg(mode_color)
-                            .fg(theme.status_bar_bg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(position, Style::default().fg(theme.text_dim)),
-                ])),
-                mode_area,
-            );
+            let mut spans = vec![
+                Span::styled(
+                    mode_label,
+                    Style::default()
+                        .bg(mode_color)
+                        .fg(theme.status_bar_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(position, Style::default().fg(theme.text_dim)),
+            ];
+            if !alive {
+                spans.push(Span::styled(
+                    " ● disconnected ",
+                    Style::default()
+                        .bg(theme.error)
+                        .fg(theme.status_bar_bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), mode_area);
         }
     }
 }
@@ -925,7 +945,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "local-sqlite", true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "local-sqlite", true, true))
             .unwrap();
 
         let text = buffer_text(terminal.backend().buffer());
@@ -940,17 +960,39 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("NORMAL"), "buffer was: {text}");
 
         editor.forward_key(key(KeyCode::Char('i')));
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("INSERT"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn a_dead_connection_is_called_out_and_a_live_one_is_quiet() {
+        let mut editor = QueryEditorComponent::new();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            !text.contains("disconnected"),
+            "a live connection should not clutter the status line: {text}"
+        );
+
+        terminal
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, false))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("disconnected"), "buffer was: {text}");
     }
 
     #[test]
@@ -967,7 +1009,7 @@ mod tests {
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 20, 8), "x", true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 20, 8), "x", true, true))
             .unwrap();
 
         let text = buffer_text(terminal.backend().buffer());

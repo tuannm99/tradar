@@ -59,12 +59,15 @@ pub trait QueryDriver: Send + Sync {
     fn export_curl(&self, _query: &str) -> Option<String> { None }
     fn edit_source(&self, _query: &str) -> Option<String> { None }
     fn edit_sql(&self, _edit: &RowEdit) -> Option<String> { None }
+    async fn ping(&self) -> anyhow::Result<()> { Ok(()) }
 }
 ```
 
 `edit_source`/`edit_sql` (thêm 2026-08-14) là cặp method đứng sau việc **sửa cell / xoá dòng ngay trên bảng kết quả**. Cùng một lý do như `export_curl`: chỉ driver mới biết cú pháp của chính nó, nên `tradar-query-workbench` không bao giờ tự viết câu SQL. `edit_source(query)` trả về tên bảng mà một result đọc từ đó (`None` = không xác định được ⇒ bảng kết quả ở chế độ chỉ đọc); `edit_sql(&RowEdit)` trả về câu lệnh thực hiện thay đổi. Hai connector SQL cùng uỷ quyền cho `query_driver::single_table_source` và `query_driver::build_sql_edit` — được phép dùng chung vì cả hai đều phụ thuộc crate này, còn connector thì không được phụ thuộc lẫn nhau (đúng pattern của `returns_rows`/`SQL_KEYWORDS`/`split_sql_statements`). Mongo/Redis/Elasticsearch giữ mặc định `None`: reply của chúng không phải dòng của một bảng nào có thể địa chỉ hoá được.
 
 `RowEdit` mô tả thay đổi theo ngôn ngữ của *bảng đang nhìn* chứ không theo cú pháp của dialect nào: `{ table, key: Vec<(String, String)>, change: SetValue { column, value } | DeleteRow }`. `key` chính là khoá chính của dòng, lấy từ `SchemaInfo` — đây là lý do `ColumnInfo` có thêm field `primary_key`. Không có khoá chính thì không có mệnh đề `WHERE` nào chỉ đúng một dòng, và một câu lệnh có thể chạm nhiều dòng thì không được tự động chạy thay người dùng.
+
+`ping` (thêm 2026-08-15) là round trip rẻ nhất mà driver có để tự chứng minh còn sống — Postgres/SQLite `SELECT 1` qua pool, Mongo lệnh `ping`, Redis `PING`, Elasticsearch `GET /`. Mặc định `Ok(())` (coi như còn sống) là chủ đích: một driver không override thì hành xử y như trước khi method này tồn tại, không driver nào "tự nhiên" báo rớt kết nối. `QueryEngine::tick()` tự bắn `ping()` trong nền mỗi 15 giây (`PING_INTERVAL`, dùng `tokio::time::Instant` để test được bằng clock giả lập của `tokio::time::pause`), tối đa một lần gọi bay cùng lúc, và cập nhật `alive: bool` đọc qua `QueryEngine::alive()`. Đây là cách duy nhất TUI biết một connection rớt *trước khi* user chạy query vào nó và nhận lỗi — trước đây không có cách nào cả. `Component` có thêm `connection_alive() -> Option<bool>` (mặc định `None` — "không áp dụng", cho picker/overlay/mọi thứ không giữ connection riêng) để mang trạng thái đó từ `QueryEngine` (bên trong `tradar-query-workbench`) lên tới `QueryScreenComponent::draw` và tới navigator ở app shell — cùng contract "app chỉ chuyển tiếp, không hiểu nội dung" với `restore_state`/`outline`.
 
 `export_curl` thay cho `Action::ExportCurl` cũ (một variant trong enum dùng chung mà chỉ Elasticsearch implement, buộc `main.rs` phải special-case theo `DriverKind`) — mặc định `None` ("không hỗ trợ export"), chỉ `ElasticsearchDriver` (trong `tradar-elasticsearch`) override. Curl export giờ nằm gọn trong crate của riêng Elasticsearch (`QueryScreenComponent` chỉ gọi `self.engine.export_curl(query)`, không biết gì về ES) — mức cô lập cuối cùng đã đạt được, không còn "chờ bước 4" như ghi chú trước đây.
 
@@ -119,7 +122,8 @@ Walking skeleton v1 chạy được từ đầu đến cuối: `tradar` load cá
 Những phần còn mỏng/thiếu đáng chú ý:
 
 - ~~Chưa có màn hình "add connection" tương tác~~ — đã có từ 2026-08-14: `a`/`e`/`d` trong connection picker, form ở `crates/tradar-app/src/components/connection_form.rs`; xem `docs/backlog.md` mục 5.5.
-- `QueryDriver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng **navigator** (`crates/tradar-app/src/components/navigator.rs`) — một cây `connection → bảng → cột` phủ mọi connection đã lưu, không chỉ connection của tab hiện tại. Nó nằm ở app shell chứ không trong screen vì chỉ `RootComponent` biết có những connection nào khác và chúng đang mở ở tab nào; screen chỉ cung cấp dữ liệu qua `Component::outline()`.
+- `QueryDriver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng **navigator** (`crates/tradar-app/src/components/navigator.rs`) — một cây `connection → bảng → cột` phủ mọi connection đã lưu, không chỉ connection của tab hiện tại. Nó nằm ở app shell chứ không trong screen vì chỉ `RootComponent` biết có những connection nào khác và chúng đang mở ở tab nào; screen chỉ cung cấp dữ liệu qua `Component::outline()`. Cùng cách đó, `NavConnection.alive` (từ `Component::connection_alive()`) gắn `✗ disconnected` sau tên một connection đang mở tab mà ping nền vừa phát hiện rớt — xem `ping`/`connection_alive` ở mục "Trait `QueryDriver`" phía trên.
+- MongoDB (`list_schema`) suy ra field bằng cách đọc mẫu một document mỗi collection lúc connect — xem chi tiết và đánh đổi ở `docs/backlog.md` mục "Schema đọc được sâu hơn".
 - `config/` là module placeholder rỗng; cấu hình app ngoài file connections chưa tồn tại.
 
 ## Kiến trúc mục tiêu: connector pluggable

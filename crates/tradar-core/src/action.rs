@@ -102,6 +102,14 @@ pub trait Component {
     fn outline_error(&self) -> Option<String> {
         None
     }
+    /// Whether this screen's own connection is currently reachable. `None`
+    /// -- the default -- means "not applicable" (the connection picker, an
+    /// overlay, anything with no live connection of its own): the navigator
+    /// only draws a status marker for a screen that actually reports one.
+    /// A query screen reports its `QueryEngine`'s periodic ping result.
+    fn connection_alive(&self) -> Option<bool> {
+        None
+    }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect);
 }
