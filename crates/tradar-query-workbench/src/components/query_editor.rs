@@ -12,6 +12,8 @@
 //! `tradar_core::vim_list`, the same module every list-rendering component
 //! in the app shares.
 
+use std::collections::HashSet;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,7 +25,13 @@ use tradar_core::theme::theme;
 use tradar_core::ui;
 use tradar_core::vim_list;
 
+use crate::query_driver;
 use crate::sql_highlight;
+
+/// Width, in columns, of the fold-marker gutter (`▸ `/`▾ `) prepended to
+/// each line when the buffer has foldable statements (`Dialect::Sql` only
+/// -- Mongo/Redis/ES statements are one line each, nothing to fold).
+const FOLD_GUTTER_WIDTH: u16 = 2;
 
 /// What counts as part of a word for completion: identifier characters,
 /// plus `$` and `_` so Mongo's `$match` and `snake_case` names complete as
@@ -73,10 +81,20 @@ pub struct QueryEditorComponent {
     cursor_col: usize,
     pending_g: bool,
     pending_d: bool,
+    pending_z: bool,
     scroll: usize,
     visible_height: usize,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
+    /// Start lines (in `self.lines`) of statements currently folded --
+    /// see `foldable_ranges`. Keyed by line index rather than by statement
+    /// identity, so an edit that shifts lines above a fold can make the
+    /// entry silently stop matching a real statement start instead of
+    /// folding the wrong thing; re-folding after such an edit is a manual
+    /// `za` away. `checkpoint()` removes the entry for whatever statement
+    /// the cursor is in before any edit, so typing into a folded statement
+    /// always unfolds it first rather than hiding what was just typed.
+    folded: HashSet<usize>,
 }
 
 impl Default for QueryEditorComponent {
@@ -95,10 +113,12 @@ impl QueryEditorComponent {
             cursor_col: 0,
             pending_g: false,
             pending_d: false,
+            pending_z: false,
             scroll: 0,
             visible_height: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            folded: HashSet::new(),
         }
     }
 
@@ -139,11 +159,15 @@ impl QueryEditorComponent {
         self.mode = EditorMode::Normal;
         self.pending_g = false;
         self.pending_d = false;
+        self.pending_z = false;
         // A freshly loaded buffer (a file, a history entry, a restored
         // session) has no relationship to whatever was undoable before --
         // undoing into it would silently resurrect the previous query.
         self.undo_stack.clear();
         self.redo_stack.clear();
+        // Same reasoning: line indices in `folded` mean nothing against a
+        // buffer they weren't computed from.
+        self.folded.clear();
     }
 
     /// Scrolls the viewport by a wheel notch, moving the cursor with it so
@@ -185,6 +209,81 @@ impl QueryEditorComponent {
         self.clamp_col();
     }
 
+    /// Line ranges (`start..=end`, both inclusive) of top-level SQL
+    /// statements that span more than one line -- the only fold
+    /// candidates, since a one-line statement has nothing to hide. Empty
+    /// outside `Dialect::Sql`: folding needs a notion of "one statement",
+    /// which only SQL's `;`-delimited grammar gives this editor (Mongo's
+    /// `db.<coll>.<method>(...)`, Redis's one-command-per-line, and
+    /// Elasticsearch's `METHOD /path` + body are already one statement per
+    /// line each, so there'd be nothing to fold even if this ran for them).
+    /// Recomputed from the live buffer on every call, same tradeoff
+    /// `line_colors` already makes for tree-sitter highlighting -- cheap
+    /// for a query-sized buffer, and simpler than keeping a parallel
+    /// structure in sync with every edit.
+    fn foldable_ranges(&self) -> Vec<(usize, usize)> {
+        if self.dialect != Dialect::Sql {
+            return Vec::new();
+        }
+        let text = self.text();
+        query_driver::split_sql_statements(&text)
+            .into_iter()
+            .filter_map(|stmt| {
+                let start_line = Self::line_at_byte_offset(&text, stmt.start);
+                let last_byte = stmt.end.saturating_sub(1).max(stmt.start);
+                let end_line = Self::line_at_byte_offset(&text, last_byte);
+                (end_line > start_line).then_some((start_line, end_line))
+            })
+            .collect()
+    }
+
+    fn line_at_byte_offset(text: &str, offset: usize) -> usize {
+        text.as_bytes()[..offset.min(text.len())]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+    }
+
+    /// The folded range `row` falls inside, if `row` is one of its hidden
+    /// body lines (the header line itself doesn't count -- it's always
+    /// visible, so landing there is never a problem).
+    fn fold_containing(&self, row: usize) -> Option<(usize, usize)> {
+        self.foldable_ranges()
+            .into_iter()
+            .find(|&(start, end)| self.folded.contains(&start) && row > start && row <= end)
+    }
+
+    /// Every line index currently hidden by a fold -- a folded range's
+    /// header line stays visible (it's what shows the "N lines folded"
+    /// placeholder), only the lines after it disappear.
+    fn hidden_rows(&self) -> HashSet<usize> {
+        let mut hidden = HashSet::new();
+        for (start, end) in self.foldable_ranges() {
+            if self.folded.contains(&start) {
+                hidden.extend((start + 1)..=end);
+            }
+        }
+        hidden
+    }
+
+    /// `za`: toggle the fold for the statement the cursor is currently in.
+    /// A no-op if the cursor isn't inside a foldable (multi-line) statement.
+    fn toggle_fold(&mut self) {
+        let Some((start, _)) = self
+            .foldable_ranges()
+            .into_iter()
+            .find(|&(start, end)| (start..=end).contains(&self.cursor_row))
+        else {
+            return;
+        };
+        if self.folded.remove(&start) {
+            return;
+        }
+        self.folded.insert(start);
+        self.cursor_row = start;
+        self.clamp_col();
+    }
+
     /// The cursor's position as a byte offset into `text()` -- what
     /// "which statement am I in?" needs, since statements are reported as
     /// offsets into the whole buffer.
@@ -203,14 +302,29 @@ impl QueryEditorComponent {
     /// Where the cursor sits on screen, given the area the editor was last
     /// drawn into -- so a popup can be placed against it.
     pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {
+        let hidden = self.hidden_rows();
+        let visible: Vec<usize> = (0..self.lines.len())
+            .filter(|r| !hidden.contains(r))
+            .collect();
+        let cursor_idx = visible
+            .iter()
+            .position(|&r| r == self.cursor_row)
+            .unwrap_or(0);
+        let scroll_idx = visible.iter().position(|&r| r >= self.scroll).unwrap_or(0);
+        let gutter = if self.dialect == Dialect::Sql {
+            FOLD_GUTTER_WIDTH
+        } else {
+            0
+        };
         let x = area
             .x
             .saturating_add(1)
+            .saturating_add(gutter)
             .saturating_add(self.cursor_col as u16);
         let y = area
             .y
             .saturating_add(1)
-            .saturating_add(self.cursor_row.saturating_sub(self.scroll) as u16);
+            .saturating_add(cursor_idx.saturating_sub(scroll_idx) as u16);
         (x, y)
     }
 
@@ -243,6 +357,16 @@ impl QueryEditorComponent {
     /// than per keystroke, so an entire typing session collapses into a
     /// single undo step, the same as real vim's `i...Esc`.
     fn checkpoint(&mut self) {
+        // Editing a folded statement must not silently bury the new text
+        // under its still-collapsed body -- open it first so whatever gets
+        // typed next is visible.
+        if let Some((start, _)) = self
+            .foldable_ranges()
+            .into_iter()
+            .find(|&(start, end)| (start..=end).contains(&self.cursor_row))
+        {
+            self.folded.remove(&start);
+        }
         self.undo_stack.push(Snapshot {
             lines: self.lines.clone(),
             cursor_row: self.cursor_row,
@@ -288,8 +412,23 @@ impl QueryEditorComponent {
         self.clamp_col();
     }
 
+    /// Moves the cursor to `row`, but a folded statement's hidden body
+    /// lines aren't valid landing spots -- moving down into one jumps past
+    /// the whole fold to the line after it, moving up into one lands back
+    /// on the fold's header, so a fold behaves like a single line for
+    /// `j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u` (all of which funnel through
+    /// here) without the cursor ever sitting somewhere invisible.
     fn move_row_to(&mut self, row: usize) {
-        self.cursor_row = row.min(self.lines.len().saturating_sub(1));
+        let mut target = row.min(self.lines.len().saturating_sub(1));
+        let going_down = target >= self.cursor_row;
+        if let Some((start, end)) = self.fold_containing(target) {
+            target = if going_down {
+                (end + 1).min(self.lines.len().saturating_sub(1))
+            } else {
+                start
+            };
+        }
+        self.cursor_row = target;
         self.clamp_col();
     }
 
@@ -320,6 +459,16 @@ impl QueryEditorComponent {
             if code == KeyCode::Char('d') {
                 self.checkpoint();
                 self.delete_current_line();
+            }
+            return;
+        }
+
+        // `za` toggles the fold under the cursor -- real vim's binding for
+        // it, kept even though this editor has no other `z`-prefixed folds
+        // command (`zo`/`zc`/`zR`/`zM`...) so a vim user's first guess works.
+        if std::mem::take(&mut self.pending_z) {
+            if code == KeyCode::Char('a') {
+                self.toggle_fold();
             }
             return;
         }
@@ -385,6 +534,7 @@ impl QueryEditorComponent {
                 }
             }
             KeyCode::Char('d') => self.pending_d = true,
+            KeyCode::Char('z') => self.pending_z = true,
             // Real vim's redo key, `ctrl-r`, is already query-screen's
             // "open history" and is intercepted before it ever reaches
             // this editor (see `Context::QueryScreen` in
@@ -444,14 +594,24 @@ impl QueryEditorComponent {
         }
     }
 
-    fn scroll_into_view(&mut self) {
+    /// Adjusts `self.scroll` so the cursor's row stays on screen, counting
+    /// in *visible* rows rather than raw line indices -- a folded
+    /// statement's hidden body must not count toward "how far down the
+    /// cursor is", or the viewport would scroll as if those lines were
+    /// still taking up space. `visible` is every line index not currently
+    /// hidden by a fold, ascending; the caller (`draw`) already has it.
+    fn scroll_into_view(&mut self, visible: &[usize]) {
         if self.visible_height == 0 {
             return;
         }
-        if self.cursor_row < self.scroll {
+        let Some(cursor_idx) = visible.iter().position(|&r| r == self.cursor_row) else {
+            return;
+        };
+        let scroll_idx = visible.iter().position(|&r| r >= self.scroll).unwrap_or(0);
+        if cursor_idx < scroll_idx {
             self.scroll = self.cursor_row;
-        } else if self.cursor_row >= self.scroll + self.visible_height {
-            self.scroll = self.cursor_row + 1 - self.visible_height;
+        } else if cursor_idx >= scroll_idx + self.visible_height {
+            self.scroll = visible[cursor_idx + 1 - self.visible_height];
         }
     }
 
@@ -474,27 +634,51 @@ impl QueryEditorComponent {
         Some(result)
     }
 
-    fn render_line(&self, line: &[char], row: usize, colors: Option<&[Color]>) -> Line<'static> {
-        let mut spans: Vec<Span<'static>> = line
-            .iter()
-            .enumerate()
-            .map(|(col, &c)| {
-                let mut style = Style::default();
-                if let Some(color) = colors.and_then(|c| c.get(col)) {
-                    style = style.fg(*color);
-                }
-                if row == self.cursor_row && col == self.cursor_col {
-                    style = style.add_modifier(Modifier::REVERSED);
-                }
-                Span::styled(c.to_string(), style)
-            })
-            .collect();
+    /// `fold`, when `row` is the header line of a foldable statement, is
+    /// `(currently folded, hidden line count)` -- drives the gutter marker
+    /// (`▸` folded / `▾` open) and, when folded, the trailing "N lines
+    /// folded" summary. `None` for every other line, including inside
+    /// non-SQL buffers where there's nothing to fold.
+    fn render_line(
+        &self,
+        line: &[char],
+        row: usize,
+        colors: Option<&[Color]>,
+        fold: Option<(bool, usize)>,
+    ) -> Line<'static> {
+        let theme = theme();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if self.dialect == Dialect::Sql {
+            let marker = match fold {
+                Some((true, _)) => "▸ ",
+                Some((false, _)) => "▾ ",
+                None => "  ",
+            };
+            spans.push(Span::styled(marker, Style::default().fg(theme.text_dim)));
+        }
+        spans.extend(line.iter().enumerate().map(|(col, &c)| {
+            let mut style = Style::default();
+            if let Some(color) = colors.and_then(|c| c.get(col)) {
+                style = style.fg(*color);
+            }
+            if row == self.cursor_row && col == self.cursor_col {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Span::styled(c.to_string(), style)
+        }));
         if row == self.cursor_row && self.cursor_col >= line.len() {
             // Insert-mode cursor sitting just past the last character (or
             // on an empty line) -- still needs a visible cell.
             spans.push(Span::styled(
                 " ",
                 Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        }
+        if let Some((true, count)) = fold {
+            let plural = if count == 1 { "" } else { "s" };
+            spans.push(Span::styled(
+                format!(" ⋯ {count} line{plural} folded"),
+                Style::default().fg(theme.text_dim),
             ));
         }
         Line::from(spans)
@@ -522,19 +706,27 @@ impl QueryEditorComponent {
         // Reserve the last inner row for a mode indicator.
         let text_height = inner.height.saturating_sub(1);
         self.visible_height = text_height as usize;
-        self.scroll_into_view();
+
+        let fold_ranges = self.foldable_ranges();
+        let hidden = self.hidden_rows();
+        let visible: Vec<usize> = (0..self.lines.len())
+            .filter(|r| !hidden.contains(r))
+            .collect();
+        self.scroll_into_view(&visible);
+        let scroll_idx = visible.iter().position(|&r| r >= self.scroll).unwrap_or(0);
 
         let line_colors = self.line_colors();
-        let lines: Vec<Line> = self
-            .lines
+        let lines: Vec<Line> = visible
             .iter()
-            .skip(self.scroll)
+            .skip(scroll_idx)
             .take(text_height as usize)
-            .enumerate()
-            .map(|(i, line)| {
-                let row = self.scroll + i;
+            .map(|&row| {
                 let colors = line_colors.as_ref().map(|lc| lc[row].as_slice());
-                self.render_line(line, row, colors)
+                let fold = fold_ranges
+                    .iter()
+                    .find(|&&(start, _)| start == row)
+                    .map(|&(start, end)| (self.folded.contains(&start), end - start));
+                self.render_line(&self.lines[row], row, colors, fold)
             })
             .collect();
         let text_area = Rect {
@@ -1016,6 +1208,140 @@ mod tests {
         assert!(
             text.contains('9'),
             "last line (19) should be visible: {text}"
+        );
+    }
+
+    fn draw_text(editor: &mut QueryEditorComponent) -> String {
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 60, 10), "x", true, true))
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn za_folds_a_multi_line_statement_hiding_its_body_and_showing_a_count() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;\nSELECT 2;");
+
+        let text = draw_text(&mut editor);
+        assert!(text.contains("FROM users"), "starts unfolded: {text}");
+
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+        let text = draw_text(&mut editor);
+
+        assert!(
+            !text.contains("FROM users") && !text.contains("WHERE x"),
+            "folded body must not render: {text}"
+        );
+        assert!(text.contains("SELECT 1"), "header stays visible: {text}");
+        assert!(
+            text.contains("2 lines folded"),
+            "placeholder reports the hidden count: {text}"
+        );
+        assert!(
+            text.contains("SELECT 2"),
+            "the second, unfolded statement is unaffected: {text}"
+        );
+    }
+
+    #[test]
+    fn za_again_unfolds_it() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;\nSELECT 2;");
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        let text = draw_text(&mut editor);
+        assert!(text.contains("FROM users"), "unfolded again: {text}");
+        assert!(!text.contains("folded"), "no leftover placeholder: {text}");
+    }
+
+    #[test]
+    fn folding_a_single_line_statement_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1;");
+
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        let text = draw_text(&mut editor);
+        assert!(text.contains("SELECT 1"), "buffer: {text}");
+        assert!(!text.contains("folded"), "nothing to fold: {text}");
+    }
+
+    #[test]
+    fn folding_does_nothing_outside_the_sql_dialect() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("db.users.find({\nstatus: 'active'\n});\ndb.users.count();");
+
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        let text = draw_text(&mut editor);
+        assert!(
+            text.contains("status: 'active'"),
+            "plain-text buffers have no fold concept: {text}"
+        );
+    }
+
+    #[test]
+    fn moving_down_past_a_folded_statement_lands_after_it() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;\nSELECT 2;");
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        editor.forward_key(key(KeyCode::Char('j')));
+        editor.insert_at_cursor("X");
+
+        assert_eq!(
+            editor.text(),
+            "SELECT 1\nFROM users\nWHERE x = 1;\nXSELECT 2;",
+            "j from the fold header must skip its hidden body entirely"
+        );
+    }
+
+    #[test]
+    fn starting_to_edit_a_folded_statement_unfolds_it_first() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;\nSELECT 2;");
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        let text = draw_text(&mut editor);
+        assert!(
+            text.contains("FROM users"),
+            "typing into a folded statement must reveal it, not bury the new text: {text}"
+        );
+    }
+
+    #[test]
+    fn set_text_clears_folds_from_the_previous_buffer() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;");
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;");
+
+        let text = draw_text(&mut editor);
+        assert!(
+            text.contains("FROM users"),
+            "a freshly loaded buffer must not inherit stale fold state: {text}"
         );
     }
 }
