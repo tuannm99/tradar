@@ -984,6 +984,15 @@ impl Component for QueryScreenComponent {
         Some(self.engine.alive())
     }
 
+    fn status_hints(&self) -> Vec<ui::Hint> {
+        let mut hints = Vec::new();
+        hints.extend(ui::hint(Context::QueryScreen, Command::RunQuery, "run"));
+        hints.extend(ui::hint(Context::QueryScreen, Command::CycleFocus, "focus"));
+        hints.extend(ui::hint(Context::QueryScreen, Command::History, "history"));
+        hints.extend(ui::hint(Context::QueryScreen, Command::Back, "back"));
+        hints
+    }
+
     fn crud_snippet(&self, name: &str, op: tradar_core::action::CrudOp) -> Option<String> {
         self.engine.crud_snippet(name, op)
     }

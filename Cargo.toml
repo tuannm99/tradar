@@ -9,6 +9,9 @@ members = [
   "crates/connectors/tradar-elasticsearch",
   "crates/connectors/tradar-redis",
   "crates/connectors/tradar-mongo",
+  "crates/connectors/tradar-cassandra",
+  "crates/connectors/tradar-rabbitmq",
+  "crates/connectors/tradar-kafka",
   "crates/tradar-app",
 ]
 default-members = ["crates/tradar-app"]

@@ -61,6 +61,15 @@ pub enum Context {
     /// different here (fetch and show the key's value) than it does in
     /// `Navigator` (insert a name) or `Results` (edit a cell).
     Browse,
+    /// The RabbitMQ screen's own bindings (mode toggle, refresh, open,
+    /// publish) -- the first `Context` for a `Screen` that isn't
+    /// `QueryScreenComponent`. Combined with `List` for its sidebar
+    /// navigation the same way `QueryScreen` combines with `Editor`.
+    Rabbit,
+    /// The Kafka screen's own bindings (tail latest/earliest, pause
+    /// follow, publish) -- combined with `List` for its topic sidebar the
+    /// same way `Rabbit` is.
+    Kafka,
     /// Shared by every selectable list: the connection picker, the schema
     /// sidebar, the results pane, the history overlay, and the Redis browse
     /// sidebar.
@@ -83,6 +92,8 @@ impl Context {
             Self::Results => "results",
             Self::Editor => "editor",
             Self::Browse => "browse",
+            Self::Rabbit => "rabbit",
+            Self::Kafka => "kafka",
             Self::List => "list",
             Self::Prompt => "prompt",
             Self::Completion => "completion",
@@ -98,6 +109,8 @@ impl Context {
             "results" => Self::Results,
             "editor" => Self::Editor,
             "browse" => Self::Browse,
+            "rabbit" => Self::Rabbit,
+            "kafka" => Self::Kafka,
             "list" => Self::List,
             "prompt" => Self::Prompt,
             "completion" => Self::Completion,
@@ -106,7 +119,7 @@ impl Context {
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 10] {
+    pub fn all() -> [Self; 12] {
         [
             Self::Global,
             Self::Picker,
@@ -115,6 +128,8 @@ impl Context {
             Self::Results,
             Self::Editor,
             Self::Browse,
+            Self::Rabbit,
+            Self::Kafka,
             Self::List,
             Self::Prompt,
             Self::Completion,
@@ -184,6 +199,26 @@ pub enum Command {
     ToggleBrowseMode,
     /// Fetch and show the highlighted key's value in the browse sidebar.
     BrowseOpen,
+    /// Switch a RabbitMQ screen between its Queues and Exchanges sidebar.
+    ToggleRabbitMode,
+    /// Re-fetch the current sidebar list, and the selected queue's peeked
+    /// messages or exchange's bindings if one is open.
+    RabbitRefresh,
+    /// Peek the selected queue's messages, or list the selected exchange's
+    /// bindings, depending on the current mode.
+    RabbitOpen,
+    /// Open the publish compose panel.
+    RabbitPublish,
+    /// Re-fetch the topic list.
+    KafkaRefresh,
+    /// Tail the selected Kafka topic from the latest offset.
+    KafkaTailLatest,
+    /// Tail the selected Kafka topic from the earliest offset.
+    KafkaTailEarliest,
+    /// Pause/resume following new messages in the current tail.
+    KafkaPauseFollow,
+    /// Open the publish compose panel for the selected topic.
+    KafkaPublish,
     /// Insert a Create/Read/Update/Delete skeleton for the highlighted
     /// navigator entry into its tab's editor -- see
     /// `Component::crud_snippet`.
@@ -255,6 +290,15 @@ impl Command {
             Self::Collapse => "collapse",
             Self::ToggleBrowseMode => "toggle-browse-mode",
             Self::BrowseOpen => "browse-open",
+            Self::ToggleRabbitMode => "toggle-rabbit-mode",
+            Self::RabbitRefresh => "rabbit-refresh",
+            Self::RabbitOpen => "rabbit-open",
+            Self::RabbitPublish => "rabbit-publish",
+            Self::KafkaRefresh => "kafka-refresh",
+            Self::KafkaTailLatest => "kafka-tail-latest",
+            Self::KafkaTailEarliest => "kafka-tail-earliest",
+            Self::KafkaPauseFollow => "kafka-pause-follow",
+            Self::KafkaPublish => "kafka-publish",
             Self::CrudCreate => "crud-create",
             Self::CrudRead => "crud-read",
             Self::CrudUpdate => "crud-update",
@@ -282,7 +326,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 55] = [
+    const ALL: [Self; 64] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -318,6 +362,15 @@ impl Command {
         Self::Collapse,
         Self::ToggleBrowseMode,
         Self::BrowseOpen,
+        Self::ToggleRabbitMode,
+        Self::RabbitRefresh,
+        Self::RabbitOpen,
+        Self::RabbitPublish,
+        Self::KafkaRefresh,
+        Self::KafkaTailLatest,
+        Self::KafkaTailEarliest,
+        Self::KafkaPauseFollow,
+        Self::KafkaPublish,
         Self::CrudCreate,
         Self::CrudRead,
         Self::CrudUpdate,
@@ -378,6 +431,15 @@ impl Command {
             Self::Collapse => "Close the selected node",
             Self::ToggleBrowseMode => "Switch between Redis browse and console mode",
             Self::BrowseOpen => "Open the selected key",
+            Self::ToggleRabbitMode => "Switch between RabbitMQ Queues and Exchanges",
+            Self::RabbitRefresh => "Refresh the current list/selection",
+            Self::RabbitOpen => "Peek messages / show bindings for the selection",
+            Self::RabbitPublish => "Publish a message",
+            Self::KafkaRefresh => "Refresh the topic list",
+            Self::KafkaTailLatest => "Tail the selected topic from the latest offset",
+            Self::KafkaTailEarliest => "Tail the selected topic from the earliest offset",
+            Self::KafkaPauseFollow => "Pause/resume following new messages",
+            Self::KafkaPublish => "Publish a message to the selected topic",
             Self::CrudCreate => "Insert a Create snippet for the selected table",
             Self::CrudRead => "Insert a Read snippet for the selected table",
             Self::CrudUpdate => "Insert an Update snippet for the selected table",
@@ -552,6 +614,29 @@ impl Default for Keymap {
         bindings.insert(
             Context::Browse,
             parse_defaults(&[("enter", Command::BrowseOpen)]),
+        );
+        bindings.insert(
+            Context::Rabbit,
+            parse_defaults(&[
+                ("ctrl-g", Command::ToggleRabbitMode),
+                ("r", Command::RabbitRefresh),
+                ("enter", Command::RabbitOpen),
+                ("p", Command::RabbitPublish),
+                ("esc", Command::Back),
+                ("?", Command::Help),
+            ]),
+        );
+        bindings.insert(
+            Context::Kafka,
+            parse_defaults(&[
+                ("r", Command::KafkaRefresh),
+                ("enter", Command::KafkaTailLatest),
+                ("b", Command::KafkaTailEarliest),
+                ("space", Command::KafkaPauseFollow),
+                ("p", Command::KafkaPublish),
+                ("esc", Command::Back),
+                ("?", Command::Help),
+            ]),
         );
         bindings.insert(
             Context::Navigator,

@@ -40,9 +40,12 @@ test-unit: ## Tests that never touch Docker: core, connector-api, query-workbenc
 		--exclude tradar-postgres \
 		--exclude tradar-redis \
 		--exclude tradar-mongo \
-		--exclude tradar-elasticsearch
+		--exclude tradar-elasticsearch \
+		--exclude tradar-cassandra \
+		--exclude tradar-rabbitmq \
+		--exclude tradar-kafka
 
-test-docker: test-postgres test-redis test-mongo test-elasticsearch ## Every connector whose tests need a Docker daemon (testcontainers)
+test-docker: test-postgres test-redis test-mongo test-elasticsearch test-cassandra test-rabbitmq test-kafka ## Every connector whose tests need a Docker daemon (testcontainers)
 
 test-core: ## tradar-core only (keymap, storage, theme, config, ui, vim_list)
 	$(CARGO) test -p tradar-core --lib
@@ -70,6 +73,15 @@ test-mongo: ## tradar-mongo only -- needs Docker (testcontainers)
 
 test-elasticsearch: ## tradar-elasticsearch only -- needs Docker (testcontainers)
 	$(CARGO) test -p tradar-elasticsearch --lib
+
+test-cassandra: ## tradar-cassandra only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
+	$(CARGO) test -p tradar-cassandra --lib
+
+test-rabbitmq: ## tradar-rabbitmq only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
+	$(CARGO) test -p tradar-rabbitmq --lib
+
+test-kafka: ## tradar-kafka only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
+	$(CARGO) test -p tradar-kafka --lib
 
 # --- docker-compose (docker-compose.yml) ---
 # These are long-lived dev instances for manually running `tradar` against,

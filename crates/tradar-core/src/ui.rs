@@ -385,6 +385,8 @@ fn context_title(context: Context) -> &'static str {
         Context::Results => "Results pane (when focused)",
         Context::Editor => "Query editor (when focused)",
         Context::Browse => "Redis key browser (when focused)",
+        Context::Rabbit => "RabbitMQ screen",
+        Context::Kafka => "Kafka screen",
         Context::List => "Lists (connections, schema, results, history)",
         Context::Prompt => "Prompts and overlays",
         Context::Completion => "Autocomplete (while suggestions show)",

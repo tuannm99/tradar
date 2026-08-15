@@ -1,10 +1,10 @@
 # Architecture
 
-Tài liệu này gồm hai phần: kiến trúc đang triển khai hiện tại, và kiến trúc mục tiêu ban đầu (một Cargo workspace với pipeline `Connector → Session → Screen`) để các hệ thống không có hình dạng "query" — message broker, hệ thống watch/inspect trạng thái sống, v.v. — có thể được thêm vào mà không phải đổi hình dạng core code. **Cập nhật 2026-08-10: cả 4 bước migration đã xong** (bước 1: tách workspace, 2026-08-08; bước 2 + đầu bước 3: tách `tradar-query-workbench` + thu hẹp `Action` + thêm `Connector`/`Session`/`Capability`, 2026-08-09, gộp vì phụ thuộc vòng nhau; bước 4: tách 5 driver thành connector crate riêng + `SavedConnection.driver` sang `String` id + registry, 2026-08-10). Phần "Kiến trúc mục tiêu" bên dưới giờ mô tả đúng những gì đã dựng cho 5 connector dạng query hiện có; nó vẫn còn là "mục tiêu" đúng nghĩa cho các hệ thống không có hình dạng query (Kafka, Kubernetes, SSH, ...) — chưa có connector nào trong nhóm đó được thêm vào.
+Tài liệu này gồm hai phần: kiến trúc đang triển khai hiện tại, và kiến trúc mục tiêu ban đầu (một Cargo workspace với pipeline `Connector → Session → Screen`) để các hệ thống không có hình dạng "query" — message broker, hệ thống watch/inspect trạng thái sống, v.v. — có thể được thêm vào mà không phải đổi hình dạng core code. **Cập nhật 2026-08-10: cả 4 bước migration đã xong** (bước 1: tách workspace, 2026-08-08; bước 2 + đầu bước 3: tách `tradar-query-workbench` + thu hẹp `Action` + thêm `Connector`/`Session`/`Capability`, 2026-08-09, gộp vì phụ thuộc vòng nhau; bước 4: tách 5 driver thành connector crate riêng + `SavedConnection.driver` sang `String` id + registry, 2026-08-10). Phần "Kiến trúc mục tiêu" bên dưới giờ mô tả đúng những gì đã dựng cho 6 connector dạng query hiện có. **Cập nhật 2026-08-16**: hai connector đầu tiên trong nhóm không-phải-query — Kafka và RabbitMQ — đã được thêm vào, dùng đúng pipeline `Connector → Session → Screen` mô tả bên dưới (`KafkaScreen`/`RabbitScreen` là hai `Screen` đầu tiên không đi qua `tradar-query-workbench`). Kubernetes, SSH, Docker vẫn còn là "mục tiêu" đúng nghĩa — chưa có connector nào trong nhóm đó được thêm vào.
 
 ## Triển khai hiện tại
 
-Tradar là một Cargo workspace gồm mười crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới.
+Tradar là một Cargo workspace gồm mười hai crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới.
 
 ```
 Cargo.toml                    [workspace], default-members = ["crates/tradar-app"]
@@ -31,12 +31,15 @@ crates/
       components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/row_edit.rs/completion.rs/file_prompt.rs/file_picker.rs/history_picker.rs
                                   (struct state+draw thuần, do QueryScreenComponent compose và định tuyến phím tới, không tự implement Component)
   connectors/
-    tradar-postgres/  tradar-sqlite/  tradar-elasticsearch/  tradar-redis/  tradar-mongo/
+    tradar-postgres/  tradar-sqlite/  tradar-elasticsearch/  tradar-redis/  tradar-mongo/  tradar-cassandra/
       src/lib.rs               — mỗi crate: struct driver (private, implement QueryDriver) + struct XConnector (private, implement Connector)
                                     + `pub fn connector() -> Box<dyn Connector>` (constructor export duy nhất ra ngoài crate)
+    tradar-rabbitmq/  tradar-kafka/     — không phụ thuộc tradar-query-workbench (không có hình dạng query — xem "Kiến trúc mục tiêu" bên dưới)
+      src/lib.rs               — struct XSession (private, implement Session) + struct XConnector (private, implement Connector) + `pub fn connector()`
+      src/screen.rs            — struct XScreen (private, implement Component) — Screen tự viết, không dùng QueryScreenComponent
   tradar-app/                 [[bin]] name = "tradar"
     src/
-      main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 5 connector(); event loop:
+      main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 8 connector(); event loop:
                                     crossterm input -> Component actions -> spawn Connector::connect -> Session -> Screen
       components/
         mod.rs                — RootComponent: tabs: Vec<Tab> (mỗi Tab: ScreenSlot::ConnectionPicker | Active(Box<dyn Component>) + connection_picker riêng + title) + active_tab
@@ -44,7 +47,7 @@ crates/
         connection_form.rs    — ConnectionFormComponent: form 3 field cho add/edit, overlay trên picker
 ```
 
-`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`, cùng với `CONNECT_TIMEOUT`/`with_connect_timeout` — giới hạn thời gian mở kết nối mà **mọi** connector đều bọc qua, đặt chung một chỗ vì client bên dưới của mỗi backend bất đồng hoàn toàn về hành vi khi host không trả lời (sqlx có timeout riêng, `redis`/`mongodb` có default riêng, `reqwest` không có gì), mà TUI thì đứng im trong lúc connect nên treo lâu sẽ bị đọc là app hỏng. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 5 nhưng không chứa code driver nào.
+`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-api`, cùng với `CONNECT_TIMEOUT`/`with_connect_timeout` — giới hạn thời gian mở kết nối mà **mọi** connector đều bọc qua, đặt chung một chỗ vì client bên dưới của mỗi backend bất đồng hoàn toàn về hành vi khi host không trả lời (sqlx có timeout riêng, `redis`/`mongodb` có default riêng, `reqwest` không có gì), mà TUI thì đứng im trong lúc connect nên treo lâu sẽ bị đọc là app hỏng. Mỗi driver cụ thể sống trong crate connector riêng của nó dưới `crates/connectors/`; `tradar-app` phụ thuộc cả 8 (6 connector dạng query + Kafka + RabbitMQ) nhưng không chứa code driver nào.
 
 ### Trait `QueryDriver`
 
@@ -87,12 +90,18 @@ pub enum QueryResult {
 
 ### Phạm vi ngôn ngữ query theo từng driver
 
-Postgres và SQLite chấp nhận SQL tuỳ ý. Ba driver còn lại chỉ chấp nhận một tập con hẹp, có chủ đích, không phải toàn bộ ngôn ngữ query gốc:
+Postgres, SQLite, và Cassandra chấp nhận SQL/CQL tuỳ ý (dùng chung `SQL_KEYWORDS`/`split_sql_statements`/`build_crud_snippet` — cú pháp CQL đủ gần SQL để không cần bản riêng). Ba driver còn lại chỉ chấp nhận một tập con hẹp, có chủ đích, không phải toàn bộ ngôn ngữ query gốc:
 
 - **Elasticsearch**: mô phỏng theo Dev Tools console của Kibana, không phải client Search-only cố định. Dòng đầu là `METHOD /path` (vd `GET my-index/_search`); các dòng còn lại (nếu có) là JSON request body, gửi nguyên văn. Không có cấu hình auth/TLS client-cert, và mỗi lần chạy chỉ một request (không có script nhiều request). Toàn bộ JSON response được bọc thành một `Documents` một phần tử, không unwrap thành từng document theo hit. `Ctrl+Y` trên một kết nối Elasticsearch xuất request hiện tại thành lệnh `curl` ghi vào `./tradar-query.sh` (đường dẫn cố định, ghi đè mỗi lần export).
 - **Redis**: một dòng lệnh duy nhất, tách theo khoảng trắng (không hỗ trợ quoting/escaping), gửi qua `redis::cmd`. Chuyển đổi kết quả chỉ nhận biết kiểu cho `HGETALL` (→ JSON object) và `ZRANGE`/`ZREVRANGE ... WITHSCORES` (→ mảng object `{member, score}`); mọi lệnh khác dùng chuyển đổi RESP-to-JSON tổng quát. Không có pipelining, transaction (`MULTI`/`EXEC`), pub/sub, hay xử lý riêng cho stream (`XADD`/`XRANGE`).
   - **Key browser** (2026-08-15, mục 4 "Mở rộng UI theo mockup" trong `docs/backlog.md`): `QueryScreenComponent` (`tradar-query-workbench`) có thêm một `mode: ScreenMode { Browse, Console }`, `Some` sidebar (`browse: Option<BrowseSidebarComponent>`) chỉ khi `connection.driver == "redis"` — cùng cơ chế match-theo-driver-id đã dùng sẵn cho `Dialect::Sql`, không thêm `Capability` mới cho một tính năng chỉ một connector dùng. Mở connection Redis mặc định vào `Browse` (sidebar liệt kê mọi key kèm type, thay hoàn toàn layout editor/results bằng sidebar/results); `Ctrl+G` (`Command::ToggleBrowseMode`, context `query-screen`) chuyển sang `Console` — layout, editor, và mọi hành vi gõ lệnh tay giữ nguyên y hệt trước khi tính năng này tồn tại. `Enter` trên sidebar (`Context::Browse`, `Command::BrowseOpen`) gọi `QueryEngine::submit_browse` (song song với `submit_query`, không push `history`, cùng epoch/outcome channel) → `QueryDriver::browse_entry` — chỉ RedisDriver override (mặc định `bail!`). `browse_entry` tra `SchemaInfo.kind` (field mới, `None` ở bốn driver kia; RedisDriver điền qua `TYPE` mỗi key khi `list_schema` — giờ loop `SCAN` tới cursor 0 thay vì chỉ lấy batch đầu 100 key, cùng đánh đổi N round-trip đã chấp nhận với MongoDB's per-collection `find_one`) để chọn lệnh Redis đúng type (`GET`/`HGETALL`/`LRANGE key 0 -1`/`SMEMBERS`/`ZRANGE key 0 -1 WITHSCORES`), chạy qua `execute()` y hệt console mode, rồi reshape `Documents` JSON đó thành `QueryResult::Table` (field/value cho hash, index/value cho list, member cho set, member/score cho zset) — không đụng gì tới `execute()`/`shape_reply` nên console mode gõ tay các lệnh này vẫn ra `Documents` JSON như trước. Type ngoài 5 loại đã chọn (`stream`, ...) báo lỗi rõ ràng qua `results.set_error`, không có view riêng. Kết quả hiện thẳng trong `ResultsComponent` đã có sẵn — không sửa gì ở đó, vì `Table` là shape nó đã render từ trước; điều này cũng có nghĩa Redis vẫn read-only trong browse mode giống console mode (RedisDriver không override `edit_sql`/`edit_source`).
 - **MongoDB**: một parser tối giản cho đúng shape `db.<collection>.<method>(<json-args>)` — không phải JS engine thật. Hỗ trợ `find`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`. Không có method chaining (`.sort()`, `.limit()`), không có `$where`, không có bulk operation hay transaction; bất cứ gì ngoài shape này trả về lỗi "unsupported query".
+
+**Cassandra** (2026-08-15, `crates/connectors/tradar-cassandra`, mục 7 "Mở rộng UI theo mockup" trong `docs/backlog.md`) — connector thứ 6, xây qua crate `scylla` (thuần Rust, nói CQL binary protocol thật, tương thích cả Apache Cassandra lẫn ScyllaDB). Khác các driver dạng URI (Postgres/Mongo), `target` là một contact point trần `host:port` (vd `127.0.0.1:9042`) — `SessionBuilder::known_node` chỉ cần đúng vậy, và Cassandra không có một database mặc định để gộp vào chuỗi kết nối. `list_schema` duyệt **mọi keyspace không phải hệ thống** (`system_schema.tables`/`system_schema.columns`, lọc `keyspace_name` bắt đầu bằng `system`), đặt tên `SchemaInfo` dạng `<keyspace>.<table>` giống cách Postgres ghi `public.users` (tái dùng nguyên `quote_identifier` đã tách theo dấu `.`). Một cột là "khoá" (`ColumnInfo.primary_key`) nếu `kind` của nó là `partition_key` hoặc `clustering` — CQL không có một cờ "primary key" đơn cột như SQL, nhưng partition key + clustering column cùng nhau chính là thứ một `WHERE` cần để trỏ đúng một row, đúng khái niệm `primary_key` đã dùng cho SQL. `execute()` với một câu không trả rows (INSERT/UPDATE/DELETE/DDL) luôn báo `Affected { rows: 0 }` — không phải rút gọn, CQL wire protocol không có khái niệm affected-row count cho các câu đó (`Void` result không mang gì khác). Không có `in_transaction`/transaction control (giữ default `false` như Mongo/ES/Redis) — Cassandra không có `BEGIN`/`COMMIT`/`ROLLBACK` kiểu SQL. Không override `edit_sql`/`edit_source` (sửa cell trực tiếp trong grid) ở bản đầu — cú pháp `WHERE` cho CQL cần đủ partition key + clustering columns mà `build_sql_edit`/`single_table_source` hiện chưa phân biệt được với SQL chuẩn, để dành hơn là bịa ra câu sai. `testcontainers-modules` không có feature `cassandra` (đã xác nhận qua `cargo add --dry-run` trước khi viết test) nên integration test dùng `testcontainers::GenericImage` trực tiếp với wait-strategy tự viết (đợi log `"Starting listening for CQL clients"`) và `with_startup_timeout` nới ra 150s — ảnh JVM này thường mất 60-90s mới sẵn sàng, vượt timeout mặc định 60s của `testcontainers`.
+
+Hai điểm quan trọng phát hiện lúc root-cause integration test lúc đầu cứ timeout (đọc thẳng `system.local` qua `cqlsh` mới lộ ra, không phải do Docker chậm):
+- **`connect()` thành công không có nghĩa query thật cũng chạy được.** `scylla` chỉ dùng contact point cho control connection; mọi query thật đi qua một pool connection riêng, mở tới địa chỉ Cassandra tự quảng bá qua `system.local.rpc_address` — mặc định là IP nội bộ Docker bridge, không route được từ ngoài container. Bắt buộc set env `CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1` (cả `docker-compose.yml` lẫn container test qua `with_env_var`) cho setup single-node/dev; vì Cassandra luôn tự quảng bá đúng port nội bộ 9042 (không cấu hình port quảng bá riêng được), container test còn phải ép port host trùng 9042 (`with_mapped_port`, không dùng `with_exposed_port` ngẫu nhiên) — nên không chạy song song được với `docker compose up cassandra` đang chiếm cùng port.
+- **`SELECT` từ `system_schema.columns` không đảm bảo thứ tự dòng** — composite key có thể trả về sai thứ tự khai báo. `list_schema` phải lấy thêm cột `position` (0-based, tính riêng trong từng `kind`) và sort theo `(kind_rank, position)` trước khi build `ColumnInfo`.
 
 ### Keymap, theme và widget dùng chung
 
@@ -115,32 +124,32 @@ Hai bất biến của phần dispatch phím, cả hai đều có test hồi quy
 
 - Code trong mỗi crate connector (`crates/connectors/tradar-*`) chỉ implement `QueryDriver` (từ `tradar-query-workbench`) và `Connector`/`Session` (từ `tradar-connector-api`); struct driver/connector cụ thể không `pub` ra ngoài crate, chỉ `pub fn connector()` được export.
 - Code trong `tradar-query-workbench` (components, `query_engine`) chỉ phụ thuộc trait `QueryDriver` — không bao giờ phụ thuộc một connector crate cụ thể nào (thật ra không *thể* phụ thuộc — mỗi connector crate phụ thuộc `tradar-query-workbench`, không phải ngược lại, nên một cycle sẽ chặn ngay ở compile time nếu vi phạm).
-- `tradar-app/src/main.rs` là nơi duy nhất biết toàn bộ tập connector (hàm `registry()` gọi `connector()` của cả 5 crate) — không connector crate nào phụ thuộc connector crate khác hay phụ thuộc `tradar-app`.
+- `tradar-app/src/main.rs` là nơi duy nhất biết toàn bộ tập connector (hàm `registry()` gọi `connector()` của cả 8 crate) — không connector crate nào phụ thuộc connector crate khác hay phụ thuộc `tradar-app`.
 
 Thêm một database mới nghĩa là: tạo một crate connector mới dưới `crates/connectors/` implement `QueryDriver` + `Connector`/`Session` + export `connector()`, thêm một dòng dependency vào `tradar-app/Cargo.toml`, và một dòng trong `registry()`. Việc này không bao giờ được yêu cầu sửa `tradar-query-workbench`, `tradar-connector-api`, `tradar-core`, hay bất kỳ connector crate nào khác.
 
 ### Trạng thái hiện tại
 
-Walking skeleton v1 chạy được từ đầu đến cuối: `tradar` load các saved connection từ `storage`, dựng registry từ 5 connector crate, kết nối qua `Connector` tương ứng với connector id đã chọn (Postgres, SQLite, Elasticsearch, Redis, hoặc MongoDB, tất cả đều implement đầy đủ chạy được với backend thật), và chạy các query gõ vào query editor của `QueryScreenComponent` thông qua `QueryEngine`, render kết quả hoặc lỗi thật.
+Walking skeleton v1 chạy được từ đầu đến cuối: `tradar` load các saved connection từ `storage`, dựng registry từ 8 connector crate, kết nối qua `Connector` tương ứng với connector id đã chọn (Postgres, SQLite, Elasticsearch, Redis, MongoDB, Cassandra, RabbitMQ, hoặc Kafka, tất cả đều implement đầy đủ chạy được với backend thật). Sáu connector dạng query chạy query gõ vào query editor của `QueryScreenComponent` thông qua `QueryEngine`; Kafka/RabbitMQ browse/tail/publish qua `KafkaScreen`/`RabbitScreen` tự viết, không đi qua editor đó. Cả hai đường đều render kết quả hoặc lỗi thật.
 
 Những phần còn mỏng/thiếu đáng chú ý:
 
 - ~~Chưa có màn hình "add connection" tương tác~~ — đã có từ 2026-08-14: `a`/`e`/`d` trong connection picker, form ở `crates/tradar-app/src/components/connection_form.rs`; xem `docs/backlog.md` mục 5.5.
-- `QueryDriver::list_schema` đã implement và test cho cả năm driver, và đã nối vào TUI dưới dạng **navigator** (`crates/tradar-app/src/components/navigator.rs`) — một cây `connection → bảng → cột` phủ mọi connection đã lưu, không chỉ connection của tab hiện tại. Nó nằm ở app shell chứ không trong screen vì chỉ `RootComponent` biết có những connection nào khác và chúng đang mở ở tab nào; screen chỉ cung cấp dữ liệu qua `Component::outline()`. Cùng cách đó, `NavConnection.alive` (từ `Component::connection_alive()`) gắn `✗ disconnected` sau tên một connection đang mở tab mà ping nền vừa phát hiện rớt — xem `ping`/`connection_alive` ở mục "Trait `QueryDriver`" phía trên.
+- `QueryDriver::list_schema` đã implement và test cho cả sáu driver, và đã nối vào TUI dưới dạng **navigator** (`crates/tradar-app/src/components/navigator.rs`) — một cây `connection → bảng → cột` phủ mọi connection đã lưu, không chỉ connection của tab hiện tại. Nó nằm ở app shell chứ không trong screen vì chỉ `RootComponent` biết có những connection nào khác và chúng đang mở ở tab nào; screen chỉ cung cấp dữ liệu qua `Component::outline()`. Cùng cách đó, `NavConnection.alive` (từ `Component::connection_alive()`) gắn `✗ disconnected` sau tên một connection đang mở tab mà ping nền vừa phát hiện rớt — xem `ping`/`connection_alive` ở mục "Trait `QueryDriver`" phía trên.
 - MongoDB (`list_schema`) suy ra field bằng cách đọc mẫu một document mỗi collection lúc connect — xem chi tiết và đánh đổi ở `docs/backlog.md` mục "Schema đọc được sâu hơn".
 - `config/` là module placeholder rỗng; cấu hình app ngoài file connections chưa tồn tại.
 
 ## Kiến trúc mục tiêu: connector pluggable
 
-Cả năm driver hiện tại dùng chung một shape: `connect → list_schema → execute(query) -> Table | Documents`, được enforce bởi trait `QueryDriver` duy nhất và UI `QueryScreenComponent` duy nhất ở trên. Shape đó không khớp với các hệ thống Tradar dự định hỗ trợ tiếp theo — message broker (Kafka, RabbitMQ), hệ thống watch/inspect trạng thái sống (Kubernetes, Docker, Prometheus), và công cụ dạng remote-shell (SSH). Kafka/RabbitMQ không phải "gửi một chuỗi query, nhận về rows" — chúng là browse-topic/queue, tail message theo thời gian thực, publish một message. Cassandra (CQL) là ngoại lệ: nó khớp shape query nên có thể tái dùng UI hiện tại.
+Cả sáu driver dạng query dùng chung một shape: `connect → list_schema → execute(query) -> Table | Documents`, được enforce bởi trait `QueryDriver` duy nhất và UI `QueryScreenComponent` duy nhất ở trên. Shape đó không khớp với message broker — Kafka/RabbitMQ không phải "gửi một chuỗi query, nhận về rows" mà là browse-topic/queue, tail message theo thời gian thực, publish một message — hay các hệ thống watch/inspect trạng thái sống (Kubernetes, Docker, Prometheus) và công cụ dạng remote-shell (SSH) vẫn còn ở nhóm "chưa có connector nào". Cassandra (CQL) là ngoại lệ trong nhóm phi-query ban đầu: nó khớp shape query nên tái dùng được UI hiện tại luôn — đã làm xong (2026-08-15). Kafka và RabbitMQ thì không khớp shape query — mỗi cái tự viết `Session`/`Screen` riêng theo đúng phần "Kiến trúc mục tiêu" bên dưới — cũng đã làm xong (2026-08-16, xem `docs/backlog.md` mục "Mở rộng UI theo mockup").
 
-Phần sau định nghĩa shape mà toàn bộ 5 connector dạng query hiện có (Postgres, SQLite, Elasticsearch, Redis, MongoDB) đã được xây theo, và là shape các hệ thống không phải query (Kafka, Kubernetes, SSH, ...) sẽ được xây vào khi chúng thực sự được lên kế hoạch. Xem "Triển khai hiện tại" ở trên để biết layout thật hiện có.
+Phần sau định nghĩa shape mà toàn bộ 6 connector dạng query hiện có (Postgres, SQLite, Elasticsearch, Redis, MongoDB, Cassandra) đã được xây theo, và là shape Kafka/RabbitMQ đã dùng để tự viết `Session`/`Screen` riêng (giờ là ví dụ thật, không còn chỉ là đặc tả) — cũng là shape các hệ thống phi-query còn lại (Kubernetes, SSH, ...) sẽ được xây vào khi chúng thực sự được lên kế hoạch. Xem "Triển khai hiện tại" ở trên để biết layout thật hiện có.
 
 ### Các quyết định
 
 - **Pluggable = static/compile-time, không phải dynamic loading.** Không load `.so`/`.wasm`, không có hệ sinh thái plugin bên thứ ba. Mỗi connector là một Rust crate được compile thẳng vào binary `tradar`.
 - **Tách thành Cargo workspace, mỗi module một crate.** Spec v1 đã gác lại việc này cho tới khi có "một lý do thứ hai cụ thể"; việc thêm các connector có hình dạng khác hẳn (message queue, hệ thống watch-based) bên cạnh các connector dạng query hiện có chính là lý do đó. Workspace biến quy tắc cách ly thành một sự thật của dependency graph trong Cargo, không chỉ là quy ước ghi bằng comment.
-- **Mỗi connector sở hữu Screen riêng của nó**, không dùng chung shape query-editor. Các connector *có hình dạng query* (SQL, Mongo, ES, Redis, Cassandra sau này) vẫn dùng chung một crate UI để không phải tự implement lại.
+- **Mỗi connector sở hữu Screen riêng của nó**, không dùng chung shape query-editor. Các connector *có hình dạng query* (SQL, Mongo, ES, Redis, Cassandra) vẫn dùng chung một crate UI để không phải tự implement lại.
 - **"Backend"/"Driver" đổi tên thành Connector** xuyên suốt (`PostgresConnector`, `KafkaConnector`, ...) — một database Postgres, một cluster Kafka, và một host SSH không phải "backend"/"driver" theo bất kỳ nghĩa chung nào mà cái tên cũ nắm bắt được.
 - **Kết nối và dựng UI là hai việc khác nhau, do hai kiểu khác nhau đảm nhiệm:** một `Connector` tạo ra một `Session`; một `Session` tạo ra một `Screen`.
 
@@ -161,7 +170,7 @@ crates/
   tradar-app/ (binary crate)     — main.rs (registry + event loop), RootComponent, ConnectionPickerComponent
 ```
 
-Toàn bộ layout trên đã dựng đúng như mô tả kể từ 2026-08-10. `tradar-query-workbench` là bản chuyển gần như nguyên khối từ `components/query_screen.rs` et al. trước migration -- một vài chỗ đổi hình dạng cho khớp `Session`, xem "Sai khác khi triển khai thật" ở mục "Screen không bao giờ làm IO" bên dưới. Nhóm connector tương lai (`tradar-kafka/`, ...) vẫn chưa tồn tại — chưa có hệ thống không-phải-query nào được lên kế hoạch cụ thể.
+Toàn bộ layout trên đã dựng đúng như mô tả kể từ 2026-08-10. `tradar-query-workbench` là bản chuyển gần như nguyên khối từ `components/query_screen.rs` et al. trước migration -- một vài chỗ đổi hình dạng cho khớp `Session`, xem "Sai khác khi triển khai thật" ở mục "Screen không bao giờ làm IO" bên dưới. **Cập nhật 2026-08-16**: `tradar-kafka/` và `tradar-rabbitmq/` giờ tồn tại thật — hai connector phi-query đầu tiên, `KafkaSession`/`RabbitSession` là hai `impl Session` đầu tiên ngoài `QueryEngine`. Các hệ thống phi-query còn lại (Kubernetes, SSH, Docker, ...) vẫn chưa được lên kế hoạch cụ thể.
 
 `tradar-query-workbench` đặt tên là "workbench", không phải "ui" — nó gói cả editor, execution, và history cho các connector dạng query, không chỉ là widget.
 
@@ -172,7 +181,7 @@ Hướng phụ thuộc, được Cargo enforce (không chỉ là quy ước):
 - `tradar-core` không phụ thuộc gì trong workspace.
 - `tradar-connector-api` phụ thuộc `tradar-core` (cho `SavedConnection`, `Action`, `Component`).
 - `tradar-query-workbench` phụ thuộc `tradar-core` và `tradar-connector-api`.
-- Mỗi connector crate luôn phụ thuộc `tradar-connector-api`, và phụ thuộc `tradar-query-workbench` chỉ khi nó có hình dạng query (Postgres, SQLite, Mongo, Elasticsearch, Redis hiện tại; Cassandra sau này). Kafka, RabbitMQ, và các connector không phải dạng query khác chỉ phụ thuộc `tradar-connector-api`/`tradar-core` và tự dựng `Session`/`Component` implementation riêng.
+- Mỗi connector crate luôn phụ thuộc `tradar-connector-api`, và phụ thuộc `tradar-query-workbench` chỉ khi nó có hình dạng query (Postgres, SQLite, Mongo, Elasticsearch, Redis, Cassandra). Kafka, RabbitMQ, và các connector không phải dạng query khác chỉ phụ thuộc `tradar-connector-api`/`tradar-core` và tự dựng `Session`/`Component` implementation riêng.
 - `tradar-app` là crate duy nhất phụ thuộc mọi connector crate. Không connector crate nào phụ thuộc connector crate khác, và không connector crate nào phụ thuộc `tradar-app`.
 
 Hướng dẫn không ràng buộc: khi một connector crate lớn hơn phạm vi connection setup + execution + schema listing (completion, formatting, explain plan), tách nội bộ thành các submodule `client/`, `executor/`, `metadata/`. Chỉ làm việc này khi crate thực sự vượt quá độ rõ ràng của một file — không dựng sẵn khung bây giờ.
@@ -189,39 +198,57 @@ pub trait Connector: Send + Sync {
 pub trait Session: Send + Sync {
     /// Rút hết message từ channel nội bộ mà các background task của session này
     /// báo về, cập nhật state của chính nó. Có giới hạn mỗi lần gọi — xem
-    /// "Screen never does IO" bên dưới.
-    fn tick(&mut self);
+    /// "Screen never does IO" bên dưới. Trả về true nếu có gì đổi (cần vẽ lại).
+    fn tick(&mut self) -> bool;
 
-    fn build_screen(self: Box<Self>, action_tx: UnboundedSender<Action>) -> Box<dyn Component>;
+    /// `restore` là những gì `Component::restore_state` của screen này trả
+    /// về lúc app tắt lần trước — `None` khi connect mới.
+    fn build_screen(
+        self: Box<Self>,
+        action_tx: UnboundedSender<Action>,
+        restore: Option<&str>,
+    ) -> Box<dyn Component>;
 }
 ```
 
+**Cập nhật 2026-08-16**: chữ ký thật (`crates/tradar-connector-api/src/lib.rs`) đã lệch khỏi bản đặc tả gốc theo hai chỗ trên — `tick()` trả `bool` thay vì `()` (để event loop bỏ qua vẽ lại khi không có gì đổi) và `build_screen` nhận thêm `restore: Option<&str>` (khớp `Component::restore_state`, không có trong đặc tả gốc vì lúc đó chưa tính khôi phục session qua restart). Khối code trên đã cập nhật theo code thật.
+
 - **Connector**: factory gần như stateless. Nhận một `SavedConnection`, tạo ra một `Session`. Là giai đoạn duy nhất làm handshake ban đầu (mở kết nối TCP, xác thực, ping).
-- **Session**: actor sống lâu dài. Sở hữu mọi thứ chạm vào IO hoặc tồn tại lâu hơn một khung render — connection/client handle, mọi background task nó spawn, một channel nội bộ để các task đó báo kết quả về, và cache (schema, topic metadata, mapping info). Một `KafkaSession` sở hữu consumer, producer, và offset tracking của nó; một `MongoSession` sở hữu client và collection cache của nó. **`Session` là thứ duy nhất trong pipeline này được phép spawn task hoặc sở hữu channel.**
+- **Session**: actor sống lâu dài. Sở hữu mọi thứ chạm vào IO hoặc tồn tại lâu hơn một khung render — connection/client handle, mọi background task nó spawn, một channel nội bộ để các task đó báo kết quả về, và cache (schema, topic metadata, mapping info). `KafkaSession` sở hữu producer, metadata client, và task tail (một `StreamConsumer` riêng mỗi lần tail) của nó; `RabbitSession` sở hữu `reqwest::Client` và cache queue/exchange/message của nó. **`Session` là thứ duy nhất trong pipeline này được phép spawn task hoặc sở hữu channel.**
 - **Screen**: cái mà `RootComponent` thực sự giữ và route phím/draw tới — một giá trị implement `Component`. Nó đọc state của `Session` để render, và biến key event thành lời gọi command đồng bộ trên `Session` (vd `session.submit_query(text)`, `session.publish(topic, payload)`). Nó không bao giờ chạm socket, file, hay `tokio::spawn` trực tiếp.
 
-Connector dạng query: `QueryEngine` (trong `tradar-query-workbench`) implement `Session` — `tick()` của nó rút các reply query-completion, `build_screen()` của nó trả về `QueryScreenComponent`. Đây là một cú fit không cần đổi tên; `QueryEngine` đã đóng vai trò này rồi, chỉ cần gắn thêm trait chính thức.
+Connector dạng query: `QueryEngine` (trong `tradar-query-workbench`) implement `Session` — `tick()` của nó rút các reply query-completion, `build_screen()` của nó trả về `QueryScreenComponent`. Connector phi-query (Kafka, RabbitMQ, từ 2026-08-16): `KafkaSession`/`RabbitSession` implement `Session` trực tiếp, `build_screen()` trả về `KafkaScreen`/`RabbitScreen` tự viết — hai `impl Session` đầu tiên ngoài `QueryEngine`, xác nhận pipeline này hoạt động đúng như đặc tả cho một shape hoàn toàn khác query.
 
-Không cần trait mới cho việc phân biệt Screen/Component/widget — nó chỉ đặt tên cho một pattern code đã dùng sẵn. `QueryScreenComponent` là một Screen (implement `Component`), nhưng bên trong compose `query_editor.rs`, `results.rs`, và `row_edit.rs`, không cái nào tự implement `Component` — chỉ là struct state+draw thuần mà screen sở hữu và gọi trực tiếp. Mọi connector tương lai theo cùng pattern: `KafkaScreen` implement `Component` và compose các struct thuần `TopicList`/`MessageTable`/`Header` tuỳ ý.
+Không cần trait mới cho việc phân biệt Screen/Component/widget — nó chỉ đặt tên cho một pattern code đã dùng sẵn. `QueryScreenComponent` là một Screen (implement `Component`), nhưng bên trong compose `query_editor.rs`, `results.rs`, và `row_edit.rs`, không cái nào tự implement `Component` — chỉ là struct state+draw thuần mà screen sở hữu và gọi trực tiếp. `KafkaScreen`/`RabbitScreen` theo cùng pattern: chỉ 1 file (`screen.rs`) mỗi cái, không tách widget con riêng vì sidebar+panel chính đủ đơn giản để giữ thẳng trong struct Screen (không có compose sâu như query editor).
 
 ### Screen không bao giờ làm IO — Session là actor
 
 Một Screen không bao giờ được gọi `tokio::spawn` hay sở hữu channel trực tiếp. Nếu làm vậy, code UI của mỗi connector sẽ bị đan xen với IO/business logic của nó — đúng kiểu coupling mà quy tắc cách ly driver tồn tại để ngăn, chỉ là bị đẩy lên một layer cao hơn.
 
-1. Một phím bấm hoặc lời gọi `update()` trên Screen biến thành một lời gọi method **đồng bộ** trên Session của nó (vd `self.session.submit_query(text)`), trả về ngay lập tức.
+1. Một phím bấm hoặc lời gọi `update()` trên Screen biến thành một lời gọi method **đồng bộ** trên Session của nó (vd `self.session.submit_query(text)`, `self.session.start_tail(topic, from_beginning)`), trả về ngay lập tức.
 2. Method đó của Session gọi `tokio::spawn` cho IO mà command cần, đưa cho task được spawn nửa `Sender` của một channel do Session sở hữu.
-3. Event loop gọi `Component::tick()` trên screen đang active mỗi vòng lặp (method mới của trait, mặc định no-op); `tick()` của Screen forward tới `self.session.tick()`.
-4. `Session::tick()` rút channel nội bộ của chính nó — **có giới hạn** (vd tối đa 64 message mỗi lần gọi) — cập nhật state của chính nó. Nó không bao giờ block.
+3. Event loop gọi `Component::tick()` trên screen đang active mỗi vòng lặp (mặc định trả `false`, không làm gì); `tick()` của Screen forward tới `self.session.tick()`.
+4. `Session::tick()` rút channel nội bộ của chính nó — **có giới hạn** (vd tối đa 64 message mỗi lần gọi) — cập nhật state của chính nó, trả `bool` báo có gì đổi. Nó không bao giờ block.
 5. Lời gọi `draw()` tiếp theo của Screen render bất cứ state nào Session đang giữ.
 
 ```rust
 pub trait Component {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action>;
+    fn handle_mouse_event(&mut self, _event: MouseEvent) -> Option<Action> { None }
     fn update(&mut self, action: Action) -> Option<Action>;
-    fn tick(&mut self) {}
+    fn tick(&mut self) -> bool { false }
+    fn restore_state(&self) -> Option<String> { None }
+    fn outline(&self) -> Vec<OutlineEntry> { Vec::new() }
+    fn insert_text(&mut self, _text: &str) {}
+    fn crud_snippet(&self, _name: &str, _op: CrudOp) -> Option<String> { None }
+    fn outline_error(&self) -> Option<String> { None }
+    fn connection_alive(&self) -> Option<bool> { None }
+    fn status_hints(&self) -> Vec<crate::ui::Hint> { Vec::new() }
     fn draw(&mut self, frame: &mut Frame, area: Rect);
 }
 ```
+
+**Cập nhật 2026-08-16**: đây là chữ ký thật (`crates/tradar-core/src/action.rs`) — lớn hơn nhiều bản đặc tả gốc chỉ có 4 method, vì các đợt việc UI trước (navigator, CRUD snippet, connection-alive badge, help overlay) mỗi lần đều thêm 1 method mới **có default**, không đổi method nào đã có. Chỉ `handle_key_event`/`update`/`draw` là bắt buộc — một Screen mới như `KafkaScreen`/`RabbitScreen` chỉ cần implement đúng 3 cái đó cộng `tick` (để forward `Session::tick()`) và bất kỳ default nào nó thực sự cần override (`connection_alive`, `status_hints`); `outline`/`insert_text` để mặc định vì sidebar riêng của chúng không tham gia cây navigator (xem "Thiết kế UI: Kafka và RabbitMQ" bên dưới). `status_hints()` (thêm 2026-08-16 cùng đợt Kafka/RabbitMQ) sửa một bug thật: thanh status bar trước đó hardcode hint của `QueryScreenComponent` cho mọi screen active — sai ngay khi `KafkaScreen`/`RabbitScreen` tồn tại, vì "f5 run" không có nghĩa gì ở đó. Giờ mỗi Screen tự khai hint của mình, `RootComponent` chỉ vẽ.
 
 Giới hạn này quan trọng khi một connector thực sự là một firehose — một Kafka consumer hàng nghìn message/giây, một Elasticsearch tail, một vòng scrape Prometheus. Một `while let Ok(msg) = rx.try_recv()` không giới hạn sẽ làm đói render; rút một số lượng cố định mỗi tick và để phần còn lại cho tick sau giữ UI phản hồi tốt bất kể throughput của producer — cùng kỹ thuật mà game engine và GUI framework (iced, egui) dùng cho event queue của chúng.
 
@@ -252,14 +279,14 @@ pub struct ConnectorDescriptor {
 }
 ```
 
-Cho phép một connection picker hay một screen suy luận về việc một connector *có thể làm gì* mà không hardcode danh tính của nó. Ví dụ: Postgres/SQLite khai `[Query, Schema, Explain, Export]`; Redis khai `[Query, Streaming]`; một Kafka tương lai sẽ khai `[Streaming, Publish, Tail]`. Chưa có gì dùng `Capability` — chưa có UI nào branch theo nó — nó được định nghĩa sẵn bây giờ vì retrofit sau khi đã có vài connector sẽ gây xáo trộn hơn nhiều so với định nghĩa shape từ đầu, và để chưa dùng thì không tốn gì cả.
+Cho phép một connection picker hay một screen suy luận về việc một connector *có thể làm gì* mà không hardcode danh tính của nó. Ví dụ: Postgres/SQLite khai `[Query, Schema, Explain, Export]`; Redis khai `[Query, Streaming]`; Kafka khai `[Streaming, Publish, Tail]`; RabbitMQ khai `[Schema, Publish]` (không có `Streaming`/`Tail` — Management HTTP API không có endpoint streaming, xem "Thiết kế UI: Kafka và RabbitMQ" bên dưới). Vẫn chưa có gì dùng `Capability` để branch UI — nó được định nghĩa sẵn từ đầu vì retrofit sau khi đã có vài connector sẽ gây xáo trộn hơn nhiều so với định nghĩa shape từ đầu, và để chưa dùng thì không tốn gì cả.
 
 ### Registry
 
 **Đã dựng (2026-08-10).** `SavedConnection.driver` (`tradar-core::storage`) là một `String` connector id (vd `"postgres"`, `"sqlite"`), không còn enum đóng `DriverKind` — file `connections.toml` trên đĩa không đổi format, vì `DriverKind` vốn đã serialize thành cùng chuỗi thường này (`#[serde(rename_all = "lowercase")]`).
 
 - Mỗi connector crate export đúng một hàm `pub fn connector() -> Box<dyn Connector>`, mọi thứ khác trong crate (struct driver, struct connector) không `pub`.
-- `crates/tradar-app/src/main.rs`'s `registry()` là nơi duy nhất biết toàn bộ tập connector: gọi `connector()` của cả 5 crate, dựng `HashMap<String, Box<dyn Connector>>` (key lấy từ `descriptor().id`) một lần lúc khởi động, bọc trong `Arc` để clone rẻ vào mỗi task connect. Thêm một connector nghĩa là thêm một dòng dependency trong `tradar-app/Cargo.toml` và một dòng trong `registry()` — không đổi `tradar-core`, `tradar-connector-api`, `tradar-query-workbench`, hay bất kỳ connector crate nào khác.
+- `crates/tradar-app/src/main.rs`'s `registry()` là nơi duy nhất biết toàn bộ tập connector: gọi `connector()` của cả 8 crate, dựng `HashMap<String, Box<dyn Connector>>` (key lấy từ `descriptor().id`) một lần lúc khởi động, bọc trong `Arc` để clone rẻ vào mỗi task connect. Thêm một connector nghĩa là thêm một dòng dependency trong `tradar-app/Cargo.toml` và một dòng trong `registry()` — không đổi `tradar-core`, `tradar-connector-api`, `tradar-query-workbench`, hay bất kỳ connector crate nào khác.
 - Một `connection.driver` id không match trong registry là lỗi runtime hiển thị cho người dùng qua `Action::OpenFailed` (`"unknown connector '{id}': not compiled into this build"`), không phải lỗi compile-time — kiểm tra trong `spawn_connect`.
 
 ### RootComponent và Action
@@ -337,9 +364,34 @@ Nêu ra trong lúc review thiết kế, chủ đích để ngoài shape mục ti
   - **AI service gắn vào editor** — xem lại khi tính năng AI cụ thể (completion, apply-patch, ...) được scope, hiện chưa có trong `docs/backlog.md`.
   - **Connector Kubernetes/Docker/SSH** — cùng nhóm với Kafka/RabbitMQ ở trên: hợp lý về mặt shape (`Connector`/`Session`/`Screen` đã tính tới các hệ thống không phải query), nhưng chưa có trong danh sách connector v1/planned; thêm vào danh sách connector tương lai khi thực sự được lên kế hoạch.
 
+### Thiết kế UI: Kafka và RabbitMQ (2026-08-16, đã code)
+
+Chốt 2 quyết định UX còn treo ở `docs/backlog.md` mục 5 và 6 (mockup Screen 7 có Kafka nhưng thiếu chi tiết tail-mode; RabbitMQ chưa có mockup screen riêng) thành shape cụ thể, dựa trên `Connector`/`Session`/`Screen` đã đặc tả ở trên. **Cả hai đã implement xong trong cùng ngày** (`crates/connectors/tradar-kafka`, `crates/connectors/tradar-rabbitmq`) — mục này giữ nguyên làm tài liệu thiết kế, chỉ đánh dấu chỗ nào implementation lệch khỏi bản thiết kế gốc.
+
+**Quy ước dùng chung cho cả hai**: mỗi Screen có sidebar bên trái (danh sách entity cấp 1 — topic/queue) + panel chính bên phải, và một phím toggle giữa 2 "mode" liên quan trong cùng connector — cùng ý tưởng `mode: ScreenMode{Browse,Console}` mà Redis đã lập cho `QueryScreenComponent`, áp dụng lại cho Screen non-query. Sidebar **không** tái dùng `navigator.rs`: contract của navigator là một cây `connection → table → column` đồng nhất qua mọi connector (`Component::outline()` giữ shell không biết "table" là gì); Kafka/RabbitMQ không có "column" theo nghĩa đó và có 2 loại entity cấp 1 khác nhau (topic vs queue/exchange), ép vào navigator sẽ buộc nó phải biết hình dạng riêng của từng connector — đúng thứ nó được thiết kế để tránh. Sidebar của Kafka/RabbitMQ là widget riêng do `KafkaScreen`/`RabbitScreen` sở hữu, giống cách `BrowseSidebarComponent` hiện do `QueryScreenComponent` sở hữu cho Redis.
+
+**Kafka** — Capability `[Streaming, Publish, Tail]` (đã liệt kê sẵn ở mục Capability trên).
+
+- Mode **Topics** (mode duy nhất trong v1 đã code — xem "Sai khác khi triển khai thật" ngay dưới): sidebar là danh sách topic (tên, số partition; `__` prefix — topic nội bộ của Kafka — bị lọc bỏ, giống cách bỏ `system*` keyspace của Cassandra). Panel chính là bảng message đang tail — cột partition/offset/key/value, dòng mới chèn cuối bảng và auto-scroll (kiểu `tail -f`/k9s log). `Enter` trên một topic bắt đầu tail từ latest offset; `b` tail từ earliest. `Space` pause/resume theo dõi — khi pause, `KafkaSession` vẫn nhận và giữ message trong buffer (không rớt, cap ở 500 message gần nhất — cũ hơn bị rớt để tránh leak trên topic chạy lâu), chỉ dừng auto-scroll UI (`paused_at_len: Option<usize>` đóng băng view ở độ dài buffer lúc pause). `r` refresh lại danh sách topic.
+- Publish: `p` mở compose panel nhỏ (input key tuỳ chọn + input value 1 dòng). `Enter` gửi ngay — khác quy ước "hiện lệnh rồi `y` mới chạy" của row-edit trong query-screen, vì quy ước đó dành cho *hành động phá huỷ tự sinh từ dữ liệu đang xem* (UPDATE/DELETE suy ra từ một row); publish là nhập liệu trực tiếp, không có gì để "xem trước" ngoài chính nội dung người dùng vừa gõ.
+- **Tail real-time, không phải poll**: `KafkaSession` sở hữu một task consumer chạy nền đẩy message qua channel nội bộ; `tick()` rút có giới hạn — đây chính là ví dụ firehose đã nêu ở "Screen không bao giờ làm IO" bên trên. Kiến trúc Session/tick vốn đã được thiết kế sẵn cho đúng use case này (bounded per-tick drain), nên poll theo interval chỉ là cùng cơ chế cộng thêm độ trễ, không đơn giản hơn. Verify tay: publish 1 message qua `kafka-console-producer` bên ngoài trong lúc đang tail trong app, message tự xuất hiện không cần thao tác gì.
+- Client library: **`rdkafka`** (binding `librdkafka`, C, feature `cmake-build` để tự build từ vendored source, cần `cmake`/`gcc`/`libcurl-dev` trên máy build). Phá tiền lệ "ưu tiên pure-Rust, tránh toolchain C" đã chọn cho Cassandra (`scylla` thay vì `cassandra-cpp`) — lý do: `kafka-protocol` (pure Rust, giữ đúng tiền lệ) chỉ là tầng protocol thấp, phải tự dựng lại toàn bộ consumer-group join/sync/heartbeat state machine ở trên, tốn công không tương xứng với v1. Rủi ro build-time thật đã gặp lúc code: `cmake-build` cần header `curl/curl.h` (từ `libcurl4-openssl-dev`) dù cấu hình `WITH_CURL=0` — không có sẵn trên máy dev mặc định, phải cài thêm.
+- **Sai khác khi triển khai thật**: mode **Groups** (lag theo consumer group) trong thiết kế gốc bị **cắt khỏi v1** — lấy lag đúng nghĩa cần dựng 1 consumer tạm với `group.id` được chọn rồi gọi `committed()`, phức tạp hơn đáng kể so với phần còn lại. Ghi vào `docs/backlog.md` như fast-follow riêng, không chặn việc Topics mode chạy được đầu-cuối.
+
+**RabbitMQ** — Capability `[Schema, Publish]` (không có `Streaming`/`Tail` — xem lý do dưới).
+
+- Mode 1 **Queues** (mặc định): sidebar là danh sách queue trong vhost đang chọn (tên, ready/unacked/consumer count — lấy thẳng từ response Management API). Panel chính khi chọn 1 queue: bảng N message gần nhất — cột routing-key, exchange nguồn, redelivered, payload-preview. Không tự tail — phím `r` refresh 1 lần (xem lý do kỹ thuật dưới).
+- Mode 2 **Exchanges**: sidebar là danh sách exchange (tên, type: direct/fanout/topic/headers). Panel chính khi chọn 1 exchange: danh sách binding (queue đích, routing key/pattern).
+- Publish: `p` mở compose panel như Kafka (chọn exchange + routing key + payload), `Enter` gửi ngay — cùng lý do đã nêu ở Kafka.
+- **Quyết định kỹ thuật chốt (giải quyết câu hỏi treo "Management HTTP API vs AMQP")**: dùng **Management HTTP API** qua `reqwest` (đã là dependency sẵn có nhờ driver Elasticsearch, không thêm crate mới) cho mọi thao tác — browse (`GET /api/queues`, `/api/exchanges`, `/api/exchanges/{vhost}/{exchange}/bindings/source`), xem message không phá huỷ (`POST /api/queues/{vhost}/{queue}/get` với `ackmode: "ack_requeue_true"` — RabbitMQ ack rồi requeue lại ngay, message không rời queue thật nên peek nhiều lần vẫn an toàn), và publish (`POST /api/exchanges/{vhost}/{exchange}/publish`). Đánh đổi: Management API không có endpoint streaming, không thể tail real-time như Kafka — chỉ poll theo yêu cầu người dùng (phím `r`), đây là lý do `Capability` của RabbitMQ không có `Streaming`/`Tail`, khác Kafka. Một AMQP client thật (vd `lapin`) sẽ mở consume/tail liên tục thật — gác lại, xem lại nếu "peek theo yêu cầu" không đủ dùng trong thực tế.
+- `target` là một URL đầy đủ tới Management API, credentials trong userinfo, vhost là path segment đã percent-encode sẵn (vd `http://user:password@localhost:15672/%2f`, `%2f` là vhost mặc định `/`) — parse bằng `reqwest::Url::parse`, không thêm crate `url` riêng.
+- RabbitMQ 4.x deprecate queue non-durable/non-exclusive theo mặc định (`transient_nonexcl_queues`) — phát hiện lúc viết integration test (`PUT /api/queues` với `durable: false` bị 400), không phải bug của connector, chỉ là hành vi mới của broker cần biết khi tạo queue thử.
+
+**Non-goals của riêng thiết kế Kafka/RabbitMQ này** (ngoài các non-goal chung ở mục dưới): seek/reset consumer group offset (Kafka — cùng lý do mode Groups bị cắt khỏi v1); tạo/xoá queue, exchange, hay vhost (RabbitMQ — chỉ browse + publish, không quản trị); tail real-time cho RabbitMQ qua AMQP; bất kỳ UI branch nào theo `Capability` (giữ đúng non-goal chung đã có).
+
 ## Non-goals của kiến trúc mục tiêu
 
-- Implement Kafka, RabbitMQ, Cassandra, hay bất kỳ connector mới nào khác — tài liệu này chỉ định nghĩa shape để chúng được xây dựng vào.
+- Implement bất kỳ connector không phải dạng query nào khác ngoài Kafka/RabbitMQ — tài liệu này chỉ định nghĩa shape để chúng được xây dựng vào (Cassandra, Kafka, RabbitMQ đã làm xong, không còn thuộc nhóm này -- xem "Trạng thái hiện tại" ở trên). Kubernetes/SSH/Docker vẫn thuộc non-goal này.
 - Dynamic plugin loading (`.so`/`.wasm`, phân phối plugin bên thứ ba).
 - ~~Một UI "add connection" tương tác (vẫn sửa tay TOML).~~ Non-goal này chỉ áp dụng cho phạm vi migration connector pluggable; màn hình đó đã được làm sau, xem `docs/backlog.md` mục 5.5.
 - Bất kỳ UI nào thực sự branch theo `Capability` — enum và descriptor shape được định nghĩa sẵn bây giờ; việc dùng chúng là việc của tương lai.

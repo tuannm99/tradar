@@ -131,6 +131,16 @@ pub trait Component {
     fn connection_alive(&self) -> Option<bool> {
         None
     }
+    /// The key hints this screen wants in the app shell's bottom status
+    /// bar, alongside the always-present navigator/tab/help ones --
+    /// `RootComponent` used to hardcode `QueryScreenComponent`'s own
+    /// (run/focus/history/back) here for every active screen, which was
+    /// silently wrong the moment a non-query `Screen` (RabbitMQ, ...)
+    /// existed. Empty by default: a screen with nothing to hint just shows
+    /// the shared ones.
+    fn status_hints(&self) -> Vec<crate::ui::Hint> {
+        Vec::new()
+    }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect);
 }

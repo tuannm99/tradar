@@ -16,6 +16,9 @@ tradar-sqlite = { path = "../connectors/tradar-sqlite" }
 tradar-elasticsearch = { path = "../connectors/tradar-elasticsearch" }
 tradar-redis = { path = "../connectors/tradar-redis" }
 tradar-mongo = { path = "../connectors/tradar-mongo" }
+tradar-cassandra = { path = "../connectors/tradar-cassandra" }
+tradar-rabbitmq = { path = "../connectors/tradar-rabbitmq" }
+tradar-kafka = { path = "../connectors/tradar-kafka" }
 
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.30"

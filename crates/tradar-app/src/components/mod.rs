@@ -603,11 +603,8 @@ impl RootComponent {
         if on_picker {
             hints.extend(ui::hint(Context::Picker, Command::Open, "connect"));
             hints.extend(ui::hint(Context::List, Command::MoveDown, "move"));
-        } else {
-            hints.extend(ui::hint(Context::QueryScreen, Command::RunQuery, "run"));
-            hints.extend(ui::hint(Context::QueryScreen, Command::CycleFocus, "focus"));
-            hints.extend(ui::hint(Context::QueryScreen, Command::History, "history"));
-            hints.extend(ui::hint(Context::QueryScreen, Command::Back, "back"));
+        } else if let ScreenSlot::Active(screen) = &self.tabs[self.active_tab].screen {
+            hints.extend(screen.status_hints());
         }
         hints.extend(ui::hint(
             Context::Global,

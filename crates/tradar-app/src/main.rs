@@ -37,6 +37,9 @@ fn registry() -> HashMap<String, Box<dyn Connector>> {
         tradar_elasticsearch::connector(),
         tradar_redis::connector(),
         tradar_mongo::connector(),
+        tradar_cassandra::connector(),
+        tradar_rabbitmq::connector(),
+        tradar_kafka::connector(),
     ];
     connectors
         .into_iter()

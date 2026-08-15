@@ -112,7 +112,6 @@ services:
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: mydb
-
       CLICKHOUSE_USER: user
       CLICKHOUSE_PASSWORD: password
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1'
@@ -136,6 +135,13 @@ services:
       CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
       MAX_HEAP_SIZE: 512M
       HEAP_NEWSIZE: 128M
+      # Without this, Cassandra advertises its own Docker-bridge IP as the
+      # address clients should route real queries to (broadcast_rpc_address,
+      # separate from the control connection) -- unreachable from outside
+      # the container, so every query after the initial connect times out
+      # even though `connect` itself succeeds. Only correct for this
+      # single-node, host-port-mapped-1:1 dev setup.
+      CASSANDRA_BROADCAST_RPC_ADDRESS: 127.0.0.1
     ports:
       - '9042:9042'
     volumes:
