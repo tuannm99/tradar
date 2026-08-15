@@ -217,6 +217,48 @@ pub fn returns_rows(sql: &str) -> bool {
     )
 }
 
+/// What a statement's leading keyword says about transaction control.
+/// `None` for anything else, which just runs as a normal statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionControl {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+/// Whether `sql` is `BEGIN`/`START TRANSACTION`, `COMMIT`/`END`, or
+/// `ROLLBACK` -- same leading-keyword heuristic as `returns_rows`, and for
+/// the same reason: not a parser, just enough to tell these apart from an
+/// ordinary statement.
+///
+/// A SQL connector's `execute` routes these to its own held transaction
+/// instead of sending the literal text to the database, because the
+/// pool-per-query model every SQL connector otherwise uses can't honour
+/// them on its own -- a `BEGIN` run against one pooled connection says
+/// nothing about which connection the next statement happens to land on.
+/// `COMMIT`/`END` are the same command in Postgres; SQLite doesn't have
+/// `END` but accepts it as a no-op-if-absent match here regardless, same
+/// tradeoff `returns_rows` makes for keywords a given backend doesn't
+/// actually have.
+pub fn transaction_control(sql: &str) -> Option<TransactionControl> {
+    let normalized = strip_leading_comments(sql).to_ascii_lowercase();
+    // Unlike `returns_rows`'s equivalent split, `;` has to count as a
+    // delimiter too -- "BEGIN;" has nothing separating the keyword from the
+    // statement terminator, and `split_sql_statements` has usually already
+    // trimmed the `;` off by the time a driver sees this, but a bare
+    // one-statement buffer run without going through that first has not.
+    let first = normalized
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
+        .find(|word| !word.is_empty())
+        .unwrap_or_default();
+    match first {
+        "begin" | "start" => Some(TransactionControl::Begin),
+        "commit" | "end" => Some(TransactionControl::Commit),
+        "rollback" => Some(TransactionControl::Rollback),
+        _ => None,
+    }
+}
+
 /// Drops leading `--` line comments, `/* */` block comments and whitespace,
 /// so a commented-out header doesn't hide the statement's first keyword.
 fn strip_leading_comments(sql: &str) -> &str {
@@ -629,6 +671,16 @@ pub trait QueryDriver: Send + Sync {
     async fn ping(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Whether a transaction opened by a `BEGIN` (see `transaction_control`)
+    /// is still open -- what `auto-commit: ON/OFF` in the UI shows, derived
+    /// rather than tracked as separate mode: "off" just means "there is an
+    /// open transaction right now", exactly how `psql`'s own indicator
+    /// works. `false` by default; only the SQL connectors, which are the
+    /// only ones `transaction_control` means anything for, override it.
+    fn in_transaction(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -640,6 +692,49 @@ mod tests {
             .into_iter()
             .map(|s| s.text)
             .collect()
+    }
+
+    #[test]
+    fn transaction_control_recognizes_begin_commit_and_rollback() {
+        assert_eq!(
+            transaction_control("BEGIN;"),
+            Some(TransactionControl::Begin)
+        );
+        assert_eq!(
+            transaction_control("begin transaction"),
+            Some(TransactionControl::Begin)
+        );
+        assert_eq!(
+            transaction_control("START TRANSACTION"),
+            Some(TransactionControl::Begin)
+        );
+        assert_eq!(
+            transaction_control("COMMIT;"),
+            Some(TransactionControl::Commit)
+        );
+        assert_eq!(transaction_control("end"), Some(TransactionControl::Commit));
+        assert_eq!(
+            transaction_control("ROLLBACK"),
+            Some(TransactionControl::Rollback)
+        );
+    }
+
+    #[test]
+    fn transaction_control_ignores_an_ordinary_statement() {
+        assert_eq!(transaction_control("SELECT 1"), None);
+        assert_eq!(
+            transaction_control("INSERT INTO commit_log VALUES (1)"),
+            None,
+            "a table named after a keyword must not trip this up"
+        );
+    }
+
+    #[test]
+    fn transaction_control_sees_past_a_leading_comment() {
+        assert_eq!(
+            transaction_control("-- start a transaction\nBEGIN;"),
+            Some(TransactionControl::Begin)
+        );
     }
 
     #[test]

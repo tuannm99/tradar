@@ -691,6 +691,7 @@ impl QueryEditorComponent {
         connection_name: &str,
         focused: bool,
         alive: bool,
+        in_transaction: bool,
     ) {
         let theme = theme();
         let mut block = ui::panel(&format!("Query — {connection_name}"), focused);
@@ -764,6 +765,18 @@ impl QueryEditorComponent {
                     " ● disconnected ",
                     Style::default()
                         .bg(theme.error)
+                        .fg(theme.status_bar_bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            if in_transaction {
+                // Silent when there's nothing open, same "only speak up for
+                // the state that needs attention" rule as the disconnected
+                // badge above -- auto-commit ON is the default, quiet state.
+                spans.push(Span::styled(
+                    " transaction open (F8 commit / F9 rollback) ",
+                    Style::default()
+                        .bg(theme.warning)
                         .fg(theme.status_bar_bg)
                         .add_modifier(Modifier::BOLD),
                 ));
@@ -1137,7 +1150,16 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "local-sqlite", true, true))
+            .draw(|frame| {
+                editor.draw(
+                    frame,
+                    Rect::new(0, 0, 40, 10),
+                    "local-sqlite",
+                    true,
+                    true,
+                    false,
+                )
+            })
             .unwrap();
 
         let text = buffer_text(terminal.backend().buffer());
@@ -1152,14 +1174,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true, false))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("NORMAL"), "buffer was: {text}");
 
         editor.forward_key(key(KeyCode::Char('i')));
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true, false))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("INSERT"), "buffer was: {text}");
@@ -1172,7 +1194,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, true, false))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(
@@ -1181,10 +1203,34 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, false))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 40, 10), "x", true, false, false))
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("disconnected"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn an_open_transaction_is_called_out_and_auto_commit_is_quiet() {
+        let mut editor = QueryEditorComponent::new();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 60, 10), "x", true, true, false))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            !text.contains("transaction"),
+            "auto-commit is the default, quiet state: {text}"
+        );
+
+        terminal
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 60, 10), "x", true, true, true))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("transaction open"), "buffer was: {text}");
+        assert!(text.contains("F8"), "buffer was: {text}");
+        assert!(text.contains("F9"), "buffer was: {text}");
     }
 
     #[test]
@@ -1201,7 +1247,7 @@ mod tests {
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 20, 8), "x", true, true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 20, 8), "x", true, true, false))
             .unwrap();
 
         let text = buffer_text(terminal.backend().buffer());
@@ -1215,7 +1261,7 @@ mod tests {
         let backend = TestBackend::new(60, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 60, 10), "x", true, true))
+            .draw(|frame| editor.draw(frame, Rect::new(0, 0, 60, 10), "x", true, true, false))
             .unwrap();
         buffer_text(terminal.backend().buffer())
     }

@@ -3,10 +3,13 @@
 //! this crate is `pub`, so the driver's internals stay this crate's own
 //! business, not something the rest of the app can reach into.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
-use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
+use sqlx::{Column, Executor, Row, Sqlite, SqlitePool, Transaction, TypeInfo, ValueRef};
+use tokio::sync::Mutex;
 
 use tradar_connector_api::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
@@ -19,6 +22,17 @@ use tradar_query_workbench::query_engine::QueryEngine;
 struct SqliteDriver {
     path: String,
     pool: Option<SqlitePool>,
+    /// Held across `execute` calls between a `BEGIN` and its matching
+    /// `COMMIT`/`ROLLBACK` -- see `transaction_control`. `None` means every
+    /// statement runs straight against the pool and commits on its own,
+    /// same as before this existed.
+    transaction: Mutex<Option<Transaction<'static, Sqlite>>>,
+    /// Mirrors whether `transaction` is currently `Some`, readable without
+    /// locking it -- `QueryDriver::in_transaction` is a plain sync method
+    /// the UI calls every frame, and locking an async `Mutex` from there
+    /// would mean either blocking the draw or making the call async for
+    /// every other driver's sake.
+    in_transaction: AtomicBool,
 }
 
 impl SqliteDriver {
@@ -26,8 +40,89 @@ impl SqliteDriver {
         Self {
             path: path.to_string(),
             pool: None,
+            transaction: Mutex::new(None),
+            in_transaction: AtomicBool::new(false),
         }
     }
+
+    /// Handles a `BEGIN`/`COMMIT`/`ROLLBACK` statement by driving the held
+    /// transaction directly, rather than sending the literal text to
+    /// SQLite -- see `transaction_control`'s doc comment for why that
+    /// wouldn't work against a connection pool anyway. Idempotent: a
+    /// `BEGIN` while already in one, or a `COMMIT`/`ROLLBACK` with nothing
+    /// open, is a harmless no-op rather than an error -- the UI gates F8/F9
+    /// on `in_transaction()`, so a mismatch here means the grid is already
+    /// showing stale state, not that the user did anything wrong.
+    async fn handle_transaction_control(
+        &self,
+        control: query_driver::TransactionControl,
+    ) -> anyhow::Result<QueryResult> {
+        let pool = self.pool.as_ref().expect("connect() must be called first");
+        let mut guard = self.transaction.lock().await;
+        match control {
+            query_driver::TransactionControl::Begin => {
+                if guard.is_none() {
+                    *guard = Some(pool.begin().await?);
+                    self.in_transaction.store(true, Ordering::Relaxed);
+                }
+            }
+            query_driver::TransactionControl::Commit => {
+                if let Some(tx) = guard.take() {
+                    tx.commit().await?;
+                }
+                self.in_transaction.store(false, Ordering::Relaxed);
+            }
+            query_driver::TransactionControl::Rollback => {
+                if let Some(tx) = guard.take() {
+                    tx.rollback().await?;
+                }
+                self.in_transaction.store(false, Ordering::Relaxed);
+            }
+        }
+        Ok(QueryResult::Affected { rows: 0 })
+    }
+}
+
+/// The body of `execute`, generic over what it runs against -- the pool
+/// directly, or a held transaction when one is open. Identical either way
+/// from here down; only `execute` itself decides which `Executor` to pass.
+async fn run<'e, E>(executor: E, query: &str) -> anyhow::Result<QueryResult>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    // A write reports how many rows it changed; fetching it as a result
+    // set would just yield zero rows and look like a SELECT that matched
+    // nothing.
+    if !query_driver::returns_rows(query) {
+        let result = sqlx::query(query).execute(executor).await?;
+        return Ok(QueryResult::Affected {
+            rows: result.rows_affected(),
+        });
+    }
+
+    // Streamed and capped rather than `fetch_all`: the point is to never
+    // pull an unbounded result set into memory. One row past the cap is
+    // read purely to know whether there were more.
+    let mut stream = sqlx::query(query).fetch(executor);
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut truncated = false;
+    while let Some(row) = stream.try_next().await? {
+        if columns.is_empty() {
+            columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+        }
+        if rows.len() == query_driver::MAX_ROWS {
+            truncated = true;
+            break;
+        }
+        rows.push((0..row.len()).map(|i| stringify_column(&row, i)).collect());
+    }
+
+    Ok(QueryResult::Table {
+        columns,
+        rows,
+        truncated,
+    })
 }
 
 #[async_trait]
@@ -100,41 +195,25 @@ impl QueryDriver for SqliteDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
+        if let Some(control) = query_driver::transaction_control(query) {
+            return self.handle_transaction_control(control).await;
+        }
+
+        // A held transaction takes every statement until it's closed --
+        // the whole point is that they share one connection and see each
+        // other's uncommitted changes. Otherwise, straight to the pool,
+        // same as before transactions existed.
+        let mut guard = self.transaction.lock().await;
+        if let Some(tx) = guard.as_mut() {
+            return run(&mut **tx, query).await;
+        }
+        drop(guard);
         let pool = self.pool.as_ref().expect("connect() must be called first");
+        run(pool, query).await
+    }
 
-        // A write reports how many rows it changed; fetching it as a result
-        // set would just yield zero rows and look like a SELECT that
-        // matched nothing.
-        if !query_driver::returns_rows(query) {
-            let result = sqlx::query(query).execute(pool).await?;
-            return Ok(QueryResult::Affected {
-                rows: result.rows_affected(),
-            });
-        }
-
-        // Streamed and capped rather than `fetch_all`: the point is to
-        // never pull an unbounded result set into memory. One row past the
-        // cap is read purely to know whether there were more.
-        let mut stream = sqlx::query(query).fetch(pool);
-        let mut columns: Vec<String> = Vec::new();
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        let mut truncated = false;
-        while let Some(row) = stream.try_next().await? {
-            if columns.is_empty() {
-                columns = row.columns().iter().map(|c| c.name().to_string()).collect();
-            }
-            if rows.len() == query_driver::MAX_ROWS {
-                truncated = true;
-                break;
-            }
-            rows.push((0..row.len()).map(|i| stringify_column(&row, i)).collect());
-        }
-
-        Ok(QueryResult::Table {
-            columns,
-            rows,
-            truncated,
-        })
+    fn in_transaction(&self) -> bool {
+        self.in_transaction.load(Ordering::Relaxed)
     }
 }
 
@@ -184,6 +263,62 @@ pub fn connector() -> Box<dyn Connector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tradar_query_workbench::query_engine::QueryOutcome;
+
+    #[tokio::test]
+    async fn a_transaction_through_query_engine_does_not_get_stuck_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+        let driver: std::sync::Arc<dyn QueryDriver> = std::sync::Arc::new(driver);
+        let mut engine = QueryEngine::new(
+            driver,
+            SavedConnection {
+                name: "test".to_string(),
+                driver: "sqlite".to_string(),
+                target: path.to_str().unwrap().to_string(),
+            },
+            Ok(Vec::new()),
+        );
+
+        async fn settle(engine: &mut QueryEngine) {
+            for _ in 0..10_000 {
+                tokio::task::yield_now().await;
+                engine.tick();
+                if !engine.is_pending() {
+                    return;
+                }
+            }
+            panic!("query never settled");
+        }
+
+        engine.submit_query("BEGIN".to_string());
+        settle(&mut engine).await;
+        assert!(
+            !engine.is_pending(),
+            "BEGIN's outcome must be drained, not leave `pending` stuck"
+        );
+
+        engine.submit_query("INSERT INTO users VALUES (1)".to_string());
+        settle(&mut engine).await;
+        assert!(
+            !engine.is_pending(),
+            "the insert inside the transaction must also settle"
+        );
+        match engine.take_outcome() {
+            Some(QueryOutcome::Completed {
+                result: QueryResult::Affected { rows },
+            }) => assert_eq!(rows, 1, "the insert must report the row it actually added"),
+            Some(QueryOutcome::Completed { .. }) => panic!("expected an Affected result"),
+            Some(QueryOutcome::Failed { error }) => panic!("insert failed: {error}"),
+            None => panic!("no outcome to take"),
+        }
+    }
 
     #[tokio::test]
     async fn connect_succeeds_for_a_new_sqlite_file() {
@@ -396,6 +531,198 @@ mod tests {
             QueryResult::Table {
                 columns: vec!["id".to_string(), "name".to_string()],
                 rows: vec![vec!["1".to_string(), "Ada".to_string()]],
+                truncated: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_driver_is_not_in_a_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+
+        assert!(!driver.in_transaction());
+    }
+
+    #[tokio::test]
+    async fn begin_opens_a_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+
+        driver.execute("BEGIN").await.unwrap();
+
+        assert!(driver.in_transaction());
+    }
+
+    #[tokio::test]
+    async fn commit_closes_the_transaction_and_keeps_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+
+        driver.execute("BEGIN").await.unwrap();
+        driver
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap();
+        driver.execute("COMMIT").await.unwrap();
+
+        assert!(!driver.in_transaction());
+        let result = driver.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["id".to_string()],
+                rows: vec![vec!["1".to_string()]],
+                truncated: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_closes_the_transaction_and_discards_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+
+        driver.execute("BEGIN").await.unwrap();
+        driver
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap();
+        driver.execute("ROLLBACK").await.unwrap();
+
+        assert!(!driver.in_transaction());
+        let result = driver.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            result,
+            // Column names come from the first row streamed back; a select
+            // with nothing to return never sees one, same pre-existing
+            // behavior `a_select_that_matches_nothing_is_still_an_empty_table`
+            // already covers -- not something this change alters.
+            QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+                truncated: false,
+            },
+            "the insert must not have survived the rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_begin_while_already_in_a_transaction_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+        driver.execute("BEGIN").await.unwrap();
+        driver
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap();
+
+        // A second `BEGIN` must not open a fresh transaction and orphan the
+        // one already holding the uncommitted insert.
+        driver.execute("BEGIN").await.unwrap();
+        driver.execute("COMMIT").await.unwrap();
+
+        let result = driver.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["id".to_string()],
+                rows: vec![vec!["1".to_string()]],
+                truncated: false,
+            },
+            "the insert from before the second BEGIN must still have committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_with_nothing_open_is_a_harmless_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+
+        let result = driver.execute("COMMIT").await;
+
+        assert!(result.is_ok());
+        assert!(!driver.in_transaction());
+    }
+
+    #[tokio::test]
+    async fn rollback_with_nothing_open_is_a_harmless_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+
+        let result = driver.execute("ROLLBACK").await;
+
+        assert!(result.is_ok());
+        assert!(!driver.in_transaction());
+    }
+
+    #[tokio::test]
+    async fn an_uncommitted_insert_is_invisible_to_another_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut writer = SqliteDriver::new(path.to_str().unwrap());
+        writer.connect().await.unwrap();
+        writer
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+        let mut reader = SqliteDriver::new(path.to_str().unwrap());
+        reader.connect().await.unwrap();
+
+        writer.execute("BEGIN").await.unwrap();
+        writer
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap();
+
+        // The whole point of holding one connection for the transaction:
+        // a second, independent connection to the same file must not see
+        // the insert until it's committed.
+        let seen_before_commit = reader.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            seen_before_commit,
+            // No column names for a zero-row result -- see the comment in
+            // `rollback_closes_the_transaction_and_discards_the_change`.
+            QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+                truncated: false,
+            }
+        );
+
+        writer.execute("COMMIT").await.unwrap();
+        let seen_after_commit = reader.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            seen_after_commit,
+            QueryResult::Table {
+                columns: vec!["id".to_string()],
+                rows: vec![vec!["1".to_string()]],
                 truncated: false,
             }
         );

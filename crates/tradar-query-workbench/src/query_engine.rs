@@ -119,6 +119,12 @@ impl QueryEngine {
         self.alive
     }
 
+    /// Whether this driver currently holds an open transaction -- see
+    /// `QueryDriver::in_transaction`.
+    pub fn in_transaction(&self) -> bool {
+        self.driver.in_transaction()
+    }
+
     /// Fires a `ping()` in the background, unless one is already in flight.
     /// Guarded by `ping_in_flight` rather than firing unconditionally on
     /// every interval tick, so a slow or hanging backend can't pile up

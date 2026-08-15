@@ -123,6 +123,10 @@ pub enum Command {
     RunQuery,
     /// Abandon the query that's currently running.
     CancelQuery,
+    /// Commit the open transaction, if there is one -- a no-op otherwise.
+    Commit,
+    /// Roll back the open transaction, if there is one -- a no-op otherwise.
+    Rollback,
     /// Run every statement in the buffer, not just the one at the cursor.
     RunAll,
     CycleFocus,
@@ -186,6 +190,8 @@ impl Command {
             Self::Back => "back",
             Self::RunQuery => "run-query",
             Self::CancelQuery => "cancel-query",
+            Self::Commit => "commit",
+            Self::Rollback => "rollback",
             Self::RunAll => "run-all",
             Self::CycleFocus => "cycle-focus",
             Self::SaveFile => "save-file",
@@ -223,7 +229,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 43] = [
+    const ALL: [Self; 45] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -237,6 +243,8 @@ impl Command {
         Self::Back,
         Self::RunQuery,
         Self::CancelQuery,
+        Self::Commit,
+        Self::Rollback,
         Self::RunAll,
         Self::CycleFocus,
         Self::SaveFile,
@@ -285,6 +293,8 @@ impl Command {
             Self::Back => "Back to the connection picker",
             Self::RunQuery => "Run the statement at the cursor",
             Self::CancelQuery => "Cancel the running query",
+            Self::Commit => "Commit the open transaction",
+            Self::Rollback => "Roll back the open transaction",
             Self::RunAll => "Run every statement in the buffer",
             Self::CycleFocus => "Cycle focus: editor / results / schema",
             Self::SaveFile => "Save the query to a file",
@@ -454,6 +464,8 @@ impl Default for Keymap {
                 ("ctrl-enter", Command::RunQuery),
                 ("ctrl-c", Command::CancelQuery),
                 ("ctrl-a", Command::RunAll),
+                ("f8", Command::Commit),
+                ("f9", Command::Rollback),
                 ("tab", Command::CycleFocus),
                 ("ctrl-s", Command::SaveFile),
                 ("ctrl-o", Command::OpenFile),

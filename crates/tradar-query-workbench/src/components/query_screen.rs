@@ -229,6 +229,21 @@ impl QueryScreenComponent {
         }
     }
 
+    /// `COMMIT`/`ROLLBACK` shortcuts (`F8`/`F9`) -- submitted the same way
+    /// any other statement is, since the driver's own `execute` already
+    /// knows how to route these (see `query_driver::transaction_control`).
+    /// Deliberately does **not** touch `last_query`: that field names the
+    /// table the results grid can still edit through, and a commit or
+    /// rollback isn't a new result to edit -- overwriting it here would
+    /// break in-place cell edits against whatever `SELECT` is still on
+    /// screen.
+    fn submit_transaction_control(&mut self, statement: &str) {
+        if self.engine.is_pending() {
+            return;
+        }
+        self.engine.submit_query(statement.to_string());
+    }
+
     fn run_all_statements(&mut self) {
         if self.engine.is_pending() {
             return;
@@ -622,6 +637,8 @@ impl Component for QueryScreenComponent {
                     self.results.set_error("query cancelled".to_string());
                 }
             }
+            Command::Commit => self.submit_transaction_control("COMMIT"),
+            Command::Rollback => self.submit_transaction_control("ROLLBACK"),
             Command::CycleFocus => {
                 self.focus = match self.focus {
                     Focus::Editor => Focus::Results,
@@ -774,6 +791,7 @@ impl Component for QueryScreenComponent {
             &connection_name,
             self.focus == Focus::Editor,
             self.engine.alive(),
+            self.engine.in_transaction(),
         );
         self.results.draw_running(self.engine.is_pending());
         let results_area = match &self.search {
@@ -1037,6 +1055,62 @@ mod tests {
                 rows: vec![vec!["1".to_string()]],
                 truncated: false,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn f8_commits_without_overwriting_last_query() {
+        let (mut screen, _rx) = screen_with(fake_engine(QueryResult::Table {
+            columns: vec!["id".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        }));
+        screen.query_editor.insert_at_cursor("SELECT 1");
+        screen.handle_key_event(KeyCode::F(5), KeyModifiers::NONE);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if screen.results.last_result.is_some() {
+                break;
+            }
+        }
+        assert_eq!(screen.last_query.as_deref(), Some("SELECT 1"));
+
+        screen.handle_key_event(KeyCode::F(8), KeyModifiers::NONE);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if !screen.engine.is_pending() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            screen.last_query.as_deref(),
+            Some("SELECT 1"),
+            "a commit must not change which query the results grid edits through"
+        );
+        assert_eq!(
+            screen.engine.history().last().map(String::as_str),
+            Some("COMMIT")
+        );
+    }
+
+    #[tokio::test]
+    async fn f8_and_f9_do_nothing_while_a_query_is_already_running() {
+        let (mut screen, _rx) = screen_with(fake_engine(QueryResult::Affected { rows: 0 }));
+        screen.query_editor.insert_at_cursor("SELECT 1");
+        screen.handle_key_event(KeyCode::F(5), KeyModifiers::NONE);
+        assert!(screen.engine.is_pending());
+        let history_before = screen.engine.history().len();
+
+        screen.handle_key_event(KeyCode::F(8), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::F(9), KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.engine.history().len(),
+            history_before,
+            "commit/rollback must not queue up behind the running query"
         );
     }
 

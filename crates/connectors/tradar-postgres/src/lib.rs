@@ -3,11 +3,13 @@
 //! else in this crate is `pub`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use sqlx::postgres::{PgPoolOptions, PgRow};
-use sqlx::{Column, PgPool, Row, TypeInfo, ValueRef};
+use sqlx::{Column, Executor, PgPool, Postgres, Row, Transaction, TypeInfo, ValueRef};
+use tokio::sync::Mutex;
 
 use tradar_connector_api::{CONNECT_TIMEOUT, Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
@@ -20,6 +22,17 @@ use tradar_query_workbench::query_engine::QueryEngine;
 struct PostgresDriver {
     connection_string: String,
     pool: Option<PgPool>,
+    /// Held across `execute` calls between a `BEGIN` and its matching
+    /// `COMMIT`/`ROLLBACK` -- see `transaction_control`. `None` means every
+    /// statement runs straight against the pool and commits on its own,
+    /// same as before this existed.
+    transaction: Mutex<Option<Transaction<'static, Postgres>>>,
+    /// Mirrors whether `transaction` is currently `Some`, readable without
+    /// locking it -- `QueryDriver::in_transaction` is a plain sync method
+    /// the UI calls every frame, and locking an async `Mutex` from there
+    /// would mean either blocking the draw or making the call async for
+    /// every other driver's sake.
+    in_transaction: AtomicBool,
 }
 
 impl PostgresDriver {
@@ -27,8 +40,89 @@ impl PostgresDriver {
         Self {
             connection_string: connection_string.to_string(),
             pool: None,
+            transaction: Mutex::new(None),
+            in_transaction: AtomicBool::new(false),
         }
     }
+
+    /// Handles a `BEGIN`/`COMMIT`/`ROLLBACK` statement by driving the held
+    /// transaction directly, rather than sending the literal text to
+    /// Postgres -- see `transaction_control`'s doc comment for why that
+    /// wouldn't work against a connection pool anyway. Idempotent: a
+    /// `BEGIN` while already in one, or a `COMMIT`/`ROLLBACK` with nothing
+    /// open, is a harmless no-op rather than an error -- the UI gates F8/F9
+    /// on `in_transaction()`, so a mismatch here means the grid is already
+    /// showing stale state, not that the user did anything wrong.
+    async fn handle_transaction_control(
+        &self,
+        control: query_driver::TransactionControl,
+    ) -> anyhow::Result<QueryResult> {
+        let pool = self.pool.as_ref().expect("connect() must be called first");
+        let mut guard = self.transaction.lock().await;
+        match control {
+            query_driver::TransactionControl::Begin => {
+                if guard.is_none() {
+                    *guard = Some(pool.begin().await?);
+                    self.in_transaction.store(true, Ordering::Relaxed);
+                }
+            }
+            query_driver::TransactionControl::Commit => {
+                if let Some(tx) = guard.take() {
+                    tx.commit().await?;
+                }
+                self.in_transaction.store(false, Ordering::Relaxed);
+            }
+            query_driver::TransactionControl::Rollback => {
+                if let Some(tx) = guard.take() {
+                    tx.rollback().await?;
+                }
+                self.in_transaction.store(false, Ordering::Relaxed);
+            }
+        }
+        Ok(QueryResult::Affected { rows: 0 })
+    }
+}
+
+/// The body of `execute`, generic over what it runs against -- the pool
+/// directly, or a held transaction when one is open. Identical either way
+/// from here down; only `execute` itself decides which `Executor` to pass.
+async fn run<'e, E>(executor: E, query: &str) -> anyhow::Result<QueryResult>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    // A write reports how many rows it changed; fetching it as a result
+    // set would just yield zero rows and look like a SELECT that matched
+    // nothing.
+    if !query_driver::returns_rows(query) {
+        let result = sqlx::query(query).execute(executor).await?;
+        return Ok(QueryResult::Affected {
+            rows: result.rows_affected(),
+        });
+    }
+
+    // Streamed and capped rather than `fetch_all`: the point is to never
+    // pull an unbounded result set into memory. One row past the cap is
+    // read purely to know whether there were more.
+    let mut stream = sqlx::query(query).fetch(executor);
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut truncated = false;
+    while let Some(row) = stream.try_next().await? {
+        if columns.is_empty() {
+            columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+        }
+        if rows.len() == query_driver::MAX_ROWS {
+            truncated = true;
+            break;
+        }
+        rows.push((0..row.len()).map(|i| stringify_column(&row, i)).collect());
+    }
+
+    Ok(QueryResult::Table {
+        columns,
+        rows,
+        truncated,
+    })
 }
 
 #[async_trait]
@@ -115,41 +209,25 @@ impl QueryDriver for PostgresDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
+        if let Some(control) = query_driver::transaction_control(query) {
+            return self.handle_transaction_control(control).await;
+        }
+
+        // A held transaction takes every statement until it's closed --
+        // the whole point is that they share one connection and see each
+        // other's uncommitted changes. Otherwise, straight to the pool,
+        // same as before transactions existed.
+        let mut guard = self.transaction.lock().await;
+        if let Some(tx) = guard.as_mut() {
+            return run(&mut **tx, query).await;
+        }
+        drop(guard);
         let pool = self.pool.as_ref().expect("connect() must be called first");
+        run(pool, query).await
+    }
 
-        // A write reports how many rows it changed; fetching it as a result
-        // set would just yield zero rows and look like a SELECT that
-        // matched nothing.
-        if !query_driver::returns_rows(query) {
-            let result = sqlx::query(query).execute(pool).await?;
-            return Ok(QueryResult::Affected {
-                rows: result.rows_affected(),
-            });
-        }
-
-        // Streamed and capped rather than `fetch_all`: the point is to
-        // never pull an unbounded result set into memory. One row past the
-        // cap is read purely to know whether there were more.
-        let mut stream = sqlx::query(query).fetch(pool);
-        let mut columns: Vec<String> = Vec::new();
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        let mut truncated = false;
-        while let Some(row) = stream.try_next().await? {
-            if columns.is_empty() {
-                columns = row.columns().iter().map(|c| c.name().to_string()).collect();
-            }
-            if rows.len() == query_driver::MAX_ROWS {
-                truncated = true;
-                break;
-            }
-            rows.push((0..row.len()).map(|i| stringify_column(&row, i)).collect());
-        }
-
-        Ok(QueryResult::Table {
-            columns,
-            rows,
-            truncated,
-        })
+    fn in_transaction(&self) -> bool {
+        self.in_transaction.load(Ordering::Relaxed)
     }
 }
 
@@ -275,6 +353,95 @@ mod tests {
                 rows: vec![vec!["1".to_string(), "Ada".to_string()]],
                 truncated: false,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_driver_is_not_in_a_transaction() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+
+        assert!(!driver.in_transaction());
+    }
+
+    #[tokio::test]
+    async fn commit_closes_the_transaction_and_keeps_the_change() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+
+        driver.execute("BEGIN").await.unwrap();
+        assert!(driver.in_transaction());
+        driver
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap();
+        driver.execute("COMMIT").await.unwrap();
+
+        assert!(!driver.in_transaction());
+        let result = driver.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["id".to_string()],
+                rows: vec![vec!["1".to_string()]],
+                truncated: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uncommitted_insert_is_invisible_to_another_connection() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut writer = PostgresDriver::new(&conn_string);
+        writer.connect().await.unwrap();
+        writer
+            .execute("CREATE TABLE users (id INTEGER)")
+            .await
+            .unwrap();
+        let mut reader = PostgresDriver::new(&conn_string);
+        reader.connect().await.unwrap();
+
+        writer.execute("BEGIN").await.unwrap();
+        writer
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap();
+
+        // The point of holding one pooled connection for the whole
+        // transaction: a second, independent connection to the same
+        // database must not see the insert until it's committed.
+        let seen_before_commit = reader.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            seen_before_commit,
+            QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+                truncated: false,
+            }
+        );
+
+        writer.execute("ROLLBACK").await.unwrap();
+        let seen_after_rollback = reader.execute("SELECT * FROM users").await.unwrap();
+        assert_eq!(
+            seen_after_rollback,
+            QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+                truncated: false,
+            },
+            "a rolled-back insert must never become visible to anyone"
         );
     }
 }
