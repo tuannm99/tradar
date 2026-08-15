@@ -110,18 +110,48 @@ impl QueryDriver for RedisDriver {
         Ok(())
     }
 
+    /// Every key, each with its Redis type -- what the browse sidebar
+    /// lists. SCAN is paginated 100 keys at a time and looped to
+    /// completion, then every key gets its own `TYPE` call: N+1 round
+    /// trips for N keys, the same trade-off already accepted for MongoDB's
+    /// per-collection `find_one` in `list_schema`. Fine for a keyspace of
+    /// ordinary size; worth pipelining the `TYPE` calls if a very large
+    /// one ever makes this slow in practice.
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let mut connection = self
             .connection
             .clone()
             .expect("connect() must be called first");
-        let (_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(0)
-            .arg("COUNT")
-            .arg(100)
-            .query_async(&mut connection)
-            .await?;
-        Ok(keys.into_iter().map(SchemaInfo::new).collect())
+
+        let mut keys = Vec::new();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut connection)
+                .await?;
+            keys.extend(batch);
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        let mut schema = Vec::with_capacity(keys.len());
+        for name in keys {
+            let kind: String = redis::cmd("TYPE")
+                .arg(&name)
+                .query_async(&mut connection)
+                .await?;
+            schema.push(SchemaInfo {
+                name,
+                columns: Vec::new(),
+                kind: Some(kind),
+            });
+        }
+        Ok(schema)
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
@@ -143,6 +173,164 @@ impl QueryDriver for RedisDriver {
         Ok(QueryResult::Documents(vec![shape_reply(
             command, args, &value,
         )]))
+    }
+
+    /// The browse sidebar's Enter action: run the command that shows
+    /// `entry`'s full value, shaped as a `Table` specific to its Redis
+    /// type -- see "Redis: key browser" in `docs/backlog.md`. Delegates to
+    /// `execute()` for the actual round trip (same RESP-to-JSON handling
+    /// console mode uses), then reshapes that into rows/columns.
+    async fn browse_entry(&self, entry: &SchemaInfo) -> anyhow::Result<QueryResult> {
+        let kind = entry.kind.as_deref().unwrap_or_default();
+        let browse_kind = BrowseKind::parse(kind)
+            .ok_or_else(|| anyhow::anyhow!("no browse view for Redis type '{kind}'"))?;
+        let result = self.execute(&browse_kind.command(&entry.name)).await?;
+        Ok(reshape_for_browse(browse_kind, result))
+    }
+
+    /// Reuses `BrowseKind` (see "Redis: key browser" in `docs/backlog.md`)
+    /// for the Read op -- the browse view's command already *is* "show me
+    /// this key's full value". Create/Update share a command per type
+    /// (Redis's own `SET`/`HSET`/... already overwrite rather than
+    /// distinguishing "new" from "changed"); Delete is always `DEL`.
+    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+        let kind = entry.kind.as_deref()?;
+        let key = &entry.name;
+        let browse_kind = BrowseKind::parse(kind)?;
+        Some(match op {
+            tradar_core::action::CrudOp::Read => browse_kind.command(key),
+            tradar_core::action::CrudOp::Create | tradar_core::action::CrudOp::Update => {
+                match browse_kind {
+                    BrowseKind::String => format!("SET {key} <value>"),
+                    BrowseKind::Hash => format!("HSET {key} <field> <value>"),
+                    BrowseKind::List => format!("RPUSH {key} <value>"),
+                    BrowseKind::Set => format!("SADD {key} <member>"),
+                    BrowseKind::Zset => format!("ZADD {key} <score> <member>"),
+                }
+            }
+            tradar_core::action::CrudOp::Delete => format!("DEL {key}"),
+        })
+    }
+}
+
+/// The five Redis types the browse sidebar has a specialized view for --
+/// see item 4 ("Redis: key browser") in `docs/backlog.md`. Streams and
+/// other types aren't in scope yet: `parse` returns `None` for them, which
+/// `browse_entry` turns into a clear "not supported" error rather than a
+/// silent fallback to something misleading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowseKind {
+    String,
+    Hash,
+    List,
+    Set,
+    Zset,
+}
+
+impl BrowseKind {
+    fn parse(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "string" => Self::String,
+            "hash" => Self::Hash,
+            "list" => Self::List,
+            "set" => Self::Set,
+            "zset" => Self::Zset,
+            _ => return None,
+        })
+    }
+
+    /// The command that fetches `key`'s full value for this type.
+    fn command(self, key: &str) -> String {
+        match self {
+            Self::String => format!("GET {key}"),
+            Self::Hash => format!("HGETALL {key}"),
+            Self::List => format!("LRANGE {key} 0 -1"),
+            Self::Set => format!("SMEMBERS {key}"),
+            Self::Zset => format!("ZRANGE {key} 0 -1 WITHSCORES"),
+        }
+    }
+}
+
+/// Converts `execute()`'s `Documents` reply for one of `BrowseKind`'s
+/// commands into the `Table` shape the browse view wants (field/value
+/// rows for a hash, index/value for a list, ...). Falls back to returning
+/// `result` unchanged if it isn't the single-`Documents` shape `execute()`
+/// always produces -- defensive, not expected to trigger.
+fn reshape_for_browse(kind: BrowseKind, result: QueryResult) -> QueryResult {
+    let QueryResult::Documents(docs) = &result else {
+        return result;
+    };
+    let Some(value) = docs.first() else {
+        return result;
+    };
+
+    let (columns, rows): (Vec<String>, Vec<Vec<String>>) = match kind {
+        BrowseKind::String => (vec!["value".to_string()], vec![vec![json_to_cell(value)]]),
+        BrowseKind::Hash => (
+            vec!["field".to_string(), "value".to_string()],
+            value
+                .as_object()
+                .map(|fields| {
+                    fields
+                        .iter()
+                        .map(|(field, v)| vec![field.clone(), json_to_cell(v)])
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        BrowseKind::List => (
+            vec!["index".to_string(), "value".to_string()],
+            value
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, v)| vec![index.to_string(), json_to_cell(v)])
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        BrowseKind::Set => (
+            vec!["member".to_string()],
+            value
+                .as_array()
+                .map(|items| items.iter().map(|v| vec![json_to_cell(v)]).collect())
+                .unwrap_or_default(),
+        ),
+        BrowseKind::Zset => (
+            vec!["member".to_string(), "score".to_string()],
+            value
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|pair| {
+                            let member = pair.get("member").map(json_to_cell).unwrap_or_default();
+                            let score = pair.get("score").map(json_to_cell).unwrap_or_default();
+                            vec![member, score]
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+    };
+
+    QueryResult::Table {
+        columns,
+        rows,
+        truncated: false,
+    }
+}
+
+/// A JSON leaf as a plain grid cell: a string as-is, null as empty, and
+/// anything else (number, bool) via its JSON text -- these only ever come
+/// from `value_to_json`'s output, never nested objects/arrays.
+fn json_to_cell(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
@@ -259,6 +447,48 @@ mod tests {
     use testcontainers_modules::redis::{REDIS_PORT, Redis};
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
+    #[test]
+    fn crud_snippet_covers_all_four_ops_for_a_hash() {
+        let driver = RedisDriver::new("redis://127.0.0.1:1");
+        let entry = SchemaInfo {
+            name: "user:1".to_string(),
+            columns: Vec::new(),
+            kind: Some("hash".to_string()),
+        };
+
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            Some("HGETALL user:1".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create),
+            Some("HSET user:1 <field> <value>".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update),
+            Some("HSET user:1 <field> <value>".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete),
+            Some("DEL user:1".to_string())
+        );
+    }
+
+    #[test]
+    fn crud_snippet_is_none_for_an_unknown_type() {
+        let driver = RedisDriver::new("redis://127.0.0.1:1");
+        let entry = SchemaInfo {
+            name: "events".to_string(),
+            columns: Vec::new(),
+            kind: Some("stream".to_string()),
+        };
+
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn connect_succeeds_for_a_running_redis() {
         let container = Redis::default().start().await.unwrap();
@@ -333,6 +563,224 @@ mod tests {
             schema.iter().any(|entry| entry.name == "greeting"),
             "schema was: {:?}",
             schema.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_schema_reports_each_key_s_type() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        driver.execute("SET greeting hello").await.unwrap();
+        driver.execute("HSET user:1 name Ada").await.unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let kind_of = |name: &str| {
+            schema
+                .iter()
+                .find(|entry| entry.name == name)
+                .and_then(|entry| entry.kind.clone())
+        };
+        assert_eq!(kind_of("greeting"), Some("string".to_string()));
+        assert_eq!(kind_of("user:1"), Some("hash".to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_schema_pages_past_the_first_scan_batch() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        for i in 0..250 {
+            driver.execute(&format!("SET key:{i} v")).await.unwrap();
+        }
+
+        let schema = driver.list_schema().await.unwrap();
+
+        assert_eq!(
+            schema.len(),
+            250,
+            "a single 100-key SCAN batch must not be the whole answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_entry_shapes_a_string_as_a_one_row_table() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        driver.execute("SET greeting hello").await.unwrap();
+
+        let result = driver
+            .browse_entry(&SchemaInfo {
+                name: "greeting".to_string(),
+                columns: Vec::new(),
+                kind: Some("string".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["value".to_string()],
+                rows: vec![vec!["hello".to_string()]],
+                truncated: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_entry_shapes_a_hash_as_field_value_rows() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        driver.execute("HSET user:1 name Ada age 36").await.unwrap();
+
+        let result = driver
+            .browse_entry(&SchemaInfo {
+                name: "user:1".to_string(),
+                columns: Vec::new(),
+                kind: Some("hash".to_string()),
+            })
+            .await
+            .unwrap();
+
+        match result {
+            QueryResult::Table {
+                columns,
+                rows,
+                truncated,
+            } => {
+                assert_eq!(columns, vec!["field".to_string(), "value".to_string()]);
+                assert!(!truncated);
+                assert!(rows.contains(&vec!["name".to_string(), "Ada".to_string()]));
+                assert!(rows.contains(&vec!["age".to_string(), "36".to_string()]));
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_entry_shapes_a_list_as_index_value_rows() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        driver.execute("RPUSH queue a b c").await.unwrap();
+
+        let result = driver
+            .browse_entry(&SchemaInfo {
+                name: "queue".to_string(),
+                columns: Vec::new(),
+                kind: Some("list".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["index".to_string(), "value".to_string()],
+                rows: vec![
+                    vec!["0".to_string(), "a".to_string()],
+                    vec!["1".to_string(), "b".to_string()],
+                    vec!["2".to_string(), "c".to_string()],
+                ],
+                truncated: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_entry_shapes_a_set_as_member_rows() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        driver.execute("SADD tags vip early-adopter").await.unwrap();
+
+        let result = driver
+            .browse_entry(&SchemaInfo {
+                name: "tags".to_string(),
+                columns: Vec::new(),
+                kind: Some("set".to_string()),
+            })
+            .await
+            .unwrap();
+
+        match result {
+            QueryResult::Table {
+                columns,
+                rows,
+                truncated,
+            } => {
+                assert_eq!(columns, vec!["member".to_string()]);
+                assert!(!truncated);
+                assert!(rows.contains(&vec!["vip".to_string()]));
+                assert!(rows.contains(&vec!["early-adopter".to_string()]));
+            }
+            other => panic!("expected Table, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_entry_shapes_a_zset_as_member_score_rows() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        driver
+            .execute("ZADD leaderboard 10 alice 20 bob")
+            .await
+            .unwrap();
+
+        let result = driver
+            .browse_entry(&SchemaInfo {
+                name: "leaderboard".to_string(),
+                columns: Vec::new(),
+                kind: Some("zset".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            QueryResult::Table {
+                columns: vec!["member".to_string(), "score".to_string()],
+                rows: vec![
+                    vec!["alice".to_string(), "10".to_string()],
+                    vec!["bob".to_string(), "20".to_string()],
+                ],
+                truncated: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_entry_on_an_unsupported_type_fails_clearly() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        driver.execute("XADD events * field value").await.unwrap();
+
+        let result = driver
+            .browse_entry(&SchemaInfo {
+                name: "events".to_string(),
+                columns: Vec::new(),
+                kind: Some("stream".to_string()),
+            })
+            .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("stream"),
+            "error should name the unsupported type: {error}"
         );
     }
 }

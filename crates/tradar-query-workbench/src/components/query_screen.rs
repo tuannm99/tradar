@@ -20,6 +20,7 @@ use tradar_core::storage::SavedConnection;
 use tradar_core::ui;
 use tradar_core::vim_list::VimMove;
 
+use crate::components::browse_sidebar::BrowseSidebarComponent;
 use crate::components::completion::{CompletionPopup, CompletionSource};
 use crate::components::file_picker::{FilePickerComponent, PickerOutcome};
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
@@ -34,6 +35,19 @@ use crate::query_engine::{QueryEngine, QueryOutcome};
 pub enum Focus {
     Editor,
     Results,
+    /// The Redis key-browser sidebar has focus. Only reachable when
+    /// `mode == ScreenMode::Browse`.
+    Browse,
+}
+
+/// Whether a Redis query screen shows its key-browser sidebar or the usual
+/// editor+results console. Irrelevant (stays `Console`, never toggled) for
+/// every other connector -- `browse` is `None` there, and
+/// `Command::ToggleBrowseMode` is a no-op with nothing to switch to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenMode {
+    Browse,
+    Console,
 }
 
 pub struct QueryScreenComponent {
@@ -68,6 +82,41 @@ pub struct QueryScreenComponent {
     /// centered overlay: it filters what's behind it, so covering that up
     /// would hide the only feedback there is.
     search: Option<ui::TextInput>,
+    /// The editor's own incremental search bar (`/` while `Focus::Editor`)
+    /// -- a separate field from `search` above: that one live-filters the
+    /// results grid, this one jumps the editor's cursor, and the two need
+    /// different Enter/Esc behavior, so one field pretending to serve both
+    /// would need to remember which mode it was in anyway.
+    buffer_search: Option<ui::TextInput>,
+    /// Where the cursor sat before `buffer_search` opened, so `Esc` can
+    /// jump back to it and each keystroke's incremental preview re-searches
+    /// from the same anchor rather than from wherever the previous partial
+    /// match landed.
+    search_origin: Option<(usize, usize)>,
+    /// The last confirmed buffer search, for `n`/`N` to repeat once the bar
+    /// itself has closed.
+    last_search: Option<String>,
+    /// `Some` only for a Redis connection -- see `docs/backlog.md`'s "Redis:
+    /// key browser". `None` for every other driver, which never shows a
+    /// sidebar or leaves `ScreenMode::Console`.
+    browse: Option<BrowseSidebarComponent>,
+    mode: ScreenMode,
+}
+
+/// The folder to start browsing/prefilling from: the parent of the most
+/// recently used file (`recent[0]`, persisted in `recent.toml` so this
+/// survives a restart), falling back to the queries root when there's no
+/// recent file yet, or when that file's folder isn't under the queries
+/// root at all (it was opened via an absolute path outside it -- browsing
+/// stays scoped to the queries directory, see `FilePickerComponent`'s own
+/// doc comment). Takes plain data rather than `&QueryFiles` so it's
+/// testable without touching the process-global singleton.
+fn last_used_dir(recent: &[String], queries_dir: &std::path::Path) -> std::path::PathBuf {
+    recent
+        .first()
+        .and_then(|path| std::path::Path::new(path).parent().map(|p| p.to_path_buf()))
+        .filter(|dir| dir.starts_with(queries_dir))
+        .unwrap_or_else(|| queries_dir.to_path_buf())
 }
 
 /// Copies `text` to the system clipboard via an OSC52 escape sequence,
@@ -106,8 +155,24 @@ impl QueryScreenComponent {
             query_editor.set_dialect(Dialect::Sql);
         }
 
+        // Only Redis has a browse UI -- see `QueryDriver::browse_entry`.
+        // Same driver-id match already used above for `Dialect::Sql`: cheap
+        // and doesn't need a new `Capability` for a sidebar exactly one
+        // connector uses.
+        let browse = (engine.connection().driver.as_str() == "redis")
+            .then(|| BrowseSidebarComponent::new(engine.schema()));
+        let mode = if browse.is_some() {
+            ScreenMode::Browse
+        } else {
+            ScreenMode::Console
+        };
+
         Self {
-            focus: Focus::Editor,
+            focus: if browse.is_some() {
+                Focus::Browse
+            } else {
+                Focus::Editor
+            },
             query_editor,
             results: ResultsComponent::new(),
             engine,
@@ -123,6 +188,11 @@ impl QueryScreenComponent {
             row_edit: None,
             refreshing: false,
             search: None,
+            buffer_search: None,
+            search_origin: None,
+            last_search: None,
+            browse,
+            mode,
         }
     }
 
@@ -143,30 +213,63 @@ impl QueryScreenComponent {
         self.prompt = Some(FilePromptComponent::new(kind, &self.prompt_prefill()));
     }
 
-    /// What the save/open prompt starts with: the file you last worked on,
-    /// shown by bare name when it's in the queries directory. The full path
-    /// would be technically the same target but fills the prompt with noise
-    /// you then have to delete to save under another name.
+    /// `Ctrl+E`: no prefill -- unlike `Save`/`Open`, an export path has
+    /// nothing to do with the query file you last worked on.
+    fn open_export_prompt(&mut self) {
+        self.prompt = Some(FilePromptComponent::new(PromptKind::Export, ""));
+    }
+
+    /// What the save/open prompt starts with: the file you last worked on
+    /// **this session**, shown by bare name when it's in the queries
+    /// directory. The full path would be technically the same target but
+    /// fills the prompt with noise you then have to delete to save under
+    /// another name.
+    ///
+    /// With nothing saved/opened yet this session (`last_path` is `None`
+    /// -- the common first-`Ctrl+S`-after-launch case), falls back to the
+    /// *folder* of the most recently used file across all past sessions
+    /// (`recent.toml`, via `last_used_dir`) -- not the file itself, since
+    /// prefilling an old filename would look like "overwrite this" rather
+    /// than "save a new query here". Only the folder, with a trailing `/`,
+    /// so the cursor lands ready to type a fresh name into the right
+    /// place.
     fn prompt_prefill(&self) -> String {
-        let Some(last) = self.last_path.as_deref() else {
+        if let Some(last) = self.last_path.as_deref() {
+            return tradar_core::storage::query_files()
+                .and_then(|files| {
+                    std::path::Path::new(last)
+                        .strip_prefix(files.dir())
+                        .ok()
+                        .map(|name| name.to_string_lossy().to_string())
+                })
+                .unwrap_or_else(|| last.to_string());
+        }
+        let Some(files) = tradar_core::storage::query_files() else {
             return String::new();
         };
-        tradar_core::storage::query_files()
-            .and_then(|files| {
-                std::path::Path::new(last)
-                    .strip_prefix(files.dir())
-                    .ok()
-                    .map(|name| name.to_string_lossy().to_string())
-            })
-            .unwrap_or_else(|| last.to_string())
+        let dir = last_used_dir(&files.recent(), files.dir());
+        match dir.strip_prefix(files.dir()) {
+            Ok(relative) if !relative.as_os_str().is_empty() => {
+                format!("{}/", relative.display())
+            }
+            _ => String::new(),
+        }
     }
 
     /// Opens the file picker, or falls back to a typed path when there's
-    /// no queries directory configured (tests, mainly).
+    /// no queries directory configured (tests, mainly). Starts browsing
+    /// from `last_used_dir` rather than always the queries root, so
+    /// `Ctrl+O` lands you back where you were working without extra
+    /// navigation.
     fn open_file_picker(&mut self) {
         match tradar_core::storage::query_files() {
             Some(files) => {
-                self.picker = Some(FilePickerComponent::new(&files.recent(), files.dir()));
+                let start_dir = last_used_dir(&files.recent(), files.dir());
+                self.picker = Some(FilePickerComponent::new(
+                    &files.recent(),
+                    files.dir(),
+                    &start_dir,
+                ));
             }
             None => self.open_prompt(PromptKind::Open),
         }
@@ -194,6 +297,60 @@ impl QueryScreenComponent {
         }
         let entries = self.engine.history().iter().rev().cloned().collect();
         self.history_picker = Some(HistoryPickerComponent::new(entries));
+    }
+
+    /// Fetches the sidebar's highlighted key into the results pane -- a
+    /// no-op for every connector but Redis, since `self.browse` is only
+    /// ever `Some` there.
+    fn open_selected_key(&mut self) {
+        let Some(entry) = self.browse.as_ref().and_then(|b| b.selected_entry()) else {
+            return;
+        };
+        self.engine.submit_browse(entry.clone());
+        self.focus = Focus::Results;
+    }
+
+    /// Switches between the browse sidebar and the raw-command console --
+    /// a no-op when there's no sidebar to switch to (every connector but
+    /// Redis).
+    fn toggle_browse_mode(&mut self) {
+        if self.browse.is_none() {
+            return;
+        }
+        self.mode = match self.mode {
+            ScreenMode::Browse => ScreenMode::Console,
+            ScreenMode::Console => ScreenMode::Browse,
+        };
+        self.focus = match self.mode {
+            ScreenMode::Browse => Focus::Browse,
+            ScreenMode::Console => Focus::Editor,
+        };
+    }
+
+    /// `/` while the editor has focus: opens the incremental buffer-search
+    /// bar. Only from the editor's own Normal mode -- typing `/` in Insert
+    /// mode is already handled as a literal character before this is ever
+    /// reached (see the plain-char-in-Insert passthrough), and Visual mode
+    /// deliberately doesn't support search-as-a-motion (real vim does;
+    /// out of scope here -- see `docs/backlog.md`).
+    fn open_buffer_search(&mut self) {
+        if self.query_editor.mode != EditorMode::Normal {
+            return;
+        }
+        self.search_origin = Some(self.query_editor.cursor());
+        self.buffer_search = Some(ui::TextInput::new(""));
+    }
+
+    /// `n`/`N`: repeats `last_search`, same Normal-mode-only restriction as
+    /// `open_buffer_search`. A no-op if nothing's been searched yet.
+    fn repeat_buffer_search(&mut self, backwards: bool) {
+        if self.query_editor.mode != EditorMode::Normal {
+            return;
+        }
+        let Some(pattern) = self.last_search.clone() else {
+            return;
+        };
+        self.query_editor.find(&pattern, backwards);
     }
 
     /// Hands a key the screen doesn't claim to the editor -- but only when
@@ -446,10 +603,15 @@ impl QueryScreenComponent {
             return;
         };
         // A bare name lands in the queries directory; anything path-shaped
-        // is used as typed.
-        let path = match tradar_core::storage::query_files() {
-            Some(files) => tradar_core::storage::resolve_query_path(&trimmed, files.dir()),
-            None => std::path::PathBuf::from(&trimmed),
+        // is used as typed. Export is the odd one out: its output isn't a
+        // query, so there's no queries-directory concept for it -- a bare
+        // name is just a relative path from the cwd.
+        let path = match kind {
+            PromptKind::Save | PromptKind::Open => match tradar_core::storage::query_files() {
+                Some(files) => tradar_core::storage::resolve_query_path(&trimmed, files.dir()),
+                None => std::path::PathBuf::from(&trimmed),
+            },
+            PromptKind::Export => std::path::PathBuf::from(&trimmed),
         };
         let result = match kind {
             PromptKind::Save => {
@@ -459,10 +621,15 @@ impl QueryScreenComponent {
                 std::fs::write(&path, self.query_editor.text()).map_err(|e| e.to_string())
             }
             PromptKind::Open => self.open_query_file(&path),
+            PromptKind::Export => self.export_result(&path),
         };
         match result {
             Ok(()) => {
-                self.remember(&path);
+                // Export files aren't queries -- keep them out of the
+                // Ctrl+O recent-files list and away from Ctrl+S's prefill.
+                if kind != PromptKind::Export {
+                    self.remember(&path);
+                }
                 self.prompt = None;
             }
             Err(e) => {
@@ -471,6 +638,28 @@ impl QueryScreenComponent {
                 }
             }
         }
+    }
+
+    /// `Ctrl+E`: writes the current result to `path` as CSV or JSON,
+    /// picked by its extension -- see `crate::export`. Always the full
+    /// result, not whatever `/` has the grid filtered down to right now.
+    fn export_result(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let Some(result) = self.results.last_result.as_ref() else {
+            return Err("nothing to export".to_string());
+        };
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        let content = match extension.as_deref() {
+            Some("csv") => crate::export::to_csv(result),
+            Some("json") => crate::export::to_json(result),
+            _ => Err("export path must end in .csv or .json".to_string()),
+        }?;
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, content).map_err(|e| e.to_string())
     }
 }
 
@@ -506,6 +695,38 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        // Same incremental shape as the results filter above, but jumping
+        // the editor's cursor instead of narrowing a grid: every keystroke
+        // re-searches from `search_origin`, not from wherever the previous
+        // partial match landed, so typing a longer prefix doesn't drift.
+        if let Some(buffer_search) = self.buffer_search.as_mut() {
+            match code {
+                KeyCode::Esc => {
+                    self.buffer_search = None;
+                    if let Some((row, col)) = self.search_origin.take() {
+                        self.query_editor.set_cursor(row, col);
+                    }
+                }
+                KeyCode::Enter => {
+                    let pattern = buffer_search.text();
+                    self.buffer_search = None;
+                    self.search_origin = None;
+                    if !pattern.is_empty() {
+                        self.last_search = Some(pattern);
+                    }
+                }
+                _ => {
+                    buffer_search.handle_key_event(code, modifiers);
+                    let pattern = buffer_search.text();
+                    if let Some((row, col)) = self.search_origin {
+                        self.query_editor.set_cursor(row, col);
+                    }
+                    self.query_editor.find(&pattern, false);
+                }
+            }
+            return None;
+        }
+
         if let Some(row_edit) = self.row_edit.as_mut() {
             if let Some(outcome) = row_edit.handle_key_event(code, modifiers) {
                 self.handle_row_edit(outcome);
@@ -534,6 +755,7 @@ impl Component for QueryScreenComponent {
                 Some(HistoryOutcome::Cancelled) => self.history_picker = None,
                 Some(HistoryOutcome::Selected(query)) => {
                     self.query_editor.set_text(&query);
+                    self.mode = ScreenMode::Console;
                     self.focus = Focus::Editor;
                     self.history_picker = None;
                 }
@@ -607,8 +829,9 @@ impl Component for QueryScreenComponent {
         // keys nor list navigation apply -- those are the editor's own vim
         // motions.
         let contexts: &[Context] = match self.focus {
-            Focus::Editor => &[Context::QueryScreen],
+            Focus::Editor => &[Context::QueryScreen, Context::Editor],
             Focus::Results => &[Context::QueryScreen, Context::Results, Context::List],
+            Focus::Browse => &[Context::QueryScreen, Context::Browse, Context::List],
         };
         let key = KeyPress::new(code, modifiers);
         let command = match keymap().resolve_in(contexts, &mut self.pending, key) {
@@ -622,6 +845,11 @@ impl Component for QueryScreenComponent {
         if let Some(mv) = command.as_vim_move() {
             match self.focus {
                 Focus::Results => self.results.apply_move(mv),
+                Focus::Browse => {
+                    if let Some(browse) = self.browse.as_mut() {
+                        browse.apply_move(mv);
+                    }
+                }
                 Focus::Editor => {}
             }
             return None;
@@ -640,15 +868,24 @@ impl Component for QueryScreenComponent {
             Command::Commit => self.submit_transaction_control("COMMIT"),
             Command::Rollback => self.submit_transaction_control("ROLLBACK"),
             Command::CycleFocus => {
-                self.focus = match self.focus {
-                    Focus::Editor => Focus::Results,
-                    Focus::Results => Focus::Editor,
+                self.focus = match self.mode {
+                    // No editor to land on in browse mode -- cycle between
+                    // the sidebar and whatever it last fetched into results.
+                    ScreenMode::Browse => match self.focus {
+                        Focus::Browse => Focus::Results,
+                        _ => Focus::Browse,
+                    },
+                    ScreenMode::Console => match self.focus {
+                        Focus::Editor => Focus::Results,
+                        _ => Focus::Editor,
+                    },
                 };
             }
             Command::SaveFile => self.open_prompt(PromptKind::Save),
             Command::OpenFile => self.open_file_picker(),
             Command::History => self.open_history(),
             Command::ExportCurl => self.export_curl(),
+            Command::Export => self.open_export_prompt(),
             Command::Yank => {
                 if let Some(text) = self.results.selected_text() {
                     yank_to_clipboard(&text);
@@ -662,6 +899,11 @@ impl Component for QueryScreenComponent {
             Command::Search => {
                 self.search = Some(ui::TextInput::new(self.results.filter()));
             }
+            Command::BrowseOpen => self.open_selected_key(),
+            Command::ToggleBrowseMode => self.toggle_browse_mode(),
+            Command::SearchInBuffer => self.open_buffer_search(),
+            Command::SearchNext => self.repeat_buffer_search(false),
+            Command::SearchPrev => self.repeat_buffer_search(true),
             _ => {}
         }
         None
@@ -742,8 +984,16 @@ impl Component for QueryScreenComponent {
         Some(self.engine.alive())
     }
 
+    fn crud_snippet(&self, name: &str, op: tradar_core::action::CrudOp) -> Option<String> {
+        self.engine.crud_snippet(name, op)
+    }
+
     fn insert_text(&mut self, text: &str) {
         self.query_editor.insert_at_cursor(text);
+        // The navigator inserts into the editor, so make sure it's actually
+        // on screen -- a no-op for every connector but Redis, which is the
+        // only one `mode` ever leaves `Console` for.
+        self.mode = ScreenMode::Console;
         self.focus = Focus::Editor;
     }
 
@@ -773,33 +1023,67 @@ impl Component for QueryScreenComponent {
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
         // The schema tree used to live here as a sidebar; it's now the app
         // shell's navigator, which can show every connection rather than
-        // only this screen's own -- so the screen is just editor + results.
-        //
-        // The editor gets a third of the height (min 5 rows, so a short
-        // query still has room), results take the rest.
-        let editor_height = (area.height / 3).clamp(5, 12);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(editor_height), Constraint::Min(3)])
-            .split(area);
+        // only this screen's own. In console mode the screen is just
+        // editor + results (stacked); in Redis browse mode it's the key
+        // sidebar + results (side by side), with no editor at all.
+        let content_area = if self.mode == ScreenMode::Browse {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(28), Constraint::Min(20)])
+                .split(area);
+            if let Some(browse) = self.browse.as_mut() {
+                browse.draw(frame, columns[0], self.focus == Focus::Browse);
+            }
+            self.editor_area = Rect::ZERO;
+            columns[1]
+        } else {
+            // The editor gets a third of the height (min 5 rows, so a short
+            // query still has room), results take the rest -- plus one row
+            // for the buffer-search bar, reclaimed from results, when it's
+            // open.
+            let editor_height = (area.height / 3).clamp(5, 12);
+            let search_bar_height = if self.buffer_search.is_some() { 1 } else { 0 };
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(editor_height),
+                    Constraint::Length(search_bar_height),
+                    Constraint::Min(3),
+                ])
+                .split(area);
 
-        let connection_name = self.active_connection().name.clone();
-        self.editor_area = chunks[0];
-        self.query_editor.draw(
-            frame,
-            chunks[0],
-            &connection_name,
-            self.focus == Focus::Editor,
-            self.engine.alive(),
-            self.engine.in_transaction(),
-        );
+            let connection_name = self.active_connection().name.clone();
+            self.editor_area = chunks[0];
+            self.query_editor.draw(
+                frame,
+                chunks[0],
+                &connection_name,
+                self.focus == Focus::Editor,
+                self.engine.alive(),
+                self.engine.in_transaction(),
+            );
+            if let Some(buffer_search) = &self.buffer_search {
+                let theme = tradar_core::theme::theme();
+                let mut spans = vec![ratatui::text::Span::styled(
+                    "/",
+                    ratatui::style::Style::default().fg(theme.accent),
+                )];
+                spans.extend(buffer_search.spans(true));
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans)),
+                    chunks[1],
+                );
+            }
+            chunks[2]
+        };
+
         self.results.draw_running(self.engine.is_pending());
         let results_area = match &self.search {
             Some(_) => Rect {
-                height: chunks[1].height.saturating_sub(1),
-                ..chunks[1]
+                height: content_area.height.saturating_sub(1),
+                ..content_area
             },
-            None => chunks[1],
+            None => content_area,
         };
         self.results
             .draw(frame, results_area, self.focus == Focus::Results);
@@ -807,7 +1091,7 @@ impl Component for QueryScreenComponent {
             let bar = Rect {
                 y: results_area.y.saturating_add(results_area.height),
                 height: 1,
-                ..chunks[1]
+                ..content_area
             };
             let theme = tradar_core::theme::theme();
             let mut spans = vec![ratatui::text::Span::styled(
@@ -835,7 +1119,8 @@ impl Component for QueryScreenComponent {
         if let Some(prompt) = &self.prompt {
             let popup = ui::centered_rect(60, 20, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
-            prompt.draw(frame, popup);
+            let queries_dir = tradar_core::storage::query_files().map(|files| files.dir());
+            prompt.draw(frame, popup, queries_dir);
         }
 
         if let Some(history_picker) = &mut self.history_picker {
@@ -867,6 +1152,35 @@ mod tests {
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn last_used_dir_is_the_most_recent_file_s_parent() {
+        let queries_dir = std::path::Path::new("/home/x/.config/tradar/queries");
+        let recent = vec![
+            "/home/x/.config/tradar/queries/reports/q1.sql".to_string(),
+            "/home/x/.config/tradar/queries/old.sql".to_string(),
+        ];
+
+        assert_eq!(
+            last_used_dir(&recent, queries_dir),
+            queries_dir.join("reports")
+        );
+    }
+
+    #[test]
+    fn last_used_dir_falls_back_to_the_root_with_no_recent_files() {
+        let queries_dir = std::path::Path::new("/home/x/.config/tradar/queries");
+
+        assert_eq!(last_used_dir(&[], queries_dir), queries_dir);
+    }
+
+    #[test]
+    fn last_used_dir_falls_back_to_the_root_when_the_recent_file_is_outside_it() {
+        let queries_dir = std::path::Path::new("/home/x/.config/tradar/queries");
+        let recent = vec!["/somewhere/else/report.sql".to_string()];
+
+        assert_eq!(last_used_dir(&recent, queries_dir), queries_dir);
     }
 
     fn connection() -> SavedConnection {
@@ -909,6 +1223,9 @@ mod tests {
             Ok(Vec::new())
         }
         async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
+            Ok(self.result.clone())
+        }
+        async fn browse_entry(&self, _entry: &SchemaInfo) -> anyhow::Result<QueryResult> {
             Ok(self.result.clone())
         }
     }
@@ -967,6 +1284,7 @@ mod tests {
                 type_name: "INTEGER".to_string(),
                 primary_key: true,
             }],
+            kind: None,
         }];
         let (screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema)));
 
@@ -1183,7 +1501,11 @@ mod tests {
         assert_eq!(screen.focus, Focus::Editor);
 
         // In Normal mode with the editor focused, `y` is the editor's key
-        // (a no-op there), not the results pane's yank...
+        // (starts a `yy`, not the results pane's yank)...
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+        // ...completed here so the pending `yy` doesn't swallow the `i`
+        // below as "any other key cancels a pending y", the same rule
+        // `dd`/`za` already follow.
         screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(screen.query_editor.text(), "");
 
@@ -1513,7 +1835,7 @@ mod tests {
     /// directory -- which tests must not initialise, since a `OnceLock` set
     /// by one test would leak into every other.
     fn open_picker_on(screen: &mut QueryScreenComponent, dir: &std::path::Path) {
-        screen.picker = Some(FilePickerComponent::new(&[], dir));
+        screen.picker = Some(FilePickerComponent::new(&[], dir, dir));
     }
 
     #[test]
@@ -1813,6 +2135,99 @@ mod tests {
         assert!(screen.row_edit.is_none(), "no delete may have started");
     }
 
+    #[test]
+    fn slash_opens_buffer_search_and_previews_matches_incrementally() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("select * from users");
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "from".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert!(screen.buffer_search.is_some());
+        assert!(
+            screen.search.is_none(),
+            "the editor's own search must not touch the results filter"
+        );
+        assert_eq!(screen.query_editor.cursor(), (0, 9));
+    }
+
+    #[test]
+    fn esc_cancels_buffer_search_and_restores_the_original_cursor() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("select * from users");
+        screen.query_editor.set_cursor(0, 2);
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "from".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(screen.query_editor.cursor(), (0, 9), "preview jumped");
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.buffer_search.is_none());
+        assert_eq!(
+            screen.query_editor.cursor(),
+            (0, 2),
+            "esc undoes the whole search, cursor included"
+        );
+    }
+
+    #[test]
+    fn enter_confirms_a_buffer_search_and_n_repeats_it_wrapping_around() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("aaa bbb aaa");
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "aaa".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.buffer_search.is_none(), "the bar closes");
+        assert_eq!(
+            screen.query_editor.cursor(),
+            (0, 8),
+            "confirming keeps the cursor on the match, the second \"aaa\""
+        );
+
+        screen.handle_key_event(KeyCode::Char('n'), KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.query_editor.cursor(),
+            (0, 0),
+            "n wraps back around to the first occurrence"
+        );
+    }
+
+    #[test]
+    fn slash_while_focus_is_on_results_still_filters_the_grid_not_the_buffer() {
+        let (mut screen, _rx) = screen_showing_cities();
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+
+        assert!(
+            screen.search.is_some(),
+            "Results focus keeps the existing filter-bar behavior"
+        );
+        assert!(screen.buffer_search.is_none());
+    }
+
+    #[test]
+    fn slash_in_insert_mode_types_a_literal_character_instead_of_opening_search() {
+        let (mut screen, _rx) = screen();
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+
+        assert!(screen.buffer_search.is_none());
+        assert_eq!(screen.query_editor.text(), "/");
+    }
+
     /// A screen whose driver returns a two-column `users` table and whose
     /// schema says `id` is the primary key -- the setup every row edit
     /// needs.
@@ -1835,6 +2250,7 @@ mod tests {
                 },
                 crate::query_driver::ColumnInfo::new("name", "TEXT"),
             ],
+            kind: None,
         }];
         screen_with(fake_engine_with_schema(result, Ok(schema)))
     }
@@ -1936,6 +2352,7 @@ mod tests {
         let schema = vec![SchemaInfo {
             name: "users".to_string(),
             columns: vec![crate::query_driver::ColumnInfo::new("name", "TEXT")],
+            kind: None,
         }];
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
         submit_and_settle(&mut screen, "SELECT name FROM users").await;
@@ -1970,6 +2387,206 @@ mod tests {
             (screen.results.selected, screen.results.selected_col),
             (1, 1),
             "a re-read is not a new result: the cursor must not jump home"
+        );
+    }
+
+    fn redis_connection() -> SavedConnection {
+        SavedConnection {
+            name: "local-redis".to_string(),
+            driver: "redis".to_string(),
+            target: "redis://127.0.0.1".to_string(),
+        }
+    }
+
+    fn redis_schema() -> Vec<SchemaInfo> {
+        vec![SchemaInfo {
+            name: "user:1".to_string(),
+            columns: Vec::new(),
+            kind: Some("hash".to_string()),
+        }]
+    }
+
+    fn redis_screen_with(
+        result: QueryResult,
+        schema: Result<Vec<SchemaInfo>, String>,
+    ) -> (QueryScreenComponent, mpsc::UnboundedReceiver<Action>) {
+        let engine = QueryEngine::new(Arc::new(FakeDriver { result }), redis_connection(), schema);
+        screen_with(engine)
+    }
+
+    #[test]
+    fn a_redis_connection_starts_in_browse_mode_focused_on_the_sidebar() {
+        let (screen, _rx) = redis_screen_with(empty_result(), Ok(redis_schema()));
+
+        assert_eq!(screen.mode, ScreenMode::Browse);
+        assert_eq!(screen.focus, Focus::Browse);
+        assert!(screen.browse.is_some());
+    }
+
+    #[test]
+    fn a_non_redis_connection_never_gets_a_browse_sidebar() {
+        let (screen, _rx) = screen();
+
+        assert_eq!(screen.mode, ScreenMode::Console);
+        assert_eq!(screen.focus, Focus::Editor);
+        assert!(screen.browse.is_none());
+    }
+
+    #[test]
+    fn ctrl_g_is_a_no_op_without_a_browse_sidebar() {
+        let (mut screen, _rx) = screen();
+
+        screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
+
+        assert_eq!(screen.mode, ScreenMode::Console);
+        assert_eq!(screen.focus, Focus::Editor);
+    }
+
+    #[test]
+    fn ctrl_g_toggles_a_redis_screen_between_browse_and_console() {
+        let (mut screen, _rx) = redis_screen_with(empty_result(), Ok(redis_schema()));
+
+        screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert_eq!(screen.mode, ScreenMode::Console);
+        assert_eq!(screen.focus, Focus::Editor);
+
+        screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert_eq!(screen.mode, ScreenMode::Browse);
+        assert_eq!(screen.focus, Focus::Browse);
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_sidebar_fetches_the_key_and_moves_focus_to_results() {
+        let fetched = QueryResult::Table {
+            columns: vec!["field".to_string(), "value".to_string()],
+            rows: vec![vec!["name".to_string(), "Ada".to_string()]],
+            truncated: false,
+        };
+        let (mut screen, _rx) = redis_screen_with(fetched.clone(), Ok(redis_schema()));
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if !screen.engine.is_pending() {
+                break;
+            }
+        }
+
+        assert_eq!(screen.focus, Focus::Results);
+        assert_eq!(screen.results.selected_row(), Some(&fetched_row(&fetched)));
+    }
+
+    fn fetched_row(result: &QueryResult) -> Vec<String> {
+        match result {
+            QueryResult::Table { rows, .. } => rows[0].clone(),
+            other => panic!("expected a Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_text_switches_a_redis_screen_back_to_console_mode() {
+        let (mut screen, _rx) = redis_screen_with(empty_result(), Ok(redis_schema()));
+
+        screen.insert_text("user:1");
+
+        assert_eq!(screen.mode, ScreenMode::Console);
+        assert_eq!(screen.focus, Focus::Editor);
+    }
+
+    fn table_result() -> QueryResult {
+        QueryResult::Table {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![vec!["1".to_string(), "Ada".to_string()]],
+            truncated: false,
+        }
+    }
+
+    fn type_path(screen: &mut QueryScreenComponent, path: &std::path::Path) {
+        for c in path.to_str().unwrap().chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    #[tokio::test]
+    async fn ctrl_e_exports_the_result_as_csv_when_the_path_ends_in_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.csv");
+        let (mut screen, _rx) = screen_with(fake_engine(table_result()));
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+
+        screen.handle_key_event(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        type_path(&mut screen, &path);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(
+            screen.prompt.is_none(),
+            "a successful export closes the prompt"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "id,name\n1,Ada\n");
+    }
+
+    #[tokio::test]
+    async fn ctrl_e_exports_the_result_as_json_when_the_path_ends_in_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        let (mut screen, _rx) = screen_with(fake_engine(table_result()));
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+
+        screen.handle_key_event(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        type_path(&mut screen, &path);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.prompt.is_none());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed, serde_json::json!([{"id": "1", "name": "Ada"}]));
+    }
+
+    #[tokio::test]
+    async fn ctrl_e_with_an_unrecognized_extension_keeps_the_prompt_open_with_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.txt");
+        let (mut screen, _rx) = screen_with(fake_engine(table_result()));
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+
+        screen.handle_key_event(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        type_path(&mut screen, &path);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let prompt = screen.prompt.as_ref().expect("prompt stays open on error");
+        assert!(prompt.error.as_deref().unwrap().contains(".csv"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn ctrl_e_with_no_result_keeps_the_prompt_open_with_an_error() {
+        let (mut screen, _rx) = screen();
+
+        screen.handle_key_event(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        for c in "out.csv".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let prompt = screen.prompt.as_ref().expect("prompt stays open on error");
+        assert_eq!(prompt.error.as_deref(), Some("nothing to export"));
+    }
+
+    #[tokio::test]
+    async fn a_successful_export_does_not_touch_the_recent_query_files_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.csv");
+        let (mut screen, _rx) = screen_with(fake_engine(table_result()));
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+
+        screen.handle_key_event(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        type_path(&mut screen, &path);
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.last_path, None,
+            "export must not be mistaken for a saved/opened query file"
         );
     }
 }

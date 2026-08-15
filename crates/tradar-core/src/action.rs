@@ -62,6 +62,18 @@ pub struct OutlineEntry {
     pub has_children: bool,
 }
 
+/// Which CRUD statement to generate a snippet for -- see
+/// `Component::crud_snippet`. Lives here rather than in
+/// `tradar-query-workbench` because `Component` (this trait) can't depend
+/// on a crate that depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrudOp {
+    Create,
+    Read,
+    Update,
+    Delete,
+}
+
 pub trait Component {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action>;
     /// Handles a click or scroll. Defaults to ignoring it: a component
@@ -96,6 +108,15 @@ pub trait Component {
     /// navigator gets it into a query. A screen with nowhere to put it
     /// ignores it, the default.
     fn insert_text(&mut self, _text: &str) {}
+    /// A skeleton statement for `op` against the outline entry named
+    /// `name` (a table, collection, index, or key -- whatever `outline`'s
+    /// depth-0 entries are for this screen), in this screen's own query
+    /// language. `None` -- the default -- means this screen has no notion
+    /// of CRUD statements, or doesn't recognize `name`; the navigator then
+    /// does nothing rather than inserting a blank line.
+    fn crud_snippet(&self, _name: &str, _op: CrudOp) -> Option<String> {
+        None
+    }
     /// Whether the schema behind `outline` failed to load, for the
     /// navigator to say so rather than showing an empty tree that looks
     /// like an empty database.

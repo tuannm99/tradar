@@ -240,10 +240,12 @@ mod tests {
                     ColumnInfo::new("id", "INTEGER"),
                     ColumnInfo::new("user_email", "TEXT"),
                 ],
+                kind: None,
             },
             SchemaInfo {
                 name: "orders".to_string(),
                 columns: vec![ColumnInfo::new("id", "INTEGER")],
+                kind: None,
             },
         ]
     }

@@ -6,6 +6,8 @@
 
 use async_trait::async_trait;
 
+use tradar_core::action::CrudOp;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemaInfo {
     pub name: String,
@@ -15,6 +17,12 @@ pub struct SchemaInfo {
     /// driver that hasn't been taught to report them yet -- the sidebar
     /// treats an empty list as "nothing to expand", not as an error.
     pub columns: Vec<ColumnInfo>,
+    /// The backend's own name for what kind of entry this is (Redis:
+    /// `"string"`/`"hash"`/`"list"`/`"set"`/`"zset"`/... from `TYPE`).
+    /// `None` for backends where every entry is the same kind (a SQL table,
+    /// a Mongo collection) and there's nothing to distinguish -- the browse
+    /// sidebar treats `None` as "not applicable".
+    pub kind: Option<String>,
 }
 
 impl SchemaInfo {
@@ -24,6 +32,7 @@ impl SchemaInfo {
         Self {
             name: name.into(),
             columns: Vec::new(),
+            kind: None,
         }
     }
 }
@@ -333,6 +342,81 @@ pub fn build_sql_edit(edit: &RowEdit) -> String {
             sql_literal(value)
         ),
         RowChange::DeleteRow => format!("DELETE FROM {table} WHERE {where_clause}"),
+    }
+}
+
+/// A skeleton Create/Read/Update/Delete statement for `entry`, shared by
+/// the SQL connectors -- see `Component::crud_snippet`. Placeholders are
+/// `<column_name>` rather than a guessed literal: there's no type mapping
+/// reliable enough across every backend's own type names to invent a
+/// plausible value, and "fill in this blank" reads better than a fake
+/// value the user has to notice is fake and replace anyway.
+pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp) -> String {
+    let table = quote_identifier(&entry.name);
+    let columns: Vec<&str> = entry.columns.iter().map(|c| c.name.as_str()).collect();
+    let primary_key: Vec<&str> = entry
+        .columns
+        .iter()
+        .filter(|c| c.primary_key)
+        .map(|c| c.name.as_str())
+        .collect();
+
+    let where_clause = |keys: &[&str]| -> String {
+        if keys.is_empty() {
+            "<condition>".to_string()
+        } else {
+            keys.iter()
+                .map(|c| format!("{} = <{c}>", quote_identifier(c)))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        }
+    };
+
+    match op {
+        CrudOp::Read => format!("SELECT * FROM {table} LIMIT 100;"),
+        CrudOp::Create => {
+            if columns.is_empty() {
+                format!("INSERT INTO {table} (<column>) VALUES (<value>);")
+            } else {
+                let names = columns
+                    .iter()
+                    .map(|c| quote_identifier(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let placeholders = columns
+                    .iter()
+                    .map(|c| format!("<{c}>"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("INSERT INTO {table} ({names}) VALUES ({placeholders});")
+            }
+        }
+        CrudOp::Update => {
+            let settable: Vec<&str> = columns
+                .iter()
+                .copied()
+                .filter(|c| !primary_key.contains(c))
+                .collect();
+            let settable = if settable.is_empty() {
+                columns.clone()
+            } else {
+                settable
+            };
+            let set_clause = if settable.is_empty() {
+                "<column> = <value>".to_string()
+            } else {
+                settable
+                    .iter()
+                    .map(|c| format!("{} = <{c}>", quote_identifier(c)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!(
+                "UPDATE {table} SET {set_clause} WHERE {};",
+                where_clause(&primary_key)
+            )
+        }
+        CrudOp::Delete => format!("DELETE FROM {table} WHERE {};", where_clause(&primary_key)),
     }
 }
 
@@ -681,6 +765,23 @@ pub trait QueryDriver: Send + Sync {
     fn in_transaction(&self) -> bool {
         false
     }
+
+    /// Fetches and shapes one `SchemaInfo` entry's full value for a browse
+    /// sidebar's specialized per-type view (currently only Redis, keyed off
+    /// `SchemaInfo::kind`) -- e.g. a hash's fields/values as a `Table`
+    /// rather than a raw command reply. `Err` by default: only a driver
+    /// with a browse UI overrides this, and the screen shows the error the
+    /// same way a failed query shows one.
+    async fn browse_entry(&self, _entry: &SchemaInfo) -> anyhow::Result<QueryResult> {
+        anyhow::bail!("this connector has no browse view")
+    }
+
+    /// A skeleton statement for `op` against `entry`, in this driver's own
+    /// query language -- see `Component::crud_snippet`. `None` by default:
+    /// most drivers don't override this until they're taught to.
+    fn crud_snippet(&self, _entry: &SchemaInfo, _op: CrudOp) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -692,6 +793,85 @@ mod tests {
             .into_iter()
             .map(|s| s.text)
             .collect()
+    }
+
+    fn users_table() -> SchemaInfo {
+        SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![
+                ColumnInfo {
+                    name: "id".to_string(),
+                    type_name: "INTEGER".to_string(),
+                    primary_key: true,
+                },
+                ColumnInfo::new("email", "TEXT"),
+            ],
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn crud_snippet_read_is_a_bounded_select() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Read),
+            "SELECT * FROM \"users\" LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_create_lists_every_column_with_a_named_placeholder() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Create),
+            "INSERT INTO \"users\" (\"id\", \"email\") VALUES (<id>, <email>);"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_update_sets_non_key_columns_and_filters_by_the_key() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Update),
+            "UPDATE \"users\" SET \"email\" = <email> WHERE \"id\" = <id>;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_delete_filters_by_the_primary_key() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Delete),
+            "DELETE FROM \"users\" WHERE \"id\" = <id>;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_falls_back_gracefully_with_no_known_columns() {
+        let entry = SchemaInfo::new("mystery");
+
+        assert_eq!(
+            build_crud_snippet(&entry, CrudOp::Create),
+            "INSERT INTO \"mystery\" (<column>) VALUES (<value>);"
+        );
+        assert_eq!(
+            build_crud_snippet(&entry, CrudOp::Update),
+            "UPDATE \"mystery\" SET <column> = <value> WHERE <condition>;"
+        );
+        assert_eq!(
+            build_crud_snippet(&entry, CrudOp::Delete),
+            "DELETE FROM \"mystery\" WHERE <condition>;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_update_with_no_primary_key_sets_every_column() {
+        let entry = SchemaInfo {
+            name: "logs".to_string(),
+            columns: vec![ColumnInfo::new("message", "TEXT")],
+            kind: None,
+        };
+
+        assert_eq!(
+            build_crud_snippet(&entry, CrudOp::Update),
+            "UPDATE \"logs\" SET \"message\" = <message> WHERE <condition>;"
+        );
     }
 
     #[test]

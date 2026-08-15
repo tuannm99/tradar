@@ -48,8 +48,22 @@ pub enum Context {
     Navigator,
     /// Only while the results pane has focus.
     Results,
+    /// Only while the query editor has focus (`Focus::Editor`). Split out
+    /// for the same reason as `Results`: `/` means "filter these rows" in
+    /// `Results`, but "search this buffer" here -- two different features
+    /// that happen to share a key, so they can't both live in
+    /// `Context::QueryScreen` (checked regardless of focus) without one
+    /// shadowing the other.
+    Editor,
+    /// Only while the Redis key-browser sidebar has focus (`QueryScreen`'s
+    /// browse mode -- see `docs/backlog.md`'s "Redis: key browser"). Split
+    /// out for the same reason as `Navigator`: `enter` means something
+    /// different here (fetch and show the key's value) than it does in
+    /// `Navigator` (insert a name) or `Results` (edit a cell).
+    Browse,
     /// Shared by every selectable list: the connection picker, the schema
-    /// sidebar, the results pane, and the history overlay.
+    /// sidebar, the results pane, the history overlay, and the Redis browse
+    /// sidebar.
     List,
     /// The file-path prompt and the history overlay.
     Prompt,
@@ -67,6 +81,8 @@ impl Context {
             Self::QueryScreen => "query-screen",
             Self::Navigator => "navigator",
             Self::Results => "results",
+            Self::Editor => "editor",
+            Self::Browse => "browse",
             Self::List => "list",
             Self::Prompt => "prompt",
             Self::Completion => "completion",
@@ -80,6 +96,8 @@ impl Context {
             "query-screen" => Self::QueryScreen,
             "navigator" => Self::Navigator,
             "results" => Self::Results,
+            "editor" => Self::Editor,
+            "browse" => Self::Browse,
             "list" => Self::List,
             "prompt" => Self::Prompt,
             "completion" => Self::Completion,
@@ -88,13 +106,15 @@ impl Context {
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 8] {
+    pub fn all() -> [Self; 10] {
         [
             Self::Global,
             Self::Picker,
             Self::QueryScreen,
             Self::Navigator,
             Self::Results,
+            Self::Editor,
+            Self::Browse,
             Self::List,
             Self::Prompt,
             Self::Completion,
@@ -134,6 +154,10 @@ pub enum Command {
     OpenFile,
     History,
     ExportCurl,
+    /// Export the current result to a CSV or JSON file -- format picked by
+    /// the extension typed in the prompt, same idea as `SaveFile` picking a
+    /// query's own format.
+    Export,
     Yank,
     InsertName,
     Help,
@@ -155,6 +179,25 @@ pub enum Command {
     /// Open/close a node in the navigator tree.
     Expand,
     Collapse,
+    /// Switch a Redis query screen between browse mode (key sidebar) and
+    /// console mode (raw command editor). No-op for every other connector.
+    ToggleBrowseMode,
+    /// Fetch and show the highlighted key's value in the browse sidebar.
+    BrowseOpen,
+    /// Insert a Create/Read/Update/Delete skeleton for the highlighted
+    /// navigator entry into its tab's editor -- see
+    /// `Component::crud_snippet`.
+    CrudCreate,
+    CrudRead,
+    CrudUpdate,
+    CrudDelete,
+    /// `/` in the editor: incremental search over the buffer -- distinct
+    /// from `Search` (the results-grid filter), see `Context::Editor`.
+    SearchInBuffer,
+    /// `n`: repeat the last buffer search forward.
+    SearchNext,
+    /// `N`: repeat the last buffer search backward.
+    SearchPrev,
     // Lists
     MoveDown,
     MoveUp,
@@ -198,6 +241,7 @@ impl Command {
             Self::OpenFile => "open-file",
             Self::History => "history",
             Self::ExportCurl => "export-curl",
+            Self::Export => "export",
             Self::Yank => "yank",
             Self::InsertName => "insert-name",
             Self::Help => "help",
@@ -209,6 +253,15 @@ impl Command {
             Self::TogglePreview => "toggle-preview",
             Self::Expand => "expand",
             Self::Collapse => "collapse",
+            Self::ToggleBrowseMode => "toggle-browse-mode",
+            Self::BrowseOpen => "browse-open",
+            Self::CrudCreate => "crud-create",
+            Self::CrudRead => "crud-read",
+            Self::CrudUpdate => "crud-update",
+            Self::CrudDelete => "crud-delete",
+            Self::SearchInBuffer => "search-in-buffer",
+            Self::SearchNext => "search-next",
+            Self::SearchPrev => "search-prev",
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
             Self::MoveTop => "move-top",
@@ -229,7 +282,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 45] = [
+    const ALL: [Self; 55] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -251,6 +304,7 @@ impl Command {
         Self::OpenFile,
         Self::History,
         Self::ExportCurl,
+        Self::Export,
         Self::Yank,
         Self::InsertName,
         Self::Help,
@@ -262,6 +316,15 @@ impl Command {
         Self::TogglePreview,
         Self::Expand,
         Self::Collapse,
+        Self::ToggleBrowseMode,
+        Self::BrowseOpen,
+        Self::CrudCreate,
+        Self::CrudRead,
+        Self::CrudUpdate,
+        Self::CrudDelete,
+        Self::SearchInBuffer,
+        Self::SearchNext,
+        Self::SearchPrev,
         Self::MoveDown,
         Self::MoveUp,
         Self::MoveTop,
@@ -301,6 +364,7 @@ impl Command {
             Self::OpenFile => "Load a query from a file",
             Self::History => "Browse query history",
             Self::ExportCurl => "Export the request as curl (Elasticsearch)",
+            Self::Export => "Export the result to CSV/JSON",
             Self::Yank => "Copy the selected row/document",
             Self::InsertName => "Insert the selected name into the query",
             Self::Help => "Show this help",
@@ -312,6 +376,15 @@ impl Command {
             Self::TogglePreview => "Show/hide the selected cell's full value",
             Self::Expand => "Open the selected node",
             Self::Collapse => "Close the selected node",
+            Self::ToggleBrowseMode => "Switch between Redis browse and console mode",
+            Self::BrowseOpen => "Open the selected key",
+            Self::CrudCreate => "Insert a Create snippet for the selected table",
+            Self::CrudRead => "Insert a Read snippet for the selected table",
+            Self::CrudUpdate => "Insert an Update snippet for the selected table",
+            Self::CrudDelete => "Insert a Delete snippet for the selected table",
+            Self::SearchInBuffer => "Search the buffer",
+            Self::SearchNext => "Repeat the last search forward",
+            Self::SearchPrev => "Repeat the last search backward",
             Self::MoveDown => "Move down",
             Self::MoveUp => "Move up",
             Self::MoveTop => "Jump to the top",
@@ -471,8 +544,14 @@ impl Default for Keymap {
                 ("ctrl-o", Command::OpenFile),
                 ("ctrl-r", Command::History),
                 ("ctrl-y", Command::ExportCurl),
+                ("ctrl-e", Command::Export),
+                ("ctrl-g", Command::ToggleBrowseMode),
                 ("?", Command::Help),
             ]),
+        );
+        bindings.insert(
+            Context::Browse,
+            parse_defaults(&[("enter", Command::BrowseOpen)]),
         );
         bindings.insert(
             Context::Navigator,
@@ -482,6 +561,10 @@ impl Default for Keymap {
                 ("right", Command::Expand),
                 ("h", Command::Collapse),
                 ("left", Command::Collapse),
+                ("c", Command::CrudCreate),
+                ("r", Command::CrudRead),
+                ("u", Command::CrudUpdate),
+                ("d", Command::CrudDelete),
                 ("esc", Command::Back),
                 ("?", Command::Help),
             ]),
@@ -498,6 +581,14 @@ impl Default for Keymap {
                 ("d", Command::DeleteRow),
                 ("/", Command::Search),
                 ("space", Command::TogglePreview),
+            ]),
+        );
+        bindings.insert(
+            Context::Editor,
+            parse_defaults(&[
+                ("/", Command::SearchInBuffer),
+                ("n", Command::SearchNext),
+                ("N", Command::SearchPrev),
             ]),
         );
         bindings.insert(

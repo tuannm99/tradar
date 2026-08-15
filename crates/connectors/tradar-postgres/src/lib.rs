@@ -158,6 +158,10 @@ impl QueryDriver for PostgresDriver {
         query_driver::single_table_source(query)
     }
 
+    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+        Some(query_driver::build_crud_snippet(entry, op))
+    }
+
     async fn ping(&self) -> anyhow::Result<()> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
         sqlx::query("SELECT 1").execute(pool).await?;
@@ -281,6 +285,17 @@ mod tests {
     use super::*;
     use testcontainers_modules::postgres::Postgres;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    #[test]
+    fn crud_snippet_delegates_to_the_shared_sql_builder() {
+        let driver = PostgresDriver::new("postgres://user:pass@127.0.0.1:1/db");
+        let entry = SchemaInfo::new("users");
+
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            Some("SELECT * FROM \"users\" LIMIT 100;".to_string())
+        );
+    }
 
     #[tokio::test]
     async fn connect_fails_quickly_against_an_unreachable_host() {

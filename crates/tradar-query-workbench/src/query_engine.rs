@@ -167,6 +167,16 @@ impl QueryEngine {
         self.driver.edit_sql(edit)
     }
 
+    /// A skeleton statement for `op` against the schema entry named
+    /// `name` -- see `Component::crud_snippet`. `None` when `name` isn't a
+    /// known entry (schema failed to load, or it's stale) or the driver
+    /// has nothing to say for it.
+    pub fn crud_snippet(&self, name: &str, op: tradar_core::action::CrudOp) -> Option<String> {
+        let schema = self.schema.as_ref().ok()?;
+        let entry = schema.iter().find(|entry| entry.name == name)?;
+        self.driver.crud_snippet(entry, op)
+    }
+
     /// Spawns the actual query execution and returns immediately -- the
     /// synchronous command a `Screen` calls from `handle_key_event`. Bumps
     /// an internal epoch so a reply from a superseded call (unreachable
@@ -182,6 +192,29 @@ impl QueryEngine {
         let tx = self.outcome_tx.clone();
         self.running = Some(tokio::spawn(async move {
             let outcome = match driver.execute(&query).await {
+                Ok(result) => QueryOutcome::Completed { result },
+                Err(e) => QueryOutcome::Failed {
+                    error: e.to_string(),
+                },
+            };
+            let _ = tx.send(TaggedOutcome { epoch, outcome });
+        }));
+    }
+
+    /// Spawns `driver.browse_entry(&entry)` -- the browse sidebar's Enter
+    /// action, reported back through the same outcome channel/epoch as
+    /// `submit_query`. Unlike `submit_query`, this does **not** push into
+    /// `history`: a sidebar click isn't a command the user typed and might
+    /// want to recall with Ctrl+R.
+    pub fn submit_browse(&mut self, entry: SchemaInfo) {
+        self.epoch += 1;
+        let epoch = self.epoch;
+        self.pending = true;
+
+        let driver = Arc::clone(&self.driver);
+        let tx = self.outcome_tx.clone();
+        self.running = Some(tokio::spawn(async move {
+            let outcome = match driver.browse_entry(&entry).await {
                 Ok(result) => QueryOutcome::Completed { result },
                 Err(e) => QueryOutcome::Failed {
                     error: e.to_string(),
@@ -495,6 +528,125 @@ mod tests {
         tick_until_settled(&mut engine).await;
 
         assert_eq!(engine.history(), &["SELECT 1", "SELECT 2"]);
+    }
+
+    /// A driver that overrides `browse_entry`, to exercise `submit_browse`
+    /// without a real backend.
+    struct BrowsableDriver {
+        result: QueryResult,
+    }
+
+    #[async_trait]
+    impl QueryDriver for BrowsableDriver {
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
+            Ok(Vec::new())
+        }
+        async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
+            unreachable!("submit_browse must call browse_entry, not execute")
+        }
+        async fn browse_entry(&self, _entry: &SchemaInfo) -> anyhow::Result<QueryResult> {
+            Ok(self.result.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_browse_reports_completed_via_browse_entry() {
+        let result = QueryResult::Table {
+            columns: vec!["field".to_string(), "value".to_string()],
+            rows: vec![vec!["name".to_string(), "Ada".to_string()]],
+            truncated: false,
+        };
+        let mut engine = engine(Arc::new(BrowsableDriver {
+            result: result.clone(),
+        }));
+
+        engine.submit_browse(SchemaInfo::new("user:1"));
+        assert!(engine.is_pending());
+        tick_until_settled(&mut engine).await;
+
+        match engine.take_outcome() {
+            Some(QueryOutcome::Completed { result: got }) => assert_eq!(got, result),
+            _ => panic!("expected a Completed outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_browse_does_not_append_to_history() {
+        let mut engine = engine(Arc::new(BrowsableDriver {
+            result: QueryResult::Table {
+                columns: vec![],
+                rows: vec![],
+                truncated: false,
+            },
+        }));
+
+        engine.submit_browse(SchemaInfo::new("user:1"));
+        tick_until_settled(&mut engine).await;
+
+        assert!(engine.history().is_empty());
+    }
+
+    #[test]
+    fn crud_snippet_delegates_to_the_driver_for_a_known_entry() {
+        struct SnippetDriver;
+
+        #[async_trait]
+        impl QueryDriver for SnippetDriver {
+            async fn connect(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
+                Ok(Vec::new())
+            }
+            async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
+                unreachable!()
+            }
+            fn crud_snippet(
+                &self,
+                entry: &SchemaInfo,
+                _op: tradar_core::action::CrudOp,
+            ) -> Option<String> {
+                Some(format!("SELECT * FROM {}", entry.name))
+            }
+        }
+
+        let engine = QueryEngine::new(
+            Arc::new(SnippetDriver),
+            connection(),
+            Ok(vec![SchemaInfo::new("users")]),
+        );
+
+        assert_eq!(
+            engine.crud_snippet("users", tradar_core::action::CrudOp::Read),
+            Some("SELECT * FROM users".to_string())
+        );
+    }
+
+    #[test]
+    fn crud_snippet_is_none_for_an_entry_not_in_the_schema() {
+        let engine = engine(Arc::new(FailingDriver));
+
+        assert_eq!(
+            engine.crud_snippet("ghost", tradar_core::action::CrudOp::Read),
+            None
+        );
+    }
+
+    #[test]
+    fn crud_snippet_is_none_when_the_schema_failed_to_load() {
+        let engine = QueryEngine::new(
+            Arc::new(FailingDriver),
+            connection(),
+            Err("scan failed".to_string()),
+        );
+
+        assert_eq!(
+            engine.crud_snippet("users", tradar_core::action::CrudOp::Read),
+            None
+        );
     }
 
     #[test]

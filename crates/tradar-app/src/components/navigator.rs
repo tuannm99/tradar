@@ -18,7 +18,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 
-use tradar_core::action::OutlineEntry;
+use tradar_core::action::{CrudOp, OutlineEntry};
 use tradar_core::theme::theme;
 use tradar_core::ui;
 use tradar_core::vim_list::{self, VimMove};
@@ -61,6 +61,13 @@ pub enum NavOutcome {
     Focus(usize),
     /// Switch to `tab` and put `name` into its editor.
     Insert { tab: usize, name: String },
+    /// Switch to `tab` and insert a CRUD skeleton for `name` into its
+    /// editor -- `c`/`r`/`u`/`d` on a table/collection/index/key row.
+    Snippet {
+        tab: usize,
+        name: String,
+        op: CrudOp,
+    },
 }
 
 #[derive(Default)]
@@ -214,6 +221,30 @@ impl NavigatorComponent {
                 })
             }
         }
+    }
+
+    /// What `c`/`r`/`u`/`d` mean on the current row: a CRUD snippet for
+    /// the table/collection/index/key it names. Only a **depth-0** entry
+    /// qualifies -- a single column (depth 1) or a connection row isn't a
+    /// whole row/document/key to build a statement against.
+    pub fn choose_snippet(
+        &mut self,
+        connections: &[NavConnection],
+        op: CrudOp,
+    ) -> Option<NavOutcome> {
+        let Row::Entry { connection, entry } = self.selected_row(connections)? else {
+            return None;
+        };
+        let outline_entry = &connections[connection].outline[entry];
+        if outline_entry.depth != 0 {
+            return None;
+        }
+        let tab = connections[connection].tab?;
+        Some(NavOutcome::Snippet {
+            tab,
+            name: outline_entry.label.clone(),
+            op,
+        })
     }
 
     /// Selects whatever row was clicked. Returns whether the click landed
@@ -438,6 +469,44 @@ mod tests {
             }
             _ => panic!("expected the table name, aimed at its own tab"),
         }
+    }
+
+    #[test]
+    fn choosing_a_snippet_on_a_table_reports_the_tab_name_and_op() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_snippet(&conns, CrudOp::Read) {
+            Some(NavOutcome::Snippet { tab, name, op }) => {
+                assert_eq!((tab, name.as_str(), op), (0, "users", CrudOp::Read))
+            }
+            _ => panic!("expected a snippet request aimed at the table's own tab"),
+        }
+    }
+
+    #[test]
+    fn choosing_a_snippet_on_a_column_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        assert!(
+            navigator.choose_snippet(&conns, CrudOp::Read).is_none(),
+            "a single column isn't a whole row/document/key to build a statement against"
+        );
+    }
+
+    #[test]
+    fn choosing_a_snippet_on_a_connection_row_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+
+        assert!(navigator.choose_snippet(&conns, CrudOp::Read).is_none());
     }
 
     #[test]

@@ -4,7 +4,7 @@ services:
   # ============================================================
 
   postgres:
-    image: postgres:17
+    image: postgres:17-alpine
     container_name: tui-postgres
     restart: unless-stopped
     environment:
@@ -27,7 +27,7 @@ services:
   # ============================================================
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     container_name: tui-redis
     restart: unless-stopped
     ports:
@@ -107,7 +107,7 @@ services:
   # ClickHouse
   # ============================================================
   clickhouse:
-    image: clickhouse/clickhouse-server:25.8
+    image: clickhouse/clickhouse-server:25.8-alpine
     container_name: tui-clickhouse
     restart: unless-stopped
     environment:
@@ -145,7 +145,7 @@ services:
   # RabbitMQ
   # ============================================================
   rabbitmq:
-    image: rabbitmq:4-management
+    image: rabbitmq:4-management-alpine
     container_name: tui-rabbitmq
     restart: unless-stopped
     environment:

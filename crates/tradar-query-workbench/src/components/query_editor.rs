@@ -5,10 +5,11 @@
 //! `syntect` with no pluggable backend -- see "Đánh bóng UI tổng thể" in
 //! docs/backlog.md.
 //!
-//! Deliberately minimal compared to real vim: `Normal`/`Insert` modes only
-//! (no Visual mode, no registers/macros, no counts, no operator+motion
-//! combos beyond `dd`) -- enough for editing a query, not a general-purpose
-//! editor. Row movement (`j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u`) reuses
+//! Deliberately minimal compared to real vim: no macros, no counts, no
+//! operator+motion combos beyond `dd`/`yy` -- enough for editing a query,
+//! not a general-purpose editor. `Normal`/`Insert`/`Visual`/`VisualLine`
+//! modes; one unnamed yank/delete register (no `"a`-style named ones). Row
+//! movement (`j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u`) reuses
 //! `tradar_core::vim_list`, the same module every list-rendering component
 //! in the app shares.
 
@@ -44,6 +45,24 @@ fn is_word_char(c: char) -> bool {
 pub enum EditorMode {
     Normal,
     Insert,
+    /// Charwise selection (`v`) -- `visual_anchor` holds where it started.
+    Visual,
+    /// Linewise selection (`V`) -- same anchor, but the selection always
+    /// covers whole lines regardless of either endpoint's column.
+    VisualLine,
+}
+
+/// What `y`/`d`/`x`/`c` last cut or copied -- a single unnamed register,
+/// the same one every one of those commands shares (real vim's default
+/// `"` register), not per-command or named (`"a`, `"b`, ...) ones.
+/// `Charwise` may itself contain `\n`: a multi-line charwise selection
+/// (`v` spanning lines, not `V`) yanks as one blob with embedded line
+/// breaks, same as real vim, so pasting it back reconstructs the lines
+/// instead of splicing a literal `\n` character into one line.
+#[derive(Debug, Clone, PartialEq)]
+enum Register {
+    Charwise(Vec<char>),
+    Linewise(Vec<Vec<char>>),
 }
 
 /// Which tree-sitter grammar (if any) to highlight the buffer with. Set
@@ -81,7 +100,13 @@ pub struct QueryEditorComponent {
     cursor_col: usize,
     pending_g: bool,
     pending_d: bool,
+    pending_y: bool,
     pending_z: bool,
+    /// Where `v`/`V` was pressed -- `Some` only while `mode` is `Visual`/
+    /// `VisualLine`, cleared the moment either exits (`Esc`, or `y`/`d`/
+    /// `x`/`c` finishing the selection).
+    visual_anchor: Option<(usize, usize)>,
+    register: Option<Register>,
     scroll: usize,
     visible_height: usize,
     undo_stack: Vec<Snapshot>,
@@ -113,7 +138,10 @@ impl QueryEditorComponent {
             cursor_col: 0,
             pending_g: false,
             pending_d: false,
+            pending_y: false,
             pending_z: false,
+            visual_anchor: None,
+            register: None,
             scroll: 0,
             visible_height: 0,
             undo_stack: Vec::new(),
@@ -159,7 +187,9 @@ impl QueryEditorComponent {
         self.mode = EditorMode::Normal;
         self.pending_g = false;
         self.pending_d = false;
+        self.pending_y = false;
         self.pending_z = false;
+        self.visual_anchor = None;
         // A freshly loaded buffer (a file, a history entry, a restored
         // session) has no relationship to whatever was undoable before --
         // undoing into it would silently resurrect the previous query.
@@ -299,6 +329,94 @@ impl QueryEditorComponent {
                 .sum::<usize>()
     }
 
+    /// The cursor's current `(row, col)` -- what incremental search needs
+    /// to remember as "where to jump back to" if the search is cancelled.
+    pub fn cursor(&self) -> (usize, usize) {
+        (self.cursor_row, self.cursor_col)
+    }
+
+    /// Moves the cursor straight to `(row, col)`, clamped into bounds --
+    /// the other half of `cursor()`, for restoring a remembered position.
+    /// Bypasses fold-awareness (`move_row_to`) deliberately: this is meant
+    /// for jumping back to a position the cursor was already actually on,
+    /// not for arbitrary navigation.
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        self.cursor_row = row.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = col;
+        self.clamp_col();
+    }
+
+    /// Moves the cursor to the next (or, if `backwards`, previous)
+    /// occurrence of `pattern` -- case-insensitive (ASCII only: this is a
+    /// query buffer, not general text, so full Unicode case-folding isn't
+    /// worth the index-mapping complexity it'd add), starting just past
+    /// (or before) the cursor and wrapping around the whole buffer the
+    /// same way real vim's default `wrapscan` does. Returns whether
+    /// anything was found; the cursor is left exactly where it was for an
+    /// empty `pattern` or no match anywhere.
+    pub fn find(&mut self, pattern: &str, backwards: bool) -> bool {
+        let needle: Vec<char> = pattern.chars().collect();
+        if needle.is_empty() || self.lines.is_empty() {
+            return false;
+        }
+        let n = self.lines.len();
+        for step in 0..=n {
+            let row = if backwards {
+                (self.cursor_row + n - (step % n)) % n
+            } else {
+                (self.cursor_row + step) % n
+            };
+            let line = &self.lines[row];
+            let found = if backwards {
+                let before = if step == 0 {
+                    self.cursor_col
+                } else {
+                    line.len()
+                };
+                Self::rfind_in_line(line, &needle, before)
+            } else {
+                let after = if step == 0 { self.cursor_col + 1 } else { 0 };
+                Self::find_in_line(line, &needle, after)
+            };
+            if let Some(col) = found {
+                self.cursor_row = row;
+                self.cursor_col = col;
+                self.clamp_col();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The first index at or after `from_col` where `needle` matches,
+    /// case-insensitively (ASCII).
+    fn find_in_line(haystack: &[char], needle: &[char], from_col: usize) -> Option<usize> {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return None;
+        }
+        (from_col.min(haystack.len())..=haystack.len() - needle.len())
+            .find(|&i| Self::matches_at(haystack, needle, i))
+    }
+
+    /// The last index strictly before `before_col` where `needle` matches
+    /// -- the backward counterpart of `find_in_line`.
+    fn rfind_in_line(haystack: &[char], needle: &[char], before_col: usize) -> Option<usize> {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return None;
+        }
+        (0..=haystack.len() - needle.len())
+            .filter(|&i| i < before_col)
+            .filter(|&i| Self::matches_at(haystack, needle, i))
+            .max()
+    }
+
+    fn matches_at(haystack: &[char], needle: &[char], at: usize) -> bool {
+        haystack[at..at + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    }
+
     /// Where the cursor sits on screen, given the area the editor was last
     /// drawn into -- so a popup can be placed against it.
     pub fn cursor_screen_position(&self, area: Rect) -> (u16, u16) {
@@ -332,6 +450,9 @@ impl QueryEditorComponent {
         match self.mode {
             EditorMode::Normal => self.handle_normal_key(key.code, key.modifiers),
             EditorMode::Insert => self.handle_insert_key(key.code, key.modifiers),
+            EditorMode::Visual | EditorMode::VisualLine => {
+                self.handle_visual_key(key.code, key.modifiers)
+            }
         }
     }
 
@@ -346,7 +467,9 @@ impl QueryEditorComponent {
     fn clamp_col(&mut self) {
         let len = self.current_line_len();
         let max = match self.mode {
-            EditorMode::Normal => len.saturating_sub(1),
+            EditorMode::Normal | EditorMode::Visual | EditorMode::VisualLine => {
+                len.saturating_sub(1)
+            }
             EditorMode::Insert => len,
         };
         self.cursor_col = self.cursor_col.min(max);
@@ -437,17 +560,110 @@ impl QueryEditorComponent {
         self.cursor_col += 1;
     }
 
+    /// Deletes the current line into `register` (linewise) -- `dd`.
     fn delete_current_line(&mut self) {
-        if self.lines.len() > 1 {
-            self.lines.remove(self.cursor_row);
+        let removed = if self.lines.len() > 1 {
+            let removed = self.lines.remove(self.cursor_row);
             if self.cursor_row >= self.lines.len() {
                 self.cursor_row = self.lines.len() - 1;
             }
+            removed
         } else {
-            self.lines[0].clear();
             self.cursor_col = 0;
+            std::mem::take(&mut self.lines[0])
+        };
+        self.register = Some(Register::Linewise(vec![removed]));
+        self.clamp_col();
+    }
+
+    /// Copies the current line into `register` without deleting it -- `yy`.
+    fn yank_current_line(&mut self) {
+        self.register = Some(Register::Linewise(vec![
+            self.lines[self.cursor_row].clone(),
+        ]));
+    }
+
+    /// Inserts `text` at the cursor, splitting on any embedded `\n` into
+    /// real new lines rather than a literal newline character -- what a
+    /// charwise register that spans lines needs on paste. A single-line
+    /// `text` behaves exactly like repeated `insert_char`.
+    fn insert_multiline(&mut self, text: &str) {
+        let mut pieces = text.split('\n');
+        for c in pieces.next().unwrap_or("").chars() {
+            self.insert_char(c);
+        }
+        for piece in pieces {
+            let rest = self.lines[self.cursor_row].split_off(self.cursor_col);
+            self.lines.insert(self.cursor_row + 1, rest);
+            self.cursor_row += 1;
+            self.cursor_col = 0;
+            for c in piece.chars() {
+                self.insert_char(c);
+            }
+        }
+    }
+
+    /// `p`/`P`: pastes `register` after (`p`) or before (`P`) the cursor --
+    /// linewise as a new line, charwise inline (splitting embedded `\n`
+    /// via `insert_multiline`). A no-op with nothing to checkpoint if
+    /// nothing's ever been yanked or deleted.
+    fn paste(&mut self, before: bool) {
+        let Some(register) = self.register.clone() else {
+            return;
+        };
+        self.checkpoint();
+        match register {
+            Register::Linewise(lines) => {
+                let at = if before {
+                    self.cursor_row
+                } else {
+                    self.cursor_row + 1
+                };
+                for (i, line) in lines.into_iter().enumerate() {
+                    self.lines.insert(at + i, line);
+                }
+                self.cursor_row = at;
+                self.cursor_col = 0;
+            }
+            Register::Charwise(chars) => {
+                self.cursor_col = if before {
+                    self.cursor_col
+                } else {
+                    (self.cursor_col + 1).min(self.current_line_len())
+                };
+                let text: String = chars.into_iter().collect();
+                self.insert_multiline(&text);
+            }
         }
         self.clamp_col();
+    }
+
+    /// Movement-only keys, shared by Normal and Visual/VisualLine mode:
+    /// `h`/`l`/`0`/`$` here, plus `j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u` via
+    /// `vim_list`. Returns whether `code` was one of them, so a caller can
+    /// fall through to its own mode-specific keys otherwise.
+    fn handle_motion_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        if let Some(mv) = vim_list::recognize(code, modifiers, &mut self.pending_g) {
+            let mut row = self.cursor_row;
+            vim_list::apply(mv, &mut row, self.lines.len(), self.visible_height);
+            self.move_row_to(row);
+            return true;
+        }
+        match code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.cursor_col = self.cursor_col.saturating_sub(1);
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let max = self.current_line_len().saturating_sub(1);
+                self.cursor_col = (self.cursor_col + 1).min(max);
+            }
+            KeyCode::Char('0') => self.cursor_col = 0,
+            KeyCode::Char('$') => {
+                self.cursor_col = self.current_line_len().saturating_sub(1);
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
@@ -463,6 +679,14 @@ impl QueryEditorComponent {
             return;
         }
 
+        // `yy` copies the current line -- no checkpoint, nothing mutates.
+        if std::mem::take(&mut self.pending_y) {
+            if code == KeyCode::Char('y') {
+                self.yank_current_line();
+            }
+            return;
+        }
+
         // `za` toggles the fold under the cursor -- real vim's binding for
         // it, kept even though this editor has no other `z`-prefixed folds
         // command (`zo`/`zc`/`zR`/`zM`...) so a vim user's first guess works.
@@ -473,25 +697,11 @@ impl QueryEditorComponent {
             return;
         }
 
-        if let Some(mv) = vim_list::recognize(code, modifiers, &mut self.pending_g) {
-            let mut row = self.cursor_row;
-            vim_list::apply(mv, &mut row, self.lines.len(), self.visible_height);
-            self.move_row_to(row);
+        if self.handle_motion_key(code, modifiers) {
             return;
         }
 
         match code {
-            KeyCode::Left | KeyCode::Char('h') => {
-                self.cursor_col = self.cursor_col.saturating_sub(1);
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                let max = self.current_line_len().saturating_sub(1);
-                self.cursor_col = (self.cursor_col + 1).min(max);
-            }
-            KeyCode::Char('0') => self.cursor_col = 0,
-            KeyCode::Char('$') => {
-                self.cursor_col = self.current_line_len().saturating_sub(1);
-            }
             KeyCode::Char('i') => {
                 self.checkpoint();
                 self.mode = EditorMode::Insert;
@@ -526,14 +736,26 @@ impl QueryEditorComponent {
                 self.cursor_col = 0;
                 self.mode = EditorMode::Insert;
             }
+            KeyCode::Char('v') => {
+                self.visual_anchor = Some((self.cursor_row, self.cursor_col));
+                self.mode = EditorMode::Visual;
+            }
+            KeyCode::Char('V') => {
+                self.visual_anchor = Some((self.cursor_row, self.cursor_col));
+                self.mode = EditorMode::VisualLine;
+            }
             KeyCode::Char('x') => {
                 if self.cursor_col < self.current_line_len() {
                     self.checkpoint();
-                    self.lines[self.cursor_row].remove(self.cursor_col);
+                    let removed = self.lines[self.cursor_row].remove(self.cursor_col);
+                    self.register = Some(Register::Charwise(vec![removed]));
                     self.clamp_col();
                 }
             }
+            KeyCode::Char('p') => self.paste(false),
+            KeyCode::Char('P') => self.paste(true),
             KeyCode::Char('d') => self.pending_d = true,
+            KeyCode::Char('y') => self.pending_y = true,
             KeyCode::Char('z') => self.pending_z = true,
             // Real vim's redo key, `ctrl-r`, is already query-screen's
             // "open history" and is intercepted before it ever reaches
@@ -544,6 +766,118 @@ impl QueryEditorComponent {
             KeyCode::Char('u') => self.undo(),
             KeyCode::Char('U') => self.redo(),
             _ => {}
+        }
+    }
+
+    /// The current Visual/VisualLine selection's endpoints as `(start,
+    /// end)`, ordered so `start <= end` regardless of which direction the
+    /// cursor moved from the anchor. Falls back to the cursor alone (an
+    /// empty/degenerate selection) if called with no anchor set -- callers
+    /// only reach this from Visual/VisualLine, where `visual_anchor` is
+    /// always `Some`, but the type doesn't guarantee it.
+    fn selection_bounds(&self) -> ((usize, usize), (usize, usize)) {
+        let anchor = self
+            .visual_anchor
+            .unwrap_or((self.cursor_row, self.cursor_col));
+        let cursor = (self.cursor_row, self.cursor_col);
+        if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        }
+    }
+
+    /// The exact characters a charwise selection covers, `sr`/`sc` through
+    /// `er`/`ec` **inclusive of both ends** (real vim's charwise selection
+    /// includes the character the cursor is on, unlike most editors'
+    /// exclusive ranges). A selection spanning more than one line joins
+    /// them with `\n` -- see `Register::Charwise`'s own doc comment.
+    fn charwise_slice(&self, sr: usize, sc: usize, er: usize, ec: usize) -> Vec<char> {
+        if sr == er {
+            let line = &self.lines[sr];
+            let end = (ec + 1).min(line.len());
+            return line[sc.min(end)..end].to_vec();
+        }
+        let mut result = self.lines[sr][sc.min(self.lines[sr].len())..].to_vec();
+        result.push('\n');
+        for row in (sr + 1)..er {
+            result.extend(self.lines[row].iter());
+            result.push('\n');
+        }
+        let last = &self.lines[er];
+        let end = (ec + 1).min(last.len());
+        result.extend(last[..end].iter());
+        result
+    }
+
+    fn exit_visual(&mut self) {
+        self.mode = EditorMode::Normal;
+        self.visual_anchor = None;
+        self.clamp_col();
+    }
+
+    /// `y` in Visual/VisualLine: copies the selection into `register` and
+    /// leaves the cursor at its start -- doesn't mutate the buffer, so no
+    /// checkpoint.
+    fn yank_selection(&mut self) {
+        let linewise = self.mode == EditorMode::VisualLine;
+        let ((sr, sc), (er, ec)) = self.selection_bounds();
+        self.register = Some(if linewise {
+            Register::Linewise(self.lines[sr..=er].to_vec())
+        } else {
+            Register::Charwise(self.charwise_slice(sr, sc, er, ec))
+        });
+        self.cursor_row = sr;
+        self.cursor_col = sc;
+        self.exit_visual();
+    }
+
+    /// `d`/`x` (`enter_insert = false`) or `c` (`enter_insert = true`) on
+    /// the current Visual/VisualLine selection: checkpoints, cuts the
+    /// range into `register`, then either drops back to Normal or lands in
+    /// Insert right at the cut -- real vim's `c` behavior, so the
+    /// replacement can be typed immediately.
+    fn delete_selection(&mut self, enter_insert: bool) {
+        self.checkpoint();
+        let linewise = self.mode == EditorMode::VisualLine;
+        let ((sr, sc), (er, ec)) = self.selection_bounds();
+        if linewise {
+            self.register = Some(Register::Linewise(self.lines[sr..=er].to_vec()));
+            self.lines.drain(sr..=er);
+            if self.lines.is_empty() {
+                self.lines.push(Vec::new());
+            }
+            self.cursor_row = sr.min(self.lines.len() - 1);
+            self.cursor_col = 0;
+        } else {
+            self.register = Some(Register::Charwise(self.charwise_slice(sr, sc, er, ec)));
+            let tail: Vec<char> = self.lines[er][(ec + 1).min(self.lines[er].len())..].to_vec();
+            self.lines[sr].truncate(sc);
+            self.lines[sr].extend(tail);
+            if er > sr {
+                self.lines.drain(sr + 1..=er);
+            }
+            self.cursor_row = sr;
+            self.cursor_col = sc;
+        }
+        self.visual_anchor = None;
+        self.mode = if enter_insert {
+            EditorMode::Insert
+        } else {
+            EditorMode::Normal
+        };
+        self.clamp_col();
+    }
+
+    fn handle_visual_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => self.exit_visual(),
+            KeyCode::Char('y') => self.yank_selection(),
+            KeyCode::Char('d') | KeyCode::Char('x') => self.delete_selection(false),
+            KeyCode::Char('c') => self.delete_selection(true),
+            _ => {
+                self.handle_motion_key(code, modifiers);
+            }
         }
     }
 
@@ -634,6 +968,29 @@ impl QueryEditorComponent {
         Some(result)
     }
 
+    /// Whether `(row, col)` falls inside the current Visual/VisualLine
+    /// selection -- always `false` outside those modes. Charwise checks
+    /// the exact inclusive range (see `charwise_slice`); linewise counts
+    /// the whole row regardless of column.
+    fn is_selected(&self, row: usize, col: usize) -> bool {
+        if !matches!(self.mode, EditorMode::Visual | EditorMode::VisualLine) {
+            return false;
+        }
+        let ((sr, sc), (er, ec)) = self.selection_bounds();
+        if row < sr || row > er {
+            return false;
+        }
+        if self.mode == EditorMode::VisualLine {
+            return true;
+        }
+        match row {
+            r if r == sr && r == er => col >= sc && col <= ec,
+            r if r == sr => col >= sc,
+            r if r == er => col <= ec,
+            _ => true,
+        }
+    }
+
     /// `fold`, when `row` is the header line of a foldable statement, is
     /// `(currently folded, hidden line count)` -- drives the gutter marker
     /// (`▸` folded / `▾` open) and, when folded, the trailing "N lines
@@ -661,6 +1018,12 @@ impl QueryEditorComponent {
             if let Some(color) = colors.and_then(|c| c.get(col)) {
                 style = style.fg(*color);
             }
+            // Selection background first, cursor `REVERSED` on top -- the
+            // cursor cell still needs to read clearly as "here" even
+            // inside a highlighted selection.
+            if self.is_selected(row, col) {
+                style = style.bg(theme.selection_bg);
+            }
             if row == self.cursor_row && col == self.cursor_col {
                 style = style.add_modifier(Modifier::REVERSED);
             }
@@ -673,6 +1036,10 @@ impl QueryEditorComponent {
                 " ",
                 Style::default().add_modifier(Modifier::REVERSED),
             ));
+        } else if line.is_empty() && self.is_selected(row, 0) {
+            // An empty line inside a selection (typically `VisualLine`)
+            // still needs *something* highlighted, or it'd look skipped.
+            spans.push(Span::styled(" ", Style::default().bg(theme.selection_bg)));
         }
         if let Some((true, count)) = fold {
             let plural = if count == 1 { "" } else { "s" };
@@ -742,6 +1109,8 @@ impl QueryEditorComponent {
             let (mode_label, mode_color) = match self.mode {
                 EditorMode::Normal => (" NORMAL ", theme.accent),
                 EditorMode::Insert => (" INSERT ", theme.warning),
+                EditorMode::Visual => (" VISUAL ", theme.selection_bg),
+                EditorMode::VisualLine => (" V-LINE ", theme.selection_bg),
             };
             let mode_area = Rect {
                 x: inner.x,
@@ -1389,5 +1758,287 @@ mod tests {
             text.contains("FROM users"),
             "a freshly loaded buffer must not inherit stale fold state: {text}"
         );
+    }
+
+    // --- registers: dd/x/yy/p/P ---
+
+    #[test]
+    fn dd_stages_the_deleted_line_for_paste() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nb\nc");
+        editor.forward_key(key(KeyCode::Char('j')));
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('d')));
+        assert_eq!(editor.text(), "a\nc");
+
+        // The cursor now sits on "c" (what used to be line 3); `P` pastes
+        // *before* it, restoring the original order. (`p` would paste
+        // after and give "a\nc\nb" instead -- also correct, just not a
+        // round trip.)
+        editor.forward_key(key(KeyCode::Char('P')));
+
+        assert_eq!(editor.text(), "a\nb\nc");
+    }
+
+    #[test]
+    fn x_stages_the_deleted_character_for_paste() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+        editor.forward_key(key(KeyCode::Char('x')));
+        assert_eq!(editor.text(), "bc");
+
+        editor.forward_key(key(KeyCode::Char('p')));
+
+        assert_eq!(editor.text(), "bac", "x then p is vim's classic swap");
+    }
+
+    #[test]
+    fn yy_copies_the_current_line_without_deleting_it() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nb");
+
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('y')));
+
+        assert_eq!(editor.text(), "a\nb", "yy must not mutate the buffer");
+
+        editor.forward_key(key(KeyCode::Char('p')));
+
+        assert_eq!(editor.text(), "a\na\nb");
+    }
+
+    #[test]
+    fn shift_p_pastes_a_linewise_register_above_the_cursor() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nb");
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('j')));
+
+        editor.forward_key(key(KeyCode::Char('P')));
+
+        assert_eq!(editor.text(), "a\na\nb");
+    }
+
+    #[test]
+    fn paste_with_an_empty_register_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('p')));
+
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn u_undoes_a_paste() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nb");
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('p')));
+        assert_eq!(editor.text(), "a\na\nb");
+
+        editor.forward_key(key(KeyCode::Char('u')));
+
+        assert_eq!(editor.text(), "a\nb");
+    }
+
+    // --- Visual/VisualLine mode ---
+
+    #[test]
+    fn v_then_esc_leaves_the_buffer_untouched_and_returns_to_normal() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('v')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Esc));
+
+        assert_eq!(editor.mode, EditorMode::Normal);
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn visual_charwise_yank_then_paste_round_trips_the_selection() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abcdef");
+
+        editor.forward_key(key(KeyCode::Char('v')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('y')));
+
+        assert_eq!(
+            editor.mode,
+            EditorMode::Normal,
+            "y exits Visual mode back to Normal"
+        );
+        assert_eq!(editor.text(), "abcdef", "y must not mutate the buffer");
+
+        // Cursor lands at the start of what was just yanked (column 0);
+        // `P` pastes "abc" (the inclusive 3-char selection) before it.
+        editor.forward_key(key(KeyCode::Char('P')));
+
+        assert_eq!(editor.text(), "abcabcdef");
+    }
+
+    #[test]
+    fn visual_charwise_delete_spanning_lines_joins_the_remainder() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("hello\nworld");
+        // Select from column 3 of line 0 ("lo\nwor" inclusive) to column 2
+        // of line 1: "hel" (kept) + "lo\nwor" (cut) + "ld" (kept) = "helld".
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('v')));
+        editor.forward_key(key(KeyCode::Char('j')));
+        editor.forward_key(key(KeyCode::Char('h')));
+
+        editor.forward_key(key(KeyCode::Char('d')));
+
+        assert_eq!(editor.text(), "helld");
+    }
+
+    #[test]
+    fn visual_line_delete_removes_whole_lines_regardless_of_column() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("aaa\nbbb\nccc");
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('V')));
+        editor.forward_key(key(KeyCode::Char('j')));
+
+        editor.forward_key(key(KeyCode::Char('d')));
+
+        assert_eq!(editor.text(), "ccc");
+    }
+
+    #[test]
+    fn visual_line_yank_then_paste_inserts_whole_lines() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("aaa\nbbb\nccc");
+        editor.forward_key(key(KeyCode::Char('V')));
+        editor.forward_key(key(KeyCode::Char('j')));
+
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('G')));
+        editor.forward_key(key(KeyCode::Char('p')));
+
+        assert_eq!(editor.text(), "aaa\nbbb\nccc\naaa\nbbb");
+    }
+
+    #[test]
+    fn visual_c_deletes_the_selection_and_enters_insert_mode() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abcdef");
+
+        editor.forward_key(key(KeyCode::Char('v')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('c')));
+
+        assert_eq!(editor.mode, EditorMode::Insert);
+        assert_eq!(editor.text(), "def");
+
+        type_str(&mut editor, "XYZ");
+        assert_eq!(editor.text(), "XYZdef");
+    }
+
+    #[test]
+    fn u_undoes_a_visual_delete() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abcdef");
+        editor.forward_key(key(KeyCode::Char('v')));
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('d')));
+        assert_eq!(editor.text(), "cdef");
+
+        editor.forward_key(key(KeyCode::Char('u')));
+
+        assert_eq!(editor.text(), "abcdef");
+    }
+
+    #[test]
+    fn moving_in_visual_mode_past_a_folded_statement_skips_it() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;\nSELECT 2;");
+        editor.forward_key(key(KeyCode::Char('z')));
+        editor.forward_key(key(KeyCode::Char('a')));
+
+        editor.forward_key(key(KeyCode::Char('V')));
+        editor.forward_key(key(KeyCode::Char('j')));
+
+        assert_eq!(
+            editor.cursor_row, 3,
+            "Visual-mode movement funnels through the same move_row_to as Normal"
+        );
+    }
+
+    // --- find (buffer search) ---
+
+    #[test]
+    fn find_moves_the_cursor_to_the_next_match() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id from users where id = 1");
+
+        let found = editor.find("from", false);
+
+        assert!(found);
+        assert_eq!(editor.cursor_col, 10);
+    }
+
+    #[test]
+    fn find_is_case_insensitive() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("SELECT * FROM users");
+
+        assert!(editor.find("from", false));
+        assert_eq!(editor.cursor_col, 9);
+    }
+
+    #[test]
+    fn find_wraps_around_the_buffer() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nneedle\nb");
+        editor.forward_key(key(KeyCode::Char('G'))); // last line, past the match
+
+        let found = editor.find("needle", false);
+
+        assert!(found);
+        assert_eq!(editor.cursor_row, 1);
+    }
+
+    #[test]
+    fn find_backwards_finds_the_previous_match() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("needle a needle b");
+        editor.forward_key(key(KeyCode::Char('$')));
+
+        let found = editor.find("needle", true);
+
+        assert!(found);
+        assert_eq!(editor.cursor_col, 9);
+    }
+
+    #[test]
+    fn find_with_no_match_leaves_the_cursor_untouched() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+        editor.forward_key(key(KeyCode::Char('l')));
+
+        let found = editor.find("zzz", false);
+
+        assert!(!found);
+        assert_eq!(editor.cursor_col, 1);
+    }
+
+    #[test]
+    fn find_with_an_empty_pattern_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        assert!(!editor.find("", false));
     }
 }

@@ -190,6 +190,7 @@ impl QueryDriver for ElasticsearchDriver {
                 Some(SchemaInfo {
                     name: name.to_string(),
                     columns: index_fields(&mappings, name),
+                    kind: None,
                 })
             })
             .collect())
@@ -221,6 +222,20 @@ impl QueryDriver for ElasticsearchDriver {
 
     fn export_curl(&self, query: &str) -> Option<String> {
         to_curl(&self.base_url, query)
+    }
+
+    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+        let index = &entry.name;
+        Some(match op {
+            tradar_core::action::CrudOp::Read => format!(
+                "GET {index}/_search\n{{\n  \"query\": {{\n    \"match_all\": {{}}\n  }}\n}}"
+            ),
+            tradar_core::action::CrudOp::Create => format!("POST {index}/_doc\n{{\n}}"),
+            tradar_core::action::CrudOp::Update => {
+                format!("POST {index}/_update/<id>\n{{\n  \"doc\": {{\n  }}\n}}")
+            }
+            tradar_core::action::CrudOp::Delete => format!("DELETE {index}/_doc/<id>"),
+        })
     }
 }
 
@@ -311,6 +326,32 @@ mod tests {
     use super::*;
     use testcontainers_modules::elastic_search::ElasticSearch;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    #[test]
+    fn crud_snippet_covers_all_four_ops() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+        let entry = SchemaInfo::new("my-index");
+
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            Some(
+                "GET my-index/_search\n{\n  \"query\": {\n    \"match_all\": {}\n  }\n}"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create),
+            Some("POST my-index/_doc\n{\n}".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update),
+            Some("POST my-index/_update/<id>\n{\n  \"doc\": {\n  }\n}".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete),
+            Some("DELETE my-index/_doc/<id>".to_string())
+        );
+    }
 
     #[test]
     fn parse_query_splits_method_path_and_body() {

@@ -151,6 +151,10 @@ impl QueryDriver for SqliteDriver {
         query_driver::single_table_source(query)
     }
 
+    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+        Some(query_driver::build_crud_snippet(entry, op))
+    }
+
     async fn ping(&self) -> anyhow::Result<()> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
         sqlx::query("SELECT 1").execute(pool).await?;
@@ -189,6 +193,7 @@ impl QueryDriver for SqliteDriver {
                         primary_key: pk != 0,
                     })
                     .collect(),
+                kind: None,
             });
         }
         Ok(schema)
@@ -264,6 +269,17 @@ pub fn connector() -> Box<dyn Connector> {
 mod tests {
     use super::*;
     use tradar_query_workbench::query_engine::QueryOutcome;
+
+    #[test]
+    fn crud_snippet_delegates_to_the_shared_sql_builder() {
+        let driver = SqliteDriver::new("test.db");
+        let entry = SchemaInfo::new("users");
+
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            Some("SELECT * FROM \"users\" LIMIT 100;".to_string())
+        );
+    }
 
     #[tokio::test]
     async fn a_transaction_through_query_engine_does_not_get_stuck_pending() {

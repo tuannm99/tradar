@@ -12,7 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use tradar_core::action::{Action, Component};
+use tradar_core::action::{Action, Component, CrudOp};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::{ConnectionStore, SavedConnection, SessionState};
 use tradar_core::theme::theme;
@@ -306,6 +306,10 @@ impl RootComponent {
                 None
             }
             Command::InsertName | Command::Open => self.navigator.choose(&connections),
+            Command::CrudCreate => self.navigator.choose_snippet(&connections, CrudOp::Create),
+            Command::CrudRead => self.navigator.choose_snippet(&connections, CrudOp::Read),
+            Command::CrudUpdate => self.navigator.choose_snippet(&connections, CrudOp::Update),
+            Command::CrudDelete => self.navigator.choose_snippet(&connections, CrudOp::Delete),
             Command::ToggleNavigator => {
                 self.toggle_navigator();
                 None
@@ -329,6 +333,16 @@ impl RootComponent {
                 self.active_tab = tab;
                 if let ScreenSlot::Active(screen) = &mut self.tabs[tab].screen {
                     screen.insert_text(&name);
+                }
+                self.navigator_focused = false;
+                None
+            }
+            NavOutcome::Snippet { tab, name, op } => {
+                self.active_tab = tab;
+                if let ScreenSlot::Active(screen) = &mut self.tabs[tab].screen
+                    && let Some(text) = screen.crud_snippet(&name, op)
+                {
+                    screen.insert_text(&text);
                 }
                 self.navigator_focused = false;
                 None
@@ -1238,6 +1252,9 @@ mod tests {
         fn insert_text(&mut self, text: &str) {
             *self.inserted.borrow_mut() = text.to_string();
         }
+        fn crud_snippet(&self, name: &str, op: CrudOp) -> Option<String> {
+            Some(format!("{name}:{op:?}"))
+        }
         fn connection_alive(&self) -> Option<bool> {
             Some(true)
         }
@@ -1313,6 +1330,34 @@ mod tests {
         assert!(
             !root.navigator_focused,
             "focus goes back to where the text landed"
+        );
+    }
+
+    #[test]
+    fn pressing_r_on_a_table_in_the_navigator_inserts_a_read_snippet() {
+        let (mut root, inserted) = root_with_navigator();
+        root.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+
+        root.handle_key_event(KeyCode::Char('r'), KeyModifiers::NONE);
+
+        assert_eq!(inserted.borrow().as_str(), "users:Read");
+        assert!(
+            !root.navigator_focused,
+            "focus goes back to where the text landed"
+        );
+    }
+
+    #[test]
+    fn pressing_c_on_a_connection_row_does_nothing() {
+        let (mut root, inserted) = root_with_navigator();
+
+        root.handle_key_event(KeyCode::Char('c'), KeyModifiers::NONE);
+
+        assert_eq!(
+            inserted.borrow().as_str(),
+            "",
+            "a connection row isn't a table to build a CRUD statement against"
         );
     }
 

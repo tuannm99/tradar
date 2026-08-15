@@ -74,13 +74,23 @@ pub fn default_queries_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Turns what the user typed in a save/open prompt into a path. A bare
-/// name goes in the queries directory and gains a `.sql` extension; a name
-/// containing a separator (or starting with `~`) is taken as a path and
-/// used as-is, so anyone who wants to save next to their project still
-/// can.
+/// name, or a relative path with subfolders (e.g. `reports/first`), lands
+/// inside the queries directory and gains a `.sql` extension if it doesn't
+/// already have one -- this is what lets the folder browser's own
+/// subfolder prefills (`reports/`) round-trip correctly. Only an explicit
+/// escape -- absolute (`/...`), home (`~/...`), or CWD-relative (`./...`,
+/// `../...`) -- is taken as a path and used as-is, so anyone who wants to
+/// save next to their project still can.
 pub fn resolve_query_path(input: &str, queries_dir: &std::path::Path) -> PathBuf {
     let input = input.trim();
-    if input.contains('/') || input.contains('\\') || input.starts_with('~') {
+    let is_escape = input.starts_with('/')
+        || input.starts_with('\\')
+        || input.starts_with('~')
+        || input.starts_with("./")
+        || input.starts_with("../")
+        || input.starts_with(".\\")
+        || input.starts_with("..\\");
+    if is_escape {
         return PathBuf::from(input);
     }
     let name = if std::path::Path::new(input).extension().is_some() {
@@ -337,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn anything_that_looks_like_a_path_is_used_as_typed() {
+    fn an_explicit_escape_is_used_as_typed() {
         let dir = std::path::Path::new("/home/u/.config/tradar/queries");
 
         assert_eq!(
@@ -349,8 +359,27 @@ mod tests {
             PathBuf::from("./one.sql")
         );
         assert_eq!(
+            resolve_query_path("../one.sql", dir),
+            PathBuf::from("../one.sql")
+        );
+        assert_eq!(
             resolve_query_path("~/one.sql", dir),
             PathBuf::from("~/one.sql")
+        );
+    }
+
+    #[test]
+    fn a_relative_subfolder_is_joined_into_the_queries_directory() {
+        let dir = std::path::Path::new("/home/u/.config/tradar/queries");
+
+        assert_eq!(
+            resolve_query_path("reports/first", dir),
+            dir.join("reports/first.sql"),
+            "no leading escape marker, so this is a subfolder inside the queries dir, not a cwd-relative path"
+        );
+        assert_eq!(
+            resolve_query_path("reports/first.sql", dir),
+            dir.join("reports/first.sql")
         );
     }
 

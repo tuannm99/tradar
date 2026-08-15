@@ -383,6 +383,8 @@ fn context_title(context: Context) -> &'static str {
         Context::QueryScreen => "Query screen",
         Context::Navigator => "Database navigator (when focused)",
         Context::Results => "Results pane (when focused)",
+        Context::Editor => "Query editor (when focused)",
+        Context::Browse => "Redis key browser (when focused)",
         Context::List => "Lists (connections, schema, results, history)",
         Context::Prompt => "Prompts and overlays",
         Context::Completion => "Autocomplete (while suggestions show)",

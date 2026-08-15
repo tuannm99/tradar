@@ -208,7 +208,11 @@ impl QueryDriver for MongoDriver {
                 }
                 Ok(None) | Err(_) => Vec::new(),
             };
-            schema.push(SchemaInfo { name, columns });
+            schema.push(SchemaInfo {
+                name,
+                columns,
+                kind: None,
+            });
         }
         Ok(schema)
     }
@@ -218,6 +222,20 @@ impl QueryDriver for MongoDriver {
         let db = self.database()?;
         let collection = db.collection::<Document>(&parsed.collection);
         run_method(&collection, &parsed.method, &parsed.args).await
+    }
+
+    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+        let collection = &entry.name;
+        Some(match op {
+            tradar_core::action::CrudOp::Read => format!("db.{collection}.find({{}})"),
+            tradar_core::action::CrudOp::Create => format!("db.{collection}.insertOne({{}})"),
+            tradar_core::action::CrudOp::Update => {
+                format!("db.{collection}.updateOne({{_id: ObjectId(\"<id>\")}}, {{$set: {{}}}})")
+            }
+            tradar_core::action::CrudOp::Delete => {
+                format!("db.{collection}.deleteOne({{_id: ObjectId(\"<id>\")}})")
+            }
+        })
     }
 }
 
@@ -402,6 +420,29 @@ pub fn connector() -> Box<dyn Connector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crud_snippet_covers_all_four_ops() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+        let entry = SchemaInfo::new("users");
+
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            Some("db.users.find({})".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create),
+            Some("db.users.insertOne({})".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update),
+            Some("db.users.updateOne({_id: ObjectId(\"<id>\")}, {$set: {}})".to_string())
+        );
+        assert_eq!(
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete),
+            Some("db.users.deleteOne({_id: ObjectId(\"<id>\")})".to_string())
+        );
+    }
 
     #[test]
     fn parses_a_find_with_a_filter() {
