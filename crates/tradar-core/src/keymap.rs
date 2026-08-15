@@ -144,6 +144,10 @@ pub enum Command {
     DeleteRow,
     /// Narrow the results grid to rows matching what you type.
     Search,
+    /// Show/hide the selected cell's full value in a panel below the grid
+    /// -- pretty-printed if it's a JSON object/array, so a jsonb column no
+    /// longer means squinting at a truncated one-liner.
+    TogglePreview,
     /// Open/close a node in the navigator tree.
     Expand,
     Collapse,
@@ -196,6 +200,7 @@ impl Command {
             Self::EditCell => "edit-cell",
             Self::DeleteRow => "delete-row",
             Self::Search => "search",
+            Self::TogglePreview => "toggle-preview",
             Self::Expand => "expand",
             Self::Collapse => "collapse",
             Self::MoveDown => "move-down",
@@ -218,7 +223,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 42] = [
+    const ALL: [Self; 43] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -246,6 +251,7 @@ impl Command {
         Self::EditCell,
         Self::DeleteRow,
         Self::Search,
+        Self::TogglePreview,
         Self::Expand,
         Self::Collapse,
         Self::MoveDown,
@@ -293,6 +299,7 @@ impl Command {
             Self::EditCell => "Edit the selected cell",
             Self::DeleteRow => "Delete the selected row",
             Self::Search => "Filter the results",
+            Self::TogglePreview => "Show/hide the selected cell's full value",
             Self::Expand => "Open the selected node",
             Self::Collapse => "Close the selected node",
             Self::MoveDown => "Move down",
@@ -478,6 +485,7 @@ impl Default for Keymap {
                 ("enter", Command::EditCell),
                 ("d", Command::DeleteRow),
                 ("/", Command::Search),
+                ("space", Command::TogglePreview),
             ]),
         );
         bindings.insert(

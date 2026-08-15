@@ -639,6 +639,7 @@ impl Component for QueryScreenComponent {
             }
             Command::PrevColumn => self.results.prev_column(),
             Command::NextColumn => self.results.next_column(),
+            Command::TogglePreview => self.results.toggle_preview(),
             Command::EditCell => self.begin_edit_cell(),
             Command::DeleteRow => self.begin_delete_row(),
             Command::Search => {
@@ -1134,6 +1135,34 @@ mod tests {
         screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
 
         assert_eq!(screen.results.selected_cell(), Some(("b", "2")));
+    }
+
+    #[test]
+    fn space_toggles_the_cell_preview_when_the_results_pane_has_focus() {
+        let (mut screen, _rx) = screen();
+        screen.focus = Focus::Results;
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["metadata".to_string()],
+            rows: vec![vec![r#"{"theme":"dark"}"#.to_string()]],
+            truncated: false,
+        });
+        let backend = TestBackend::new(60, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        screen.handle_key_event(KeyCode::Char(' '), KeyModifiers::NONE);
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("full value"), "buffer was: {text}");
+        assert!(text.contains("\"theme\""), "buffer was: {text}");
+
+        screen.handle_key_event(KeyCode::Char(' '), KeyModifiers::NONE);
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(!text.contains("full value"), "buffer was: {text}");
     }
 
     /// A screen whose schema has a table worth completing.

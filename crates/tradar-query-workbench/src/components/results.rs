@@ -62,6 +62,23 @@ const MAX_COLUMN_WIDTH: usize = 40;
 /// Blank columns between two rendered columns.
 const COLUMN_SPACING: u16 = 2;
 
+/// Rows given to the cell-preview panel when it's open, capped so it can
+/// never crowd the table out of the results pane entirely.
+const PREVIEW_HEIGHT: u16 = 8;
+
+/// The selected cell's value, pretty-printed if it parses as a JSON object
+/// or array -- a jsonb column, a Postgres/SQLite JSON-text value -- and
+/// left as-is otherwise (a plain string gains nothing from reformatting,
+/// and this is also the fallback for a value that isn't JSON at all).
+fn preview_text(value: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(parsed @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+            serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| value.to_string())
+        }
+        _ => value.to_string(),
+    }
+}
+
 /// The columns from `offset` on that fit in `total` once the row-number
 /// gutter has taken its share. Always at least one, even when it doesn't
 /// fit: a column too wide for the terminal still has to be reachable.
@@ -110,6 +127,11 @@ pub struct ResultsComponent {
     /// a click can land on a *cell* and not just a row.
     column_spans: Vec<(usize, u16, u16)>,
     visible_height: usize,
+    /// Whether the selected cell's full value is shown in a panel below the
+    /// grid -- see `toggle_preview`. Closed on every selection change: a
+    /// preview left open while the cursor moves on would show the wrong
+    /// cell's value without saying so.
+    preview_open: bool,
 }
 
 impl Default for ResultsComponent {
@@ -133,6 +155,7 @@ impl ResultsComponent {
             rows_area: Rect::ZERO,
             column_spans: Vec::new(),
             visible_height: 0,
+            preview_open: false,
         }
     }
 
@@ -147,6 +170,7 @@ impl ResultsComponent {
         self.selected = 0;
         self.selected_col = 0;
         self.col_offset = 0;
+        self.preview_open = false;
         // A filter from the last result would silently hide rows of this
         // one, and you'd be reading a subset without knowing it.
         self.filter.clear();
@@ -223,6 +247,7 @@ impl ResultsComponent {
         self.last_error = Some(error);
         self.last_result = None;
         self.selected = 0;
+        self.preview_open = false;
     }
 
     /// How many rows are selectable right now -- after filtering, since
@@ -249,6 +274,16 @@ impl ResultsComponent {
     pub fn apply_move(&mut self, mv: VimMove) {
         let count = self.item_count();
         vim_list::apply(mv, &mut self.selected, count, self.visible_height);
+        self.preview_open = false;
+    }
+
+    /// Shows/hides the selected cell's full value in a panel below the
+    /// grid -- a no-op when nothing is selected (no result, an error, or an
+    /// `Affected` report, none of which have a cell to preview).
+    pub fn toggle_preview(&mut self) {
+        if self.selected_cell().is_some() {
+            self.preview_open = !self.preview_open;
+        }
     }
 
     pub fn move_down(&mut self) {
@@ -288,11 +323,13 @@ impl ResultsComponent {
     /// the cursor at draw time, so there's no separate "scroll" to do.
     pub fn prev_column(&mut self) {
         self.selected_col = self.selected_col.saturating_sub(1);
+        self.preview_open = false;
     }
 
     pub fn next_column(&mut self) {
         let last = self.column_count().saturating_sub(1);
         self.selected_col = (self.selected_col + 1).min(last);
+        self.preview_open = false;
     }
 
     /// The column names of the current table result, for whoever needs to
@@ -343,6 +380,7 @@ impl ResultsComponent {
         {
             self.selected_col = *index;
         }
+        self.preview_open = false;
         true
     }
 
@@ -457,10 +495,35 @@ impl ResultsComponent {
                 self.selected_col = self.selected_col.min(columns.len().saturating_sub(1));
                 let widths = column_widths(columns, rows);
 
+                // Computed with the cell cursor as it stood before this
+                // frame's clamp above -- selecting a cell and immediately
+                // toggling its preview must show *that* cell, not whatever
+                // clamping happened to land on.
+                let preview = if self.preview_open {
+                    self.selected_cell()
+                        .map(|(col, val)| (col.to_string(), preview_text(val)))
+                } else {
+                    None
+                };
+                let preview_height = if preview.is_some() {
+                    PREVIEW_HEIGHT.min(inner.height.saturating_sub(4))
+                } else {
+                    0
+                };
+                let table_area = Rect {
+                    height: inner.height - preview_height,
+                    ..inner
+                };
+                let preview_area = (preview_height > 0).then(|| Rect {
+                    y: inner.y + table_area.height,
+                    height: preview_height,
+                    ..inner
+                });
+
                 // The header row is drawn by the widget, so it costs one row
                 // of the body -- account for it or half-page scrolling
                 // overshoots by one.
-                self.visible_height = (inner.height as usize).saturating_sub(1);
+                self.visible_height = (table_area.height as usize).saturating_sub(1);
 
                 // A row-number gutter, wide enough for the highest number
                 // there is: on a screen full of rows, "which one am I on"
@@ -556,16 +619,26 @@ impl ResultsComponent {
                 // The widget draws its header on the first row, so the
                 // clickable rows start one below.
                 self.rows_area = Rect {
-                    y: inner.y.saturating_add(1),
-                    height: inner.height.saturating_sub(1),
-                    ..inner
+                    y: table_area.y.saturating_add(1),
+                    height: table_area.height.saturating_sub(1),
+                    ..table_area
                 };
                 let table = Table::new(body, constraints)
                     .header(header)
                     .column_spacing(COLUMN_SPACING)
                     .row_highlight_style(ui::selection_style())
                     .cell_highlight_style(ui::cell_cursor_style());
-                frame.render_stateful_widget(table, inner, &mut self.table_state);
+                frame.render_stateful_widget(table, table_area, &mut self.table_state);
+
+                if let (Some(area), Some((column, text))) = (preview_area, &preview) {
+                    let block = ui::panel(&format!("{column} — full value"), false);
+                    let content = block.inner(area);
+                    frame.render_widget(block, area);
+                    frame.render_widget(
+                        Paragraph::new(text.as_str()).wrap(Wrap { trim: false }),
+                        content,
+                    );
+                }
             }
             QueryResult::Affected { rows } => {
                 self.visible_height = 0;
@@ -691,6 +764,24 @@ mod tests {
             second.find("bo"),
             Some(name_column),
             "row 2 was: {second:?}, header: {header:?}"
+        );
+    }
+
+    #[test]
+    fn preview_text_pretty_prints_a_json_object_but_not_a_plain_scalar() {
+        assert_eq!(
+            preview_text(r#"{"a":1}"#),
+            serde_json::to_string_pretty(&serde_json::json!({"a": 1})).unwrap()
+        );
+        assert_eq!(
+            preview_text(r#"[1,2]"#),
+            serde_json::to_string_pretty(&serde_json::json!([1, 2])).unwrap()
+        );
+        assert_eq!(preview_text("42"), "42", "a bare number is not reformatted");
+        assert_eq!(
+            preview_text("not json at all"),
+            "not json at all",
+            "non-JSON text passes through unchanged"
         );
     }
 
@@ -1232,6 +1323,106 @@ mod tests {
             results.selected_text().unwrap().contains("Lin"),
             "the surviving document has to be the matching one"
         );
+    }
+
+    /// A single-column table whose value is a compact JSON object -- a
+    /// jsonb column, in a shape a real driver would actually return.
+    fn jsonb_row() -> QueryResult {
+        QueryResult::Table {
+            columns: vec!["id".to_string(), "metadata".to_string()],
+            rows: vec![vec![
+                "1".to_string(),
+                r#"{"theme":"dark","flags":["a","b"]}"#.to_string(),
+            ]],
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn toggle_preview_pretty_prints_a_json_object_value() {
+        let mut results = ResultsComponent::new();
+        results.set_result(jsonb_row());
+        results.next_column(); // onto "metadata"
+
+        results.toggle_preview();
+        let text = draw_component(&mut results, 60, 16);
+
+        assert!(text.contains("full value"), "buffer was: {text}");
+        assert!(
+            text.contains("\"theme\""),
+            "pretty-printed JSON has its own line per key: {text}"
+        );
+        assert!(text.contains("\"dark\""), "buffer was: {text}");
+    }
+
+    #[test]
+    fn toggle_preview_leaves_a_plain_value_as_is() {
+        let mut results = ResultsComponent::new();
+        results.set_result(jsonb_row()); // "id" column, value "1"
+
+        results.toggle_preview();
+        let text = draw_component(&mut results, 60, 16);
+
+        assert!(
+            text.contains("full value"),
+            "a non-JSON value still gets a preview panel: {text}"
+        );
+    }
+
+    #[test]
+    fn toggle_preview_is_a_no_op_without_a_selected_cell() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Documents(vec![serde_json::json!({"a": 1})]));
+
+        results.toggle_preview();
+        let text = draw_component(&mut results, 60, 16);
+
+        assert!(
+            !text.contains("full value"),
+            "documents have no cell to preview: {text}"
+        );
+    }
+
+    #[test]
+    fn toggling_again_closes_the_preview() {
+        let mut results = ResultsComponent::new();
+        results.set_result(jsonb_row());
+        results.next_column();
+        results.toggle_preview();
+
+        results.toggle_preview();
+        let text = draw_component(&mut results, 60, 16);
+
+        assert!(!text.contains("full value"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn moving_the_cursor_closes_an_open_preview() {
+        let mut results = ResultsComponent::new();
+        results.set_result(jsonb_row());
+        results.next_column();
+        results.toggle_preview();
+
+        results.prev_column();
+        let text = draw_component(&mut results, 60, 16);
+
+        assert!(
+            !text.contains("full value"),
+            "a stale preview would show the wrong cell: {text}"
+        );
+    }
+
+    #[test]
+    fn a_new_result_closes_any_open_preview() {
+        let mut results = ResultsComponent::new();
+        results.set_result(jsonb_row());
+        results.next_column();
+        results.toggle_preview();
+
+        results.set_result(jsonb_row());
+        let text = draw_component(&mut results, 60, 16);
+
+        assert!(!text.contains("full value"), "buffer was: {text}");
     }
 
     #[test]
