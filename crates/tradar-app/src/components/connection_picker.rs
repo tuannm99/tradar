@@ -23,6 +23,13 @@ pub struct ConnectionPickerComponent {
     pub selected: usize,
     pub last_error: Option<String>,
     pub connect_epoch: u64,
+    /// The connection currently being connected to, if any -- `main.rs`'s
+    /// connect timeout means this never sits unresolved for more than a
+    /// few seconds, but without *some* feedback the picker looks identical
+    /// whether a connect is in flight or nothing has happened at all.
+    /// Cleared by `RootComponent` once the matching `Opened`/`OpenFailed`
+    /// lands (see its `update`).
+    pub connecting: Option<String>,
     /// Half-finished two-key binding (the first `g` of `gg`), owned here
     /// because it's per-list state -- see `tradar_core::keymap`.
     pending: Option<KeyPress>,
@@ -52,6 +59,7 @@ impl ConnectionPickerComponent {
             selected: 0,
             last_error: None,
             connect_epoch: 0,
+            connecting: None,
             pending: None,
             list_state: ListState::default(),
             list_area: Rect::ZERO,
@@ -144,6 +152,7 @@ impl ConnectionPickerComponent {
         // A stale error from a previous failed attempt must not keep
         // showing once a new attempt is underway.
         self.last_error = None;
+        self.connecting = Some(connection.name.clone());
         Some(Action::OpenRequested {
             connection,
             epoch: self.connect_epoch,
@@ -249,6 +258,7 @@ impl Component for ConnectionPickerComponent {
     fn update(&mut self, action: Action) -> Option<Action> {
         if let Action::OpenFailed { error, .. } = action {
             self.last_error = Some(error);
+            self.connecting = None;
         }
         None
     }
@@ -292,7 +302,13 @@ impl Component for ConnectionPickerComponent {
         }
         self.visible_height = list_area.height.saturating_sub(2) as usize;
         self.list_area = list_area;
-        let title = if self.drivers.is_empty() {
+        let title = if let Some(name) = &self.connecting {
+            // Without this, the picker looks identical whether a connect
+            // is in flight or nothing has happened -- pressing Enter and
+            // seeing no change for up to the 5s connect timeout reads as a
+            // hung app, not a working one.
+            format!("Connections — connecting to '{name}'…")
+        } else if self.drivers.is_empty() {
             "Connections".to_string()
         } else {
             // Spell the editing keys out here: without a hint, an
@@ -552,6 +568,41 @@ mod tests {
         };
         assert_eq!(first_epoch, 1);
         assert_eq!(second_epoch, 2);
+    }
+
+    #[test]
+    fn opening_a_connection_shows_a_connecting_indicator() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE); // local-postgres
+
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(picker.connecting.as_deref(), Some("local-postgres"));
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("connecting to 'local-postgres'"),
+            "buffer was: {text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_connect_clears_the_connecting_indicator() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(picker.connecting.is_some());
+
+        picker.update(Action::OpenFailed {
+            error: "connection refused".to_string(),
+            epoch: 1,
+            tab: 0,
+        });
+
+        assert_eq!(picker.connecting, None);
     }
 
     #[test]

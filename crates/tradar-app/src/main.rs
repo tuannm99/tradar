@@ -3,8 +3,8 @@ use std::io;
 use std::sync::Arc;
 
 use crossterm::event::{
-    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, Event, KeyEventKind, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -245,7 +245,24 @@ async fn run(
                         let _ = action_tx.send(action);
                     }
                 }
-                Event::Mouse(mouse) => {
+                // Some terminals report every pointer motion once mouse
+                // capture is on (SGR "any-event" mode), not just clicks and
+                // scrolls -- without this filter, dragging the mouse a long
+                // diagonal across the grid queues a redraw per motion event
+                // `handle_mouse_event` was going to ignore anyway (its match
+                // only reacts to `Down(Left)`/`ScrollDown`/`ScrollUp`), and
+                // `event::read` only drains one event per loop iteration, so
+                // the whole burst has to be drawn away before the actual
+                // click lands. Distance-dependent lag: short move, few
+                // motion events; a click on a distant cell, many.
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(MouseButton::Left)
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollUp
+                    ) =>
+                {
                     dirty = true;
                     if let Some(action) = root.handle_mouse_event(mouse) {
                         let _ = action_tx.send(action);

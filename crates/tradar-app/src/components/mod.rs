@@ -458,6 +458,7 @@ impl Component for RootComponent {
                 if let Some(t) = self.tabs.get_mut(tab)
                     && epoch == t.connection_picker.connect_epoch
                 {
+                    t.connection_picker.connecting = None;
                     t.title = Some(connection.name.clone());
                     t.screen = ScreenSlot::Active(screen);
                 }
@@ -468,6 +469,7 @@ impl Component for RootComponent {
                     && epoch == t.connection_picker.connect_epoch
                 {
                     t.connection_picker.last_error = Some(error);
+                    t.connection_picker.connecting = None;
                 }
                 None
             }
@@ -722,6 +724,23 @@ mod tests {
     }
 
     #[test]
+    fn opened_clears_the_picker_s_connecting_indicator() {
+        let mut root = root();
+        root.tabs[0].connection_picker.connecting = Some("local-postgres".to_string());
+
+        root.update(Action::Opened {
+            connection: connections()[1].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: 0,
+            tab: 0,
+        });
+
+        assert_eq!(root.tabs[0].connection_picker.connecting, None);
+    }
+
+    #[test]
     fn back_to_picker_returns_the_active_tab_to_the_connection_picker() {
         let mut root = root();
         root.update(Action::Opened {
@@ -753,6 +772,20 @@ mod tests {
             root.tabs[0].connection_picker.last_error.as_deref(),
             Some("connection refused")
         );
+    }
+
+    #[test]
+    fn open_failed_clears_the_picker_s_connecting_indicator() {
+        let mut root = root();
+        root.tabs[0].connection_picker.connecting = Some("local-sqlite".to_string());
+
+        root.update(Action::OpenFailed {
+            error: "connection refused".to_string(),
+            epoch: 0,
+            tab: 0,
+        });
+
+        assert_eq!(root.tabs[0].connection_picker.connecting, None);
     }
 
     #[test]
