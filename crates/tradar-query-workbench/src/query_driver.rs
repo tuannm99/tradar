@@ -372,23 +372,36 @@ pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp) -> String {
         }
     };
 
+    // One column per line rather than a single long comma-joined line --
+    // a wide table's INSERT/UPDATE would otherwise run well past the
+    // editor's width (it doesn't soft-wrap, same as vim).
+    let bulleted = |items: &[String]| -> String {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let comma = if i + 1 < items.len() { "," } else { "" };
+                format!("  {item}{comma}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     match op {
         CrudOp::Read => format!("SELECT * FROM {table} LIMIT 100;"),
         CrudOp::Create => {
             if columns.is_empty() {
                 format!("INSERT INTO {table} (<column>) VALUES (<value>);")
             } else {
-                let names = columns
-                    .iter()
-                    .map(|c| quote_identifier(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let placeholders = columns
-                    .iter()
-                    .map(|c| format!("<{c}>"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("INSERT INTO {table} ({names}) VALUES ({placeholders});")
+                let names = bulleted(
+                    &columns
+                        .iter()
+                        .map(|c| quote_identifier(c))
+                        .collect::<Vec<_>>(),
+                );
+                let placeholders =
+                    bulleted(&columns.iter().map(|c| format!("<{c}>")).collect::<Vec<_>>());
+                format!("INSERT INTO {table} (\n{names}\n) VALUES (\n{placeholders}\n);")
             }
         }
         CrudOp::Update => {
@@ -403,16 +416,17 @@ pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp) -> String {
                 settable
             };
             let set_clause = if settable.is_empty() {
-                "<column> = <value>".to_string()
+                "  <column> = <value>".to_string()
             } else {
-                settable
-                    .iter()
-                    .map(|c| format!("{} = <{c}>", quote_identifier(c)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                bulleted(
+                    &settable
+                        .iter()
+                        .map(|c| format!("{} = <{c}>", quote_identifier(c)))
+                        .collect::<Vec<_>>(),
+                )
             };
             format!(
-                "UPDATE {table} SET {set_clause} WHERE {};",
+                "UPDATE {table} SET\n{set_clause}\nWHERE {};",
                 where_clause(&primary_key)
             )
         }
@@ -819,18 +833,18 @@ mod tests {
     }
 
     #[test]
-    fn crud_snippet_create_lists_every_column_with_a_named_placeholder() {
+    fn crud_snippet_create_lists_every_column_one_per_line_with_a_named_placeholder() {
         assert_eq!(
             build_crud_snippet(&users_table(), CrudOp::Create),
-            "INSERT INTO \"users\" (\"id\", \"email\") VALUES (<id>, <email>);"
+            "INSERT INTO \"users\" (\n  \"id\",\n  \"email\"\n) VALUES (\n  <id>,\n  <email>\n);"
         );
     }
 
     #[test]
-    fn crud_snippet_update_sets_non_key_columns_and_filters_by_the_key() {
+    fn crud_snippet_update_sets_non_key_columns_one_per_line_and_filters_by_the_key() {
         assert_eq!(
             build_crud_snippet(&users_table(), CrudOp::Update),
-            "UPDATE \"users\" SET \"email\" = <email> WHERE \"id\" = <id>;"
+            "UPDATE \"users\" SET\n  \"email\" = <email>\nWHERE \"id\" = <id>;"
         );
     }
 
@@ -852,12 +866,33 @@ mod tests {
         );
         assert_eq!(
             build_crud_snippet(&entry, CrudOp::Update),
-            "UPDATE \"mystery\" SET <column> = <value> WHERE <condition>;"
+            "UPDATE \"mystery\" SET\n  <column> = <value>\nWHERE <condition>;"
         );
         assert_eq!(
             build_crud_snippet(&entry, CrudOp::Delete),
             "DELETE FROM \"mystery\" WHERE <condition>;"
         );
+    }
+
+    #[test]
+    fn crud_snippet_create_and_update_wrap_one_column_per_line_so_no_line_runs_long() {
+        let entry = SchemaInfo {
+            name: "wide".to_string(),
+            columns: (0..12)
+                .map(|i| ColumnInfo::new(format!("column_number_{i}"), "TEXT"))
+                .collect(),
+            kind: None,
+        };
+
+        for op in [CrudOp::Create, CrudOp::Update] {
+            let snippet = build_crud_snippet(&entry, op);
+            for line in snippet.lines() {
+                assert!(
+                    line.chars().count() < 80,
+                    "line too long for {op:?}: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -870,7 +905,7 @@ mod tests {
 
         assert_eq!(
             build_crud_snippet(&entry, CrudOp::Update),
-            "UPDATE \"logs\" SET \"message\" = <message> WHERE <condition>;"
+            "UPDATE \"logs\" SET\n  \"message\" = <message>\nWHERE <condition>;"
         );
     }
 

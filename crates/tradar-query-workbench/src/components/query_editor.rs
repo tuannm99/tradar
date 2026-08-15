@@ -167,9 +167,7 @@ impl QueryEditorComponent {
     /// entry. One undo step, same as any other single edit.
     pub fn insert_at_cursor(&mut self, text: &str) {
         self.checkpoint();
-        for c in text.chars() {
-            self.insert_char(c);
-        }
+        self.insert_multiline(text);
         self.mode = EditorMode::Insert;
     }
 
@@ -1237,6 +1235,16 @@ mod tests {
 
         assert_eq!(editor.text(), "users");
         assert_eq!(editor.mode, EditorMode::Insert);
+    }
+
+    #[test]
+    fn insert_at_cursor_splits_embedded_newlines_into_real_lines() {
+        let mut editor = QueryEditorComponent::new();
+
+        editor.insert_at_cursor("INSERT INTO t (\n  a,\n  b\n);");
+
+        assert_eq!(editor.lines.len(), 4, "lines were: {:?}", editor.lines);
+        assert_eq!(editor.text(), "INSERT INTO t (\n  a,\n  b\n);");
     }
 
     #[test]
