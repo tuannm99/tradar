@@ -191,6 +191,11 @@ pub enum Command {
     /// -- pretty-printed if it's a JSON object/array, so a jsonb column no
     /// longer means squinting at a truncated one-liner.
     TogglePreview,
+    /// Switch a Documents result (Mongo, Elasticsearch) between its
+    /// pretty-printed JSON list and a flattened table (columns = every
+    /// top-level key seen across the result). No-op for a `Table` or
+    /// `Affected` result, which have nothing to toggle.
+    ToggleResultView,
     /// Open/close a node in the navigator tree.
     Expand,
     Collapse,
@@ -286,6 +291,7 @@ impl Command {
             Self::DeleteRow => "delete-row",
             Self::Search => "search",
             Self::TogglePreview => "toggle-preview",
+            Self::ToggleResultView => "toggle-result-view",
             Self::Expand => "expand",
             Self::Collapse => "collapse",
             Self::ToggleBrowseMode => "toggle-browse-mode",
@@ -326,7 +332,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 64] = [
+    const ALL: [Self; 65] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -358,6 +364,7 @@ impl Command {
         Self::DeleteRow,
         Self::Search,
         Self::TogglePreview,
+        Self::ToggleResultView,
         Self::Expand,
         Self::Collapse,
         Self::ToggleBrowseMode,
@@ -427,6 +434,7 @@ impl Command {
             Self::DeleteRow => "Delete the selected row",
             Self::Search => "Filter the results",
             Self::TogglePreview => "Show/hide the selected cell's full value",
+            Self::ToggleResultView => "Switch a document result between table and JSON view",
             Self::Expand => "Open the selected node",
             Self::Collapse => "Close the selected node",
             Self::ToggleBrowseMode => "Switch between Redis browse and console mode",
@@ -666,6 +674,7 @@ impl Default for Keymap {
                 ("d", Command::DeleteRow),
                 ("/", Command::Search),
                 ("space", Command::TogglePreview),
+                ("t", Command::ToggleResultView),
             ]),
         );
         bindings.insert(

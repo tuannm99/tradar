@@ -62,6 +62,55 @@ const MAX_COLUMN_WIDTH: usize = 40;
 /// Blank columns between two rendered columns.
 const COLUMN_SPACING: u16 = 2;
 
+/// How a `Documents` result (Mongo, Elasticsearch) is shown -- see
+/// `ResultsComponent::toggle_document_view`. Irrelevant for `Table`/
+/// `Affected`, which have nothing to toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentView {
+    Json,
+    Table,
+}
+
+/// Flattens `docs` into a table: columns are every top-level key seen
+/// across the whole result, alphabetically -- so heterogeneous documents
+/// (a field only some of them have) still line up rather than erroring or
+/// dropping data, and the column order is deterministic regardless of a
+/// document's own field order (JSON objects don't guarantee one) or which
+/// document in the result happens to be first. Sorted explicitly with a
+/// `BTreeSet` rather than trusting `serde_json::Map`'s own iteration order,
+/// which depends on whether the `preserve_order` feature happens to be
+/// enabled elsewhere in the dependency tree -- not something this code
+/// should be silently at the mercy of. A document missing a column leaves
+/// that cell blank rather than, say, "null" -- blank reads as "not
+/// present", which is what's actually true here (`null` would claim the
+/// key exists with a null value, a different thing). Nested objects/arrays
+/// render as compact one-line JSON -- full detail is still one `Space`
+/// away via the existing cell-preview panel, which already pretty-prints
+/// anything that parses as JSON.
+fn documents_as_table(docs: &[serde_json::Value]) -> (Vec<String>, Vec<Vec<String>>) {
+    let mut column_set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for doc in docs {
+        if let serde_json::Value::Object(map) = doc {
+            column_set.extend(map.keys().map(String::as_str));
+        }
+    }
+    let columns: Vec<String> = column_set.into_iter().map(str::to_string).collect();
+    let rows = docs
+        .iter()
+        .map(|doc| {
+            columns
+                .iter()
+                .map(|column| match doc.get(column) {
+                    None | Some(serde_json::Value::Null) => String::new(),
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                })
+                .collect()
+        })
+        .collect();
+    (columns, rows)
+}
+
 /// Rows given to the cell-preview panel when it's open, capped so it can
 /// never crowd the table out of the results pane entirely.
 const PREVIEW_HEIGHT: u16 = 8;
@@ -77,6 +126,22 @@ fn preview_text(value: &str) -> String {
         }
         _ => value.to_string(),
     }
+}
+
+/// Indices of the rows in `rows` that survive a case-insensitive substring
+/// search for `filter` in any cell -- shared by
+/// `ResultsComponent::visible_items` (drives row selection/movement) and
+/// `draw_table_body` (draws the result), so the two can never disagree
+/// about which rows are visible.
+fn filter_table_rows(rows: &[Vec<String>], filter: &str) -> Vec<usize> {
+    let needle = filter.to_lowercase();
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            needle.is_empty() || row.iter().any(|cell| cell.to_lowercase().contains(&needle))
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// The columns from `offset` on that fit in `total` once the row-number
@@ -132,6 +197,17 @@ pub struct ResultsComponent {
     /// preview left open while the cursor moves on would show the wrong
     /// cell's value without saying so.
     preview_open: bool,
+    /// How a `Documents` result is currently shown -- see
+    /// `toggle_document_view`. Deliberately *not* reset by `set_result`:
+    /// unlike the cell cursor, this is a standing preference for the
+    /// connection, not something that only makes sense for one query's
+    /// worth of rows.
+    doc_view: DocumentView,
+    /// `documents_as_table` of the current `Documents` result, recomputed
+    /// whenever `set_result`/`set_result_keeping_cursor` runs. Cached
+    /// rather than rebuilt every frame -- a document result can be large,
+    /// and `draw()` runs on every redraw, not just when the result changes.
+    doc_table: Option<(Vec<String>, Vec<Vec<String>>)>,
 }
 
 impl Default for ResultsComponent {
@@ -156,6 +232,8 @@ impl ResultsComponent {
             column_spans: Vec::new(),
             visible_height: 0,
             preview_open: false,
+            doc_view: DocumentView::Json,
+            doc_table: None,
         }
     }
 
@@ -165,6 +243,10 @@ impl ResultsComponent {
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
+        self.doc_table = match &result {
+            QueryResult::Documents(docs) => Some(documents_as_table(docs)),
+            _ => None,
+        };
         self.last_result = Some(result);
         self.last_error = None;
         self.selected = 0;
@@ -210,29 +292,27 @@ impl ResultsComponent {
     /// "the selected row" goes through here, so an edit made while filtered
     /// still lands on the row the user is pointing at.
     fn visible_items(&self) -> Vec<usize> {
-        let needle = self.filter.to_lowercase();
         match &self.last_result {
-            Some(QueryResult::Table { rows, .. }) => rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| {
-                    needle.is_empty()
-                        || row.iter().any(|cell| cell.to_lowercase().contains(&needle))
-                })
-                .map(|(index, _)| index)
-                .collect(),
-            Some(QueryResult::Documents(docs)) => docs
-                .iter()
-                .enumerate()
-                .filter(|(_, doc)| {
-                    needle.is_empty()
-                        || serde_json::to_string(doc)
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&needle)
-                })
-                .map(|(index, _)| index)
-                .collect(),
+            Some(QueryResult::Table { rows, .. }) => filter_table_rows(rows, &self.filter),
+            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => self
+                .doc_table
+                .as_ref()
+                .map(|(_, rows)| filter_table_rows(rows, &self.filter))
+                .unwrap_or_default(),
+            Some(QueryResult::Documents(docs)) => {
+                let needle = self.filter.to_lowercase();
+                docs.iter()
+                    .enumerate()
+                    .filter(|(_, doc)| {
+                        needle.is_empty()
+                            || serde_json::to_string(doc)
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(&needle)
+                    })
+                    .map(|(index, _)| index)
+                    .collect()
+            }
             Some(QueryResult::Affected { .. }) | None => Vec::new(),
         }
     }
@@ -286,6 +366,24 @@ impl ResultsComponent {
         }
     }
 
+    /// Switches a `Documents` result between its pretty-printed JSON list
+    /// and a flattened table (see `documents_as_table`) -- a no-op for a
+    /// `Table` or `Affected` result, which have nothing to toggle. The
+    /// cell cursor resets rather than carrying over: JSON view has no
+    /// column for it to mean the same thing in.
+    pub fn toggle_document_view(&mut self) {
+        if !matches!(self.last_result, Some(QueryResult::Documents(_))) {
+            return;
+        }
+        self.doc_view = match self.doc_view {
+            DocumentView::Json => DocumentView::Table,
+            DocumentView::Table => DocumentView::Json,
+        };
+        self.selected_col = 0;
+        self.col_offset = 0;
+        self.preview_open = false;
+    }
+
     pub fn move_down(&mut self) {
         self.apply_move(VimMove::Down);
     }
@@ -310,13 +408,12 @@ impl ResultsComponent {
         self.apply_move(VimMove::HalfPageUp);
     }
 
-    /// Column count of the current table result -- `0` for documents or no
-    /// result, since neither scrolls horizontally.
+    /// Column count of the current table result -- also the flattened
+    /// column count of a `Documents` result being shown as a table, `0`
+    /// otherwise (documents in JSON view, or no result), since neither
+    /// scrolls horizontally.
     fn column_count(&self) -> usize {
-        match &self.last_result {
-            Some(QueryResult::Table { columns, .. }) => columns.len(),
-            _ => 0,
-        }
+        self.columns().len()
     }
 
     /// Moves the cell cursor one column left. Horizontal scrolling follows
@@ -332,21 +429,31 @@ impl ResultsComponent {
         self.preview_open = false;
     }
 
-    /// The column names of the current table result, for whoever needs to
-    /// name the selected cell's column. Empty for anything else.
+    /// The column names of the current table result -- also the flattened
+    /// columns of a `Documents` result shown as a table -- for whoever
+    /// needs to name the selected cell's column. Empty for anything else
+    /// (documents in JSON view have no columns to name).
     pub fn columns(&self) -> &[String] {
         match &self.last_result {
             Some(QueryResult::Table { columns, .. }) => columns,
+            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => self
+                .doc_table
+                .as_ref()
+                .map_or(&[], |(columns, _)| columns.as_slice()),
             _ => &[],
         }
     }
 
     /// The selected row's values, in column order -- the raw strings as
-    /// fetched, not the truncated forms on screen.
+    /// fetched, not the truncated forms on screen. For a `Documents` result
+    /// in table view, the selected document's flattened row.
     pub fn selected_row(&self) -> Option<&Vec<String>> {
         let index = self.selected_item()?;
         match &self.last_result {
             Some(QueryResult::Table { rows, .. }) => rows.get(index),
+            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => {
+                self.doc_table.as_ref()?.1.get(index)
+            }
             _ => None,
         }
     }
@@ -365,7 +472,9 @@ impl ResultsComponent {
             return false;
         }
         let offset = match &self.last_result {
-            Some(QueryResult::Documents(_)) => self.list_state.offset(),
+            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Json => {
+                self.list_state.offset()
+            }
             _ => self.table_state.offset(),
         };
         if let Some(index) = ui::index_at(self.rows_area, offset, row, self.item_count()) {
@@ -392,6 +501,14 @@ impl ResultsComponent {
         let index = self.selected_item()?;
         match self.last_result.as_ref()? {
             QueryResult::Table { rows, .. } => rows.get(index).map(|row| row.join("\t")),
+            // Matches whatever's actually on screen: tab-separated like any
+            // other table in table view, pretty JSON in JSON view.
+            QueryResult::Documents(_) if self.doc_view == DocumentView::Table => self
+                .doc_table
+                .as_ref()?
+                .1
+                .get(index)
+                .map(|row| row.join("\t")),
             QueryResult::Documents(docs) => docs
                 .get(index)
                 .map(|doc| serde_json::to_string_pretty(doc).unwrap_or_default()),
@@ -447,11 +564,20 @@ impl ResultsComponent {
             }
             (None, Some(QueryResult::Documents(_))) => {
                 let total = self.total_count();
+                // Still says "documents", even in table view: the data is a
+                // set of documents no matter how it's rendered, and saying
+                // "rows" would claim a tabular shape that isn't really there
+                // (see `documents_as_table`'s doc comment on missing keys).
+                let view = if self.doc_view == DocumentView::Table {
+                    " — table view"
+                } else {
+                    ""
+                };
                 if self.filter.is_empty() {
-                    format!("Results ({})", count(total, "document"))
+                    format!("Results ({}){view}", count(total, "document"))
                 } else {
                     format!(
-                        "Results ({} of {} — filter: {})",
+                        "Results ({} of {} — filter: {}){view}",
                         self.item_count(),
                         count(total, "document"),
                         self.filter
@@ -489,156 +615,43 @@ impl ResultsComponent {
 
         match result {
             QueryResult::Table { columns, rows, .. } => {
-                // A real table widget, not rows joined by spaces: columns
-                // have to line up or the values can't be read down a column,
-                // which is most of the point of tabular output.
-                self.selected_col = self.selected_col.min(columns.len().saturating_sub(1));
-                let widths = column_widths(columns, rows);
-
-                // Computed with the cell cursor as it stood before this
-                // frame's clamp above -- selecting a cell and immediately
-                // toggling its preview must show *that* cell, not whatever
-                // clamping happened to land on.
-                let preview = if self.preview_open {
-                    self.selected_cell()
-                        .map(|(col, val)| (col.to_string(), preview_text(val)))
-                } else {
-                    None
-                };
-                let preview_height = if preview.is_some() {
-                    PREVIEW_HEIGHT.min(inner.height.saturating_sub(4))
-                } else {
-                    0
-                };
-                let table_area = Rect {
-                    height: inner.height - preview_height,
-                    ..inner
-                };
-                let preview_area = (preview_height > 0).then(|| Rect {
-                    y: inner.y + table_area.height,
-                    height: preview_height,
-                    ..inner
-                });
-
-                // The header row is drawn by the widget, so it costs one row
-                // of the body -- account for it or half-page scrolling
-                // overshoots by one.
-                self.visible_height = (table_area.height as usize).saturating_sub(1);
-
-                // A row-number gutter, wide enough for the highest number
-                // there is: on a screen full of rows, "which one am I on"
-                // is otherwise something you have to count.
-                let visible_rows = self.visible_items();
-                let gutter = (rows.len().to_string().chars().count() as u16).max(1);
-
-                // Scroll only as far as it takes to keep the cell cursor on
-                // screen, then take as many further columns as fit.
-                // Rendering columns that don't fit would make the layout
-                // shrink every column to make room, and then nothing lines
-                // up.
-                if self.selected_col < self.col_offset {
-                    self.col_offset = self.selected_col;
-                }
-                let visible = loop {
-                    let visible = fitting_columns(&widths, self.col_offset, inner.width, gutter);
-                    if self.col_offset >= self.selected_col || visible.contains(&self.selected_col)
-                    {
-                        break visible;
-                    }
-                    self.col_offset += 1;
-                };
-
-                let header = Row::new(
-                    std::iter::once(Cell::from("#"))
-                        .chain(
-                            visible
-                                .iter()
-                                .map(|&index| Cell::from(truncate(&columns[index], widths[index]))),
-                        )
-                        .collect::<Vec<_>>(),
-                )
-                .style(
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
+                draw_table_body(
+                    frame,
+                    theme,
+                    inner,
+                    columns,
+                    rows,
+                    &self.filter,
+                    self.selected,
+                    self.preview_open,
+                    &mut self.selected_col,
+                    &mut self.col_offset,
+                    &mut self.visible_height,
+                    &mut self.column_spans,
+                    &mut self.rows_area,
+                    &mut self.table_state,
                 );
-
-                let body: Vec<Row> = visible_rows
-                    .iter()
-                    .map(|&number| {
-                        let row = &rows[number];
-                        Row::new(
-                            // Numbered by position in the whole result, not
-                            // in the filtered view: while filtered, "row 4"
-                            // still means the fourth row of the query.
-                            std::iter::once(
-                                Cell::from((number + 1).to_string())
-                                    .style(Style::default().fg(theme.text_dim)),
-                            )
-                            .chain(visible.iter().map(|&index| {
-                                Cell::from(truncate(
-                                    row.get(index).map_or("", String::as_str),
-                                    widths[index],
-                                ))
-                            }))
-                            .collect::<Vec<_>>(),
-                        )
-                        .style(Style::default().fg(theme.text))
-                    })
-                    .collect();
-
-                let constraints: Vec<Constraint> = std::iter::once(Constraint::Length(gutter))
-                    .chain(
-                        visible
-                            .iter()
-                            .map(|&index| Constraint::Length(widths[index] as u16)),
-                    )
-                    .collect();
-
-                // Where each visible column landed, so a click can pick a
-                // cell. The gutter is column 0 and belongs to nobody.
-                let mut x = inner
-                    .x
-                    .saturating_add(gutter)
-                    .saturating_add(COLUMN_SPACING);
-                for &index in &visible {
-                    let width = widths[index] as u16;
-                    self.column_spans.push((index, x, width));
-                    x = x.saturating_add(width).saturating_add(COLUMN_SPACING);
-                }
-
-                if visible_rows.is_empty() {
-                    self.table_state.select_cell(None);
-                } else {
-                    let column = visible
-                        .iter()
-                        .position(|&index| index == self.selected_col)
-                        .map_or(0, |offset| offset + 1);
-                    self.table_state.select_cell(Some((self.selected, column)));
-                }
-                // The widget draws its header on the first row, so the
-                // clickable rows start one below.
-                self.rows_area = Rect {
-                    y: table_area.y.saturating_add(1),
-                    height: table_area.height.saturating_sub(1),
-                    ..table_area
+            }
+            QueryResult::Documents(_) if self.doc_view == DocumentView::Table => {
+                let Some((columns, rows)) = &self.doc_table else {
+                    return;
                 };
-                let table = Table::new(body, constraints)
-                    .header(header)
-                    .column_spacing(COLUMN_SPACING)
-                    .row_highlight_style(ui::selection_style())
-                    .cell_highlight_style(ui::cell_cursor_style());
-                frame.render_stateful_widget(table, table_area, &mut self.table_state);
-
-                if let (Some(area), Some((column, text))) = (preview_area, &preview) {
-                    let block = ui::panel(&format!("{column} — full value"), false);
-                    let content = block.inner(area);
-                    frame.render_widget(block, area);
-                    frame.render_widget(
-                        Paragraph::new(text.as_str()).wrap(Wrap { trim: false }),
-                        content,
-                    );
-                }
+                draw_table_body(
+                    frame,
+                    theme,
+                    inner,
+                    columns,
+                    rows,
+                    &self.filter,
+                    self.selected,
+                    self.preview_open,
+                    &mut self.selected_col,
+                    &mut self.col_offset,
+                    &mut self.visible_height,
+                    &mut self.column_spans,
+                    &mut self.rows_area,
+                    &mut self.table_state,
+                );
             }
             QueryResult::Affected { rows } => {
                 self.visible_height = 0;
@@ -682,6 +695,183 @@ impl ResultsComponent {
                 frame.render_stateful_widget(list, inner, &mut self.list_state);
             }
         }
+    }
+}
+
+/// The table widget shared by a real `Table` result and a `Documents`
+/// result being shown flattened -- see `documents_as_table`. A free
+/// function, not a method: `columns`/`rows` borrow from whichever of
+/// `last_result`/`doc_table` the caller matched on, and a `&mut self`
+/// method call can't be handed a borrow of one of its own fields as an
+/// argument. Splitting the handful of fields this actually mutates into
+/// their own `&mut` parameters instead sidesteps that -- the caller passes
+/// disjoint field borrows directly, which Rust allows.
+#[allow(clippy::too_many_arguments)]
+fn draw_table_body(
+    frame: &mut Frame,
+    theme: &tradar_core::theme::Theme,
+    inner: Rect,
+    columns: &[String],
+    rows: &[Vec<String>],
+    filter: &str,
+    selected: usize,
+    preview_open: bool,
+    selected_col: &mut usize,
+    col_offset: &mut usize,
+    visible_height: &mut usize,
+    column_spans: &mut Vec<(usize, u16, u16)>,
+    rows_area: &mut Rect,
+    table_state: &mut TableState,
+) {
+    // A real table widget, not rows joined by spaces: columns have to
+    // line up or the values can't be read down a column, which is most
+    // of the point of tabular output.
+    *selected_col = (*selected_col).min(columns.len().saturating_sub(1));
+    let widths = column_widths(columns, rows);
+
+    // A row-number gutter, wide enough for the highest number there is:
+    // on a screen full of rows, "which one am I on" is otherwise
+    // something you have to count. Computed once and reused below for
+    // both the preview (which cell is selected) and the table body.
+    let visible_rows = filter_table_rows(rows, filter);
+    let gutter = (rows.len().to_string().chars().count() as u16).max(1);
+
+    // Computed with the cell cursor as it stood before this frame's
+    // clamp above -- selecting a cell and immediately toggling its
+    // preview must show *that* cell, not whatever clamping happened to
+    // land on.
+    let preview = if preview_open {
+        visible_rows.get(selected).and_then(|&index| {
+            let value = rows.get(index)?.get(*selected_col)?;
+            let column = columns.get(*selected_col)?;
+            Some((column.clone(), preview_text(value)))
+        })
+    } else {
+        None
+    };
+    let preview_height = if preview.is_some() {
+        PREVIEW_HEIGHT.min(inner.height.saturating_sub(4))
+    } else {
+        0
+    };
+    let table_area = Rect {
+        height: inner.height - preview_height,
+        ..inner
+    };
+    let preview_area = (preview_height > 0).then(|| Rect {
+        y: inner.y + table_area.height,
+        height: preview_height,
+        ..inner
+    });
+
+    // The header row is drawn by the widget, so it costs one row of the
+    // body -- account for it or half-page scrolling overshoots by one.
+    *visible_height = (table_area.height as usize).saturating_sub(1);
+
+    // Scroll only as far as it takes to keep the cell cursor on screen,
+    // then take as many further columns as fit. Rendering columns that
+    // don't fit would make the layout shrink every column to make room,
+    // and then nothing lines up.
+    if *selected_col < *col_offset {
+        *col_offset = *selected_col;
+    }
+    let visible = loop {
+        let visible = fitting_columns(&widths, *col_offset, inner.width, gutter);
+        if *col_offset >= *selected_col || visible.contains(&*selected_col) {
+            break visible;
+        }
+        *col_offset += 1;
+    };
+
+    let header = Row::new(
+        std::iter::once(Cell::from("#"))
+            .chain(
+                visible
+                    .iter()
+                    .map(|&index| Cell::from(truncate(&columns[index], widths[index]))),
+            )
+            .collect::<Vec<_>>(),
+    )
+    .style(
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let body: Vec<Row> = visible_rows
+        .iter()
+        .map(|&number| {
+            let row = &rows[number];
+            Row::new(
+                // Numbered by position in the whole result, not
+                // in the filtered view: while filtered, "row 4"
+                // still means the fourth row of the query.
+                std::iter::once(
+                    Cell::from((number + 1).to_string()).style(Style::default().fg(theme.text_dim)),
+                )
+                .chain(visible.iter().map(|&index| {
+                    Cell::from(truncate(
+                        row.get(index).map_or("", String::as_str),
+                        widths[index],
+                    ))
+                }))
+                .collect::<Vec<_>>(),
+            )
+            .style(Style::default().fg(theme.text))
+        })
+        .collect();
+
+    let constraints: Vec<Constraint> = std::iter::once(Constraint::Length(gutter))
+        .chain(
+            visible
+                .iter()
+                .map(|&index| Constraint::Length(widths[index] as u16)),
+        )
+        .collect();
+
+    // Where each visible column landed, so a click can pick a
+    // cell. The gutter is column 0 and belongs to nobody.
+    let mut x = inner
+        .x
+        .saturating_add(gutter)
+        .saturating_add(COLUMN_SPACING);
+    for &index in &visible {
+        let width = widths[index] as u16;
+        column_spans.push((index, x, width));
+        x = x.saturating_add(width).saturating_add(COLUMN_SPACING);
+    }
+
+    if visible_rows.is_empty() {
+        table_state.select_cell(None);
+    } else {
+        let column = visible
+            .iter()
+            .position(|&index| index == *selected_col)
+            .map_or(0, |offset| offset + 1);
+        table_state.select_cell(Some((selected, column)));
+    }
+    // The widget draws its header on the first row, so the
+    // clickable rows start one below.
+    *rows_area = Rect {
+        y: table_area.y.saturating_add(1),
+        height: table_area.height.saturating_sub(1),
+        ..table_area
+    };
+    let table = Table::new(body, constraints)
+        .header(header)
+        .column_spacing(COLUMN_SPACING)
+        .row_highlight_style(ui::selection_style())
+        .cell_highlight_style(ui::cell_cursor_style());
+    frame.render_stateful_widget(table, table_area, table_state);
+
+    if let (Some(area), Some((column, text))) = (preview_area, &preview) {
+        let block = ui::panel(&format!("{column} — full value"), false);
+        let content = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            Paragraph::new(text.as_str()).wrap(Wrap { trim: false }),
+            content,
+        );
     }
 }
 
@@ -1322,6 +1512,121 @@ mod tests {
         assert!(
             results.selected_text().unwrap().contains("Lin"),
             "the surviving document has to be the matching one"
+        );
+    }
+
+    /// Two documents that don't share every field -- `age` only on the
+    /// first, `city` only on the second -- and a nested object, all in one
+    /// result: the shape `documents_as_table` actually has to handle.
+    fn heterogeneous_docs() -> QueryResult {
+        QueryResult::Documents(vec![
+            serde_json::json!({"name": "Ada", "age": 28}),
+            serde_json::json!({"name": "Lin", "city": "Hanoi", "meta": {"vip": true}}),
+        ])
+    }
+
+    #[test]
+    fn toggling_document_view_switches_to_a_flattened_table_and_back() {
+        let mut results = ResultsComponent::new();
+        results.set_result(heterogeneous_docs());
+
+        results.toggle_document_view();
+        assert_eq!(results.columns(), ["age", "city", "meta", "name"]);
+        assert_eq!(
+            results.selected_row().map(|r| r.as_slice()),
+            Some(
+                [
+                    "28".to_string(),
+                    String::new(),
+                    String::new(),
+                    "Ada".to_string(),
+                ]
+                .as_slice()
+            )
+        );
+
+        results.toggle_document_view();
+        assert!(
+            results.columns().is_empty(),
+            "back in JSON view, there are no columns to name"
+        );
+    }
+
+    #[test]
+    fn a_missing_field_is_blank_not_null_and_a_nested_object_is_compact_json() {
+        let mut results = ResultsComponent::new();
+        results.set_result(heterogeneous_docs());
+        results.toggle_document_view();
+        results.move_down();
+
+        let row = results.selected_row().expect("second document");
+        assert_eq!(row[0], "", "no 'age' field on this document");
+        assert_eq!(row[1], "Hanoi");
+        assert_eq!(row[2], r#"{"vip":true}"#, "nested object as compact JSON");
+        assert_eq!(row[3], "Lin");
+    }
+
+    #[test]
+    fn toggling_document_view_is_a_no_op_for_a_table_or_affected_result() {
+        let mut results = ResultsComponent::new();
+        results.set_result(table(1));
+        results.toggle_document_view();
+        assert_eq!(results.columns(), ["id"], "still the real table, untouched");
+
+        results.set_result(QueryResult::Affected { rows: 1 });
+        results.toggle_document_view();
+        assert!(results.columns().is_empty());
+    }
+
+    #[test]
+    fn table_view_of_documents_draws_a_real_table_with_a_view_marker_in_the_title() {
+        let mut results = ResultsComponent::new();
+        results.set_result(heterogeneous_docs());
+        results.toggle_document_view();
+
+        let text = draw_component(&mut results, 60, 10);
+
+        assert!(text.contains("table view"), "buffer was: {text}");
+        assert!(text.contains("name"), "column header: {text}");
+        assert!(text.contains("Hanoi"), "flattened cell value: {text}");
+    }
+
+    #[test]
+    fn filtering_in_table_view_searches_the_flattened_cells() {
+        let mut results = ResultsComponent::new();
+        results.set_result(heterogeneous_docs());
+        results.toggle_document_view();
+
+        results.set_filter("hanoi");
+
+        assert_eq!(results.item_count(), 1);
+        // Columns are sorted alphabetically (age, city, meta, name) -- "name" is index 3.
+        assert_eq!(results.selected_row().map(|r| r[3].as_str()), Some("Lin"));
+    }
+
+    #[test]
+    fn yanking_in_table_view_is_tab_separated_like_any_other_table() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Documents(vec![
+            serde_json::json!({"a": 1, "b": 2}),
+        ]));
+        results.toggle_document_view();
+
+        assert_eq!(results.selected_text().as_deref(), Some("1\t2"));
+    }
+
+    #[test]
+    fn a_refresh_recomputes_the_flattened_table_for_the_new_result() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Documents(vec![serde_json::json!({"a": 1})]));
+        results.toggle_document_view();
+
+        results.set_result(QueryResult::Documents(vec![serde_json::json!({"b": 2})]));
+
+        assert_eq!(
+            results.columns(),
+            ["b"],
+            "the view preference persists, but the columns must reflect the new result"
         );
     }
 
