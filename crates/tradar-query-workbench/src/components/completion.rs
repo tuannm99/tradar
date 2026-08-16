@@ -241,11 +241,13 @@ mod tests {
                     ColumnInfo::new("user_email", "TEXT"),
                 ],
                 kind: None,
+                ttl: None,
             },
             SchemaInfo {
                 name: "orders".to_string(),
                 columns: vec![ColumnInfo::new("id", "INTEGER")],
                 kind: None,
+                ttl: None,
             },
         ]
     }

@@ -278,6 +278,14 @@ impl RootComponent {
     }
 
     fn handle_navigator_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        // The filter bar, while open, gets every key -- same idiom as the
+        // query screen's own search bars: it has to see letters the
+        // keymap would otherwise treat as commands (`j`, `g`, ...).
+        if self.navigator.is_filtering() {
+            self.navigator.filter_key_event(code, modifiers);
+            return None;
+        }
+
         let connections = self.nav_connections();
         let key = KeyPress::new(code, modifiers);
         let command =
@@ -312,6 +320,10 @@ impl RootComponent {
             Command::CrudDelete => self.navigator.choose_snippet(&connections, CrudOp::Delete),
             Command::ToggleNavigator => {
                 self.toggle_navigator();
+                None
+            }
+            Command::Search => {
+                self.navigator.open_filter();
                 None
             }
             Command::Back => {
@@ -1374,6 +1386,29 @@ mod tests {
         assert_eq!(connection.name, "local-postgres");
         assert_eq!(tab, 1, "the connected tab 0 is left alone");
         assert_eq!(root.tabs.len(), 2);
+    }
+
+    #[test]
+    fn slash_filters_the_navigator_down_to_the_matching_connection() {
+        let (mut root, _) = root_with_navigator();
+
+        root.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "postgres".chars() {
+            root.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        // Closes the filter bar but keeps the filter applied.
+        root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        // `local-sqlite` (tab 0, connected) is still selected at index 0
+        // in the unfiltered list -- if the filter had no effect, `enter`
+        // here would just switch to that tab instead of requesting a
+        // connect for the one it was actually typed to find.
+        let action = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        let Some(Action::OpenRequested { connection, .. }) = action else {
+            panic!("expected a connect request for the filtered-to connection");
+        };
+        assert_eq!(connection.name, "local-postgres");
     }
 
     #[test]

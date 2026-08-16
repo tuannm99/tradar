@@ -94,7 +94,10 @@ where
     // set would just yield zero rows and look like a SELECT that matched
     // nothing.
     if !query_driver::returns_rows(query) {
-        let result = sqlx::query(query).execute(executor).await?;
+        let result = sqlx::query(query)
+            .execute(executor)
+            .await
+            .map_err(|e| format_pg_error(e, query))?;
         return Ok(QueryResult::Affected {
             rows: result.rows_affected(),
         });
@@ -107,7 +110,11 @@ where
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut truncated = false;
-    while let Some(row) = stream.try_next().await? {
+    while let Some(row) = stream
+        .try_next()
+        .await
+        .map_err(|e| format_pg_error(e, query))?
+    {
         if columns.is_empty() {
             columns = row.columns().iter().map(|c| c.name().to_string()).collect();
         }
@@ -123,6 +130,78 @@ where
         rows,
         truncated,
     })
+}
+
+/// Formats a Postgres error `psql`-style: the primary message, then the
+/// offending line with a `^` under the parser's own cursor position when
+/// the server sent one (a syntax error, mainly), then `DETAIL`/`HINT` when
+/// present -- both routinely carry the actual useful information (which
+/// constraint, which value) that the primary message alone doesn't.
+/// Anything that isn't `sqlx::Error::Database` at all (a dropped
+/// connection, a pool timeout) has none of this to add, so it falls
+/// straight through to `sqlx::Error`'s own `Display` unchanged.
+fn format_pg_error(error: sqlx::Error, query: &str) -> anyhow::Error {
+    let pg_error = error
+        .as_database_error()
+        .and_then(|e| e.try_downcast_ref::<sqlx::postgres::PgDatabaseError>());
+    let Some(pg_error) = pg_error else {
+        return error.into();
+    };
+
+    let mut message = pg_error.message().to_string();
+    if let Some(sqlx::postgres::PgErrorPosition::Original(position)) = pg_error.position()
+        && let Some(marker) = line_and_caret(query, position)
+    {
+        message.push('\n');
+        message.push_str(&marker);
+    }
+    if let Some(detail) = pg_error.detail() {
+        message.push_str("\nDETAIL: ");
+        message.push_str(detail);
+    }
+    if let Some(hint) = pg_error.hint() {
+        message.push_str("\nHINT: ");
+        message.push_str(hint);
+    }
+    anyhow::anyhow!(message)
+}
+
+/// The line of `query` containing `position` (Postgres' own 1-based
+/// **character** index into the exact text that was sent), plus a `^`
+/// marker under it -- e.g. `LINE 2:   WHERE bad_col = 1` / `         ^`.
+/// `None` when `position` doesn't land inside `query` at all: an
+/// internally-generated query (a PL/pgSQL function body) reports a
+/// position into *different* text than what this driver sent, which
+/// `PgDatabaseError::position`'s `Internal` variant already distinguishes
+/// -- `format_pg_error` only ever calls this for `Original`.
+fn line_and_caret(query: &str, position: usize) -> Option<String> {
+    let index = position.checked_sub(1)?;
+    let chars: Vec<char> = query.chars().collect();
+    if index >= chars.len() {
+        return None;
+    }
+    let mut line_number = 1;
+    let mut line_start = 0;
+    for (i, &c) in chars.iter().enumerate().take(index) {
+        if c == '\n' {
+            line_number += 1;
+            line_start = i + 1;
+        }
+    }
+    let line_end = chars[line_start..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |n| line_start + n);
+    let line: String = chars[line_start..line_end].iter().collect();
+
+    let prefix = format!("LINE {line_number}: ");
+    let caret_offset = index - line_start;
+    let caret_line = format!(
+        "{}{}^",
+        " ".repeat(prefix.chars().count()),
+        " ".repeat(caret_offset)
+    );
+    Some(format!("{prefix}{line}\n{caret_line}"))
 }
 
 #[async_trait]
@@ -458,5 +537,101 @@ mod tests {
             },
             "a rolled-back insert must never become visible to anyone"
         );
+    }
+
+    /// Where `^` landed relative to the start of the query text on the
+    /// line above it, plus that line's own text -- what actually matters,
+    /// rather than the exact width of the `LINE N: ` prefix in front of
+    /// it.
+    fn caret_position(marker: &str) -> (usize, &str) {
+        let mut lines = marker.lines();
+        let line = lines.next().unwrap();
+        let caret_line = lines.next().unwrap();
+        let caret_column = caret_line.find('^').unwrap();
+        // `line` is `LINE N: <text>` -- the first `": "` marks where
+        // `<text>` starts.
+        let text_start = line.find(": ").unwrap() + 2;
+        (caret_column - text_start, &line[text_start..])
+    }
+
+    #[test]
+    fn line_and_caret_points_at_a_one_based_position_on_a_single_line() {
+        let query = "SELECT * FRO users";
+        let position = query.find("FRO").unwrap() + 1; // 1-based index of 'F'
+
+        let marker = line_and_caret(query, position).unwrap();
+
+        let (offset, text) = caret_position(&marker);
+        assert_eq!(text, query);
+        assert_eq!(offset, query.find("FRO").unwrap());
+    }
+
+    #[test]
+    fn line_and_caret_finds_the_right_line_in_a_multi_line_query() {
+        let query = "SELECT id\nFROM usres\nWHERE id = 1";
+        // 1-based char index of the `u` in `usres` (line 2).
+        let position = query.find("usres").unwrap() + 1;
+
+        let marker = line_and_caret(query, position).unwrap();
+
+        let (offset, text) = caret_position(&marker);
+        assert_eq!(text, "FROM usres");
+        assert_eq!(offset, text.find('u').unwrap());
+        assert!(marker.starts_with("LINE 2:"), "marker was: {marker}");
+    }
+
+    #[test]
+    fn line_and_caret_is_none_past_the_end_of_the_query() {
+        assert_eq!(line_and_caret("SELECT 1", 100), None);
+    }
+
+    #[test]
+    fn line_and_caret_is_none_for_position_zero() {
+        // Postgres never actually sends 0, but the type is an unsigned
+        // int -- this is what "no position" would look like if it did.
+        assert_eq!(line_and_caret("SELECT 1", 0), None);
+    }
+
+    #[tokio::test]
+    async fn a_syntax_error_reports_the_offending_line_with_a_caret() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+
+        let error = driver
+            .execute("SELECT * FRO users")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("LINE 1:"), "error was: {error}");
+        assert!(error.contains('^'), "error was: {error}");
+    }
+
+    #[tokio::test]
+    async fn a_constraint_violation_reports_its_detail() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        driver
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap();
+
+        let error = driver
+            .execute("INSERT INTO users VALUES (1)")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("DETAIL:"), "error was: {error}");
     }
 }

@@ -194,6 +194,7 @@ impl QueryDriver for SqliteDriver {
                     })
                     .collect(),
                 kind: None,
+                ttl: None,
             });
         }
         Ok(schema)

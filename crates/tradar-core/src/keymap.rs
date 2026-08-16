@@ -191,6 +191,15 @@ pub enum Command {
     /// -- pretty-printed if it's a JSON object/array, so a jsonb column no
     /// longer means squinting at a truncated one-liner.
     TogglePreview,
+    /// Re-run the statement that just failed, without re-reading the
+    /// cursor position (it may have moved). A no-op with no error showing.
+    RetryQuery,
+    /// Move focus to the editor so the failed statement can be fixed. A
+    /// no-op with no error showing.
+    EditQuery,
+    /// Copy the error message to the clipboard. A no-op with no error
+    /// showing.
+    CopyError,
     /// Switch a Documents result (Mongo, Elasticsearch) between its
     /// pretty-printed JSON list and a flattened table (columns = every
     /// top-level key seen across the result). No-op for a `Table` or
@@ -291,6 +300,9 @@ impl Command {
             Self::DeleteRow => "delete-row",
             Self::Search => "search",
             Self::TogglePreview => "toggle-preview",
+            Self::RetryQuery => "retry-query",
+            Self::EditQuery => "edit-query",
+            Self::CopyError => "copy-error",
             Self::ToggleResultView => "toggle-result-view",
             Self::Expand => "expand",
             Self::Collapse => "collapse",
@@ -332,7 +344,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 65] = [
+    const ALL: [Self; 68] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -364,6 +376,9 @@ impl Command {
         Self::DeleteRow,
         Self::Search,
         Self::TogglePreview,
+        Self::RetryQuery,
+        Self::EditQuery,
+        Self::CopyError,
         Self::ToggleResultView,
         Self::Expand,
         Self::Collapse,
@@ -434,6 +449,9 @@ impl Command {
             Self::DeleteRow => "Delete the selected row",
             Self::Search => "Filter the results",
             Self::TogglePreview => "Show/hide the selected cell's full value",
+            Self::RetryQuery => "Retry the failed query",
+            Self::EditQuery => "Fix the failed query in the editor",
+            Self::CopyError => "Copy the error message",
             Self::ToggleResultView => "Switch a document result between table and JSON view",
             Self::Expand => "Open the selected node",
             Self::Collapse => "Close the selected node",
@@ -658,6 +676,7 @@ impl Default for Keymap {
                 ("r", Command::CrudRead),
                 ("u", Command::CrudUpdate),
                 ("d", Command::CrudDelete),
+                ("/", Command::Search),
                 ("esc", Command::Back),
                 ("?", Command::Help),
             ]),
@@ -675,6 +694,9 @@ impl Default for Keymap {
                 ("/", Command::Search),
                 ("space", Command::TogglePreview),
                 ("t", Command::ToggleResultView),
+                ("r", Command::RetryQuery),
+                ("e", Command::EditQuery),
+                ("c", Command::CopyError),
             ]),
         );
         bindings.insert(

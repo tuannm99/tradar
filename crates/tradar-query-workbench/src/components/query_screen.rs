@@ -101,6 +101,11 @@ pub struct QueryScreenComponent {
     /// sidebar or leaves `ScreenMode::Console`.
     browse: Option<BrowseSidebarComponent>,
     mode: ScreenMode,
+    /// The literal Redis command behind the most recent browse-sidebar
+    /// `Enter`, echoed under the results grid -- see `open_selected_key`.
+    /// `None` before anything's been browsed yet, or for every connector
+    /// but Redis.
+    last_browse_command: Option<String>,
 }
 
 /// The folder to start browsing/prefilling from: the parent of the most
@@ -193,6 +198,7 @@ impl QueryScreenComponent {
             last_search: None,
             browse,
             mode,
+            last_browse_command: None,
         }
     }
 
@@ -306,6 +312,7 @@ impl QueryScreenComponent {
         let Some(entry) = self.browse.as_ref().and_then(|b| b.selected_entry()) else {
             return;
         };
+        self.last_browse_command = self.engine.browse_command(entry);
         self.engine.submit_browse(entry.clone());
         self.focus = Focus::Results;
     }
@@ -384,6 +391,22 @@ impl QueryScreenComponent {
             self.last_query = Some(statement.text.clone());
             self.engine.submit_query(statement.text.clone());
         }
+    }
+
+    /// `r` on a failed result: re-runs the exact statement that just
+    /// failed, rather than re-reading the cursor position the way `F5`
+    /// does -- the cursor may well have moved since. A no-op with no error
+    /// showing, or nothing to retry (there always is one by the time an
+    /// error can be showing, but `last_query` is still an `Option` for
+    /// every other caller's sake).
+    fn retry_failed_query(&mut self) {
+        if self.results.last_error.is_none() || self.engine.is_pending() {
+            return;
+        }
+        let Some(query) = self.last_query.clone() else {
+            return;
+        };
+        self.engine.submit_query(query);
     }
 
     /// `COMMIT`/`ROLLBACK` shortcuts (`F8`/`F9`) -- submitted the same way
@@ -545,6 +568,30 @@ impl QueryScreenComponent {
         };
         self.refreshing = true;
         self.engine.submit_all(vec![sql, query]);
+    }
+
+    /// Each column's declared type for the result currently on screen, for
+    /// `ResultsComponent` to show in its header/preview -- see
+    /// `query_driver::column_types`. Only meaningful for a `Table` result
+    /// whose source is a single known table (`engine.edit_source`, the
+    /// same lookup row-editing already relies on); empty for anything else
+    /// (a write, a join, `Documents`), which is exactly `column_types`'
+    /// own "nothing known" case for `table: None`.
+    fn column_types(&self) -> Vec<Option<String>> {
+        let Some(crate::query_driver::QueryResult::Table { columns, .. }) =
+            &self.results.last_result
+        else {
+            return Vec::new();
+        };
+        let table = self
+            .last_query
+            .as_deref()
+            .and_then(|query| self.engine.edit_source(query));
+        crate::query_driver::column_types(
+            columns,
+            self.engine.schema().as_deref().unwrap_or(&[]),
+            table.as_deref(),
+        )
     }
 
     /// Rebuilds the suggestion list for the word under the cursor. Only
@@ -900,6 +947,17 @@ impl Component for QueryScreenComponent {
             Command::Search => {
                 self.search = Some(ui::TextInput::new(self.results.filter()));
             }
+            Command::RetryQuery => self.retry_failed_query(),
+            Command::EditQuery => {
+                if self.results.last_error.is_some() {
+                    self.focus = Focus::Editor;
+                }
+            }
+            Command::CopyError => {
+                if let Some(error) = self.results.last_error.clone() {
+                    yank_to_clipboard(&error);
+                }
+            }
             Command::BrowseOpen => self.open_selected_key(),
             Command::ToggleBrowseMode => self.toggle_browse_mode(),
             Command::SearchInBuffer => self.open_buffer_search(),
@@ -987,6 +1045,13 @@ impl Component for QueryScreenComponent {
 
     fn status_hints(&self) -> Vec<ui::Hint> {
         let mut hints = Vec::new();
+        // Only worth advertising while there's actually an error on
+        // screen to retry/edit/copy -- the keys do nothing otherwise.
+        if self.results.last_error.is_some() {
+            hints.extend(ui::hint(Context::Results, Command::RetryQuery, "retry"));
+            hints.extend(ui::hint(Context::Results, Command::EditQuery, "edit"));
+            hints.extend(ui::hint(Context::Results, Command::CopyError, "copy"));
+        }
         hints.extend(ui::hint(Context::QueryScreen, Command::RunQuery, "run"));
         hints.extend(ui::hint(Context::QueryScreen, Command::CycleFocus, "focus"));
         hints.extend(ui::hint(Context::QueryScreen, Command::History, "history"));
@@ -1036,6 +1101,7 @@ impl Component for QueryScreenComponent {
         // only this screen's own. In console mode the screen is just
         // editor + results (stacked); in Redis browse mode it's the key
         // sidebar + results (side by side), with no editor at all.
+        let mut browse_command_area = None;
         let content_area = if self.mode == ScreenMode::Browse {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
@@ -1045,7 +1111,16 @@ impl Component for QueryScreenComponent {
                 browse.draw(frame, columns[0], self.focus == Focus::Browse);
             }
             self.editor_area = Rect::ZERO;
-            columns[1]
+            if self.last_browse_command.is_some() {
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(3), Constraint::Length(1)])
+                    .split(columns[1]);
+                browse_command_area = Some(rows[1]);
+                rows[0]
+            } else {
+                columns[1]
+            }
         } else {
             // The editor gets a third of the height (min 5 rows, so a short
             // query still has room), results take the rest -- plus one row
@@ -1087,7 +1162,8 @@ impl Component for QueryScreenComponent {
             chunks[2]
         };
 
-        self.results.draw_running(self.engine.is_pending());
+        self.results.draw_running(self.engine.elapsed_running());
+        self.results.set_column_types(self.column_types());
         let results_area = match &self.search {
             Some(_) => Rect {
                 height: content_area.height.saturating_sub(1),
@@ -1097,6 +1173,24 @@ impl Component for QueryScreenComponent {
         };
         self.results
             .draw(frame, results_area, self.focus == Focus::Results);
+        if let (Some(area), Some(command)) = (browse_command_area, &self.last_browse_command) {
+            let theme = tradar_core::theme::theme();
+            let full_target = &self.active_connection().target;
+            let target = full_target.strip_prefix("redis://").unwrap_or(full_target);
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(
+                        format!("{target}> "),
+                        ratatui::style::Style::default().fg(theme.text_dim),
+                    ),
+                    ratatui::text::Span::styled(
+                        command.as_str(),
+                        ratatui::style::Style::default().fg(theme.text),
+                    ),
+                ])),
+                area,
+            );
+        }
         if let Some(search) = &self.search {
             let bar = Rect {
                 y: results_area.y.saturating_add(results_area.height),
@@ -1238,6 +1332,9 @@ mod tests {
         async fn browse_entry(&self, _entry: &SchemaInfo) -> anyhow::Result<QueryResult> {
             Ok(self.result.clone())
         }
+        fn browse_command(&self, entry: &SchemaInfo) -> Option<String> {
+            Some(format!("HGETALL {}", entry.name))
+        }
     }
 
     fn fake_engine_with_schema(
@@ -1295,6 +1392,7 @@ mod tests {
                 primary_key: true,
             }],
             kind: None,
+            ttl: None,
         }];
         let (screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema)));
 
@@ -1961,6 +2059,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn column_types_resolves_the_result_s_columns_against_the_source_table() {
+        let result = QueryResult::Table {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![vec!["1".to_string(), "Ada".to_string()]],
+            truncated: false,
+        };
+        let schema = vec![SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![
+                crate::query_driver::ColumnInfo {
+                    name: "id".to_string(),
+                    type_name: "INTEGER".to_string(),
+                    primary_key: true,
+                },
+                crate::query_driver::ColumnInfo::new("name", "TEXT"),
+            ],
+            kind: None,
+            ttl: None,
+        }];
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
+        submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
+
+        assert_eq!(
+            screen.column_types(),
+            vec![Some("INTEGER".to_string()), Some("TEXT".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn column_types_is_all_none_for_a_join() {
+        let result = QueryResult::Table {
+            columns: vec!["id".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        };
+        let schema = vec![SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![crate::query_driver::ColumnInfo::new("id", "INTEGER")],
+            kind: None,
+            ttl: None,
+        }];
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
+        submit_and_settle(
+            &mut screen,
+            "SELECT id FROM users JOIN orders ON orders.user_id = users.id",
+        )
+        .await;
+
+        assert_eq!(screen.column_types(), vec![None]);
+    }
+
+    /// Always fails, counting how many times it was actually asked to run
+    /// -- what tells `r` (retry) apart from a no-op.
+    struct CountingFailingDriver {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl QueryDriver for CountingFailingDriver {
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
+            Ok(Vec::new())
+        }
+        async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("syntax error"))
+        }
+    }
+
+    #[tokio::test]
+    async fn r_retries_the_exact_query_that_failed() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let engine = QueryEngine::new(
+            Arc::new(CountingFailingDriver {
+                calls: calls.clone(),
+            }),
+            connection(),
+            Ok(Vec::new()),
+        );
+        let (mut screen, _rx) = screen_with(engine);
+        submit_and_settle(&mut screen, "SELECT 1").await;
+        assert!(screen.results.last_error.is_some());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Char('r'), KeyModifiers::NONE);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if !screen.engine.is_pending() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "r must resubmit the failed query"
+        );
+    }
+
+    #[tokio::test]
+    async fn r_is_a_no_op_without_an_error_showing() {
+        let (mut screen, _rx) = screen();
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Char('r'), KeyModifiers::NONE);
+
+        assert!(!screen.engine.is_pending(), "nothing to retry, nothing ran");
+    }
+
+    #[tokio::test]
+    async fn e_moves_focus_to_the_editor_only_when_an_error_is_showing() {
+        let (mut screen, _rx) = screen();
+        screen.focus = Focus::Results;
+        screen.handle_key_event(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(
+            screen.focus,
+            Focus::Results,
+            "e does nothing without an error to fix"
+        );
+
+        let engine = QueryEngine::new(
+            Arc::new(CountingFailingDriver {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            connection(),
+            Ok(Vec::new()),
+        );
+        let (mut screen, _rx) = screen_with(engine);
+        submit_and_settle(&mut screen, "SELECT 1").await;
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Char('e'), KeyModifiers::NONE);
+
+        assert_eq!(screen.focus, Focus::Editor);
+    }
+
+    #[tokio::test]
     async fn ctrl_r_opens_history_with_the_most_recent_query_selected() {
         let (mut screen, _rx) = screen();
         submit_and_settle(&mut screen, "select 1").await;
@@ -2261,6 +2500,7 @@ mod tests {
                 crate::query_driver::ColumnInfo::new("name", "TEXT"),
             ],
             kind: None,
+            ttl: None,
         }];
         screen_with(fake_engine_with_schema(result, Ok(schema)))
     }
@@ -2363,6 +2603,7 @@ mod tests {
             name: "users".to_string(),
             columns: vec![crate::query_driver::ColumnInfo::new("name", "TEXT")],
             kind: None,
+            ttl: None,
         }];
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
         submit_and_settle(&mut screen, "SELECT name FROM users").await;
@@ -2413,6 +2654,7 @@ mod tests {
             name: "user:1".to_string(),
             columns: Vec::new(),
             kind: Some("hash".to_string()),
+            ttl: None,
         }]
     }
 
@@ -2492,6 +2734,29 @@ mod tests {
             QueryResult::Table { rows, .. } => rows[0].clone(),
             other => panic!("expected a Table, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_sidebar_echoes_the_command_it_ran() {
+        let (mut screen, _rx) = redis_screen_with(empty_result(), Ok(redis_schema()));
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.last_browse_command.as_deref(),
+            Some("HGETALL user:1")
+        );
+
+        let backend = TestBackend::new(60, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("HGETALL user:1"),
+            "expected the echoed command in the drawn frame: {text}"
+        );
     }
 
     #[test]

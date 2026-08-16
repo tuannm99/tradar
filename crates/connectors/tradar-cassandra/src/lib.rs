@@ -191,6 +191,7 @@ impl QueryDriver for CassandraDriver {
                     })
                     .collect(),
                 kind: None,
+                ttl: None,
             });
         }
         Ok(schema)

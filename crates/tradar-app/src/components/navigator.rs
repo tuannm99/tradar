@@ -12,15 +12,16 @@
 //! host, which owns focus and is the only thing able to act on a choice
 //! (open a tab, switch to one, insert a name into its editor).
 
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use tradar_core::action::{CrudOp, OutlineEntry};
 use tradar_core::theme::theme;
-use tradar_core::ui;
+use tradar_core::ui::{self, TextInput};
 use tradar_core::vim_list::{self, VimMove};
 
 /// What the host has to know about one connection to draw it: its name,
@@ -84,6 +85,13 @@ pub struct NavigatorComponent {
     list_state: ListState,
     list_area: Rect,
     visible_height: usize,
+    /// A case-insensitive substring narrowing the tree -- see
+    /// `visible_rows`. Kept even while `filter_input` is closed, so the
+    /// title can still say what's currently applied and a fresh `/`
+    /// prefills it rather than starting over.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
 }
 
 impl NavigatorComponent {
@@ -127,12 +135,86 @@ impl NavigatorComponent {
         rows
     }
 
+    /// `rows()` narrowed by `filter`, when one's applied. A connection row
+    /// survives if its own name matches *or* any row under it does --
+    /// otherwise finding a table by name would hide the very connection
+    /// row you'd need to see (and click/expand) to reach it. An entry row
+    /// only survives by matching itself; nothing here reaches into a
+    /// collapsed subtree to reveal a match, same as `rows()` never did --
+    /// filtering narrows what's already open rather than searching what
+    /// isn't.
+    fn visible_rows(&self, connections: &[NavConnection]) -> Vec<Row> {
+        let all = self.rows(connections);
+        if self.filter.is_empty() {
+            return all;
+        }
+        let needle = self.filter.to_lowercase();
+        let matches = |row: &Row| match *row {
+            Row::Connection(index) => connections[index].name.to_lowercase().contains(&needle),
+            Row::Entry { connection, entry } => {
+                let entry = &connections[connection].outline[entry];
+                entry.label.to_lowercase().contains(&needle)
+                    || entry.detail.to_lowercase().contains(&needle)
+            }
+        };
+        let mut keep = vec![false; all.len()];
+        for (index, row) in all.iter().enumerate() {
+            if !matches(row) {
+                continue;
+            }
+            keep[index] = true;
+            if let Row::Entry { connection, .. } = row
+                && let Some(owner) = all
+                    .iter()
+                    .position(|r| matches!(r, Row::Connection(c) if c == connection))
+            {
+                keep[owner] = true;
+            }
+        }
+        all.into_iter()
+            .zip(keep)
+            .filter_map(|(row, keep)| keep.then_some(row))
+            .collect()
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied --
+    /// refining a search is "add characters", not "start over".
+    pub fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    pub fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys. `Esc` cancels -- clears
+    /// the bar *and* whatever was applied, back to the unfiltered tree
+    /// (matching the buffer-search bar elsewhere: `Esc` undoes, it doesn't
+    /// just close). `Enter` keeps the filter and closes the bar. Anything
+    /// else is text editing, applied live so the tree narrows as you type.
+    pub fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+            }
+        }
+    }
+
     fn selected_row(&self, connections: &[NavConnection]) -> Option<Row> {
-        self.rows(connections).get(self.selected).copied()
+        self.visible_rows(connections).get(self.selected).copied()
     }
 
     pub fn apply_move(&mut self, mv: VimMove, connections: &[NavConnection]) {
-        let len = self.rows(connections).len();
+        let len = self.visible_rows(connections).len();
         vim_list::apply(mv, &mut self.selected, len, self.visible_height);
     }
 
@@ -200,7 +282,11 @@ impl NavigatorComponent {
     }
 
     fn select_row(&mut self, connections: &[NavConnection], row: Row) {
-        if let Some(index) = self.rows(connections).iter().position(|r| *r == row) {
+        if let Some(index) = self
+            .visible_rows(connections)
+            .iter()
+            .position(|r| *r == row)
+        {
             self.selected = index;
         }
     }
@@ -259,7 +345,7 @@ impl NavigatorComponent {
             width: self.list_area.width.saturating_sub(2),
             height: self.list_area.height.saturating_sub(2),
         };
-        let count = self.rows(connections).len();
+        let count = self.visible_rows(connections).len();
         if let Some(index) = ui::index_at(inner, self.list_state.offset(), row, count) {
             self.selected = index;
         }
@@ -272,7 +358,17 @@ impl NavigatorComponent {
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focused: bool, conns: &[NavConnection]) {
         let theme = theme();
-        let rows = self.rows(conns);
+        let (list_area, filter_bar_area) = if self.filter_input.is_some() {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
+                .split(area);
+            (rows[0], Some(rows[1]))
+        } else {
+            (area, None)
+        };
+
+        let rows = self.visible_rows(conns);
         let items: Vec<ListItem> = rows
             .iter()
             .map(|row| match row {
@@ -353,12 +449,23 @@ impl NavigatorComponent {
             self.list_state.select(Some(self.selected));
         }
 
-        self.visible_height = area.height.saturating_sub(2) as usize;
-        self.list_area = area;
+        self.visible_height = list_area.height.saturating_sub(2) as usize;
+        self.list_area = list_area;
+        let title = if self.filter.is_empty() {
+            format!("Navigator ({})", conns.len())
+        } else {
+            format!("Navigator ({}) — filter: {}", conns.len(), self.filter)
+        };
         let list = List::new(items)
-            .block(ui::panel(&format!("Navigator ({})", conns.len()), focused))
+            .block(ui::panel(&title, focused))
             .highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        frame.render_stateful_widget(list, list_area, &mut self.list_state);
+
+        if let (Some(bar_area), Some(input)) = (filter_bar_area, &self.filter_input) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme.accent))];
+            spans.extend(input.spans(focused));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
     }
 }
 
@@ -603,5 +710,87 @@ mod tests {
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("disconnected"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn filtering_by_connection_name_hides_the_one_that_does_not_match() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.open_filter();
+        for c in "remo".chars() {
+            navigator.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(
+            navigator.visible_rows(&conns),
+            vec![Row::Connection(1)],
+            "case-insensitive substring match on the connection name"
+        );
+    }
+
+    #[test]
+    fn filtering_by_a_table_name_still_shows_its_own_connection_row() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns); // opens `local`'s subtree
+        navigator.open_filter();
+        for c in "user".chars() {
+            navigator.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(
+            navigator.visible_rows(&conns),
+            vec![
+                Row::Connection(0),
+                Row::Entry {
+                    connection: 0,
+                    entry: 0
+                },
+            ],
+            "the table's own connection row must survive so there's something to click/expand"
+        );
+    }
+
+    #[test]
+    fn esc_on_the_filter_bar_clears_the_filter_entirely() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.open_filter();
+        navigator.filter_key_event(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(navigator.visible_rows(&conns).len(), 0);
+
+        navigator.filter_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(!navigator.is_filtering());
+        assert_eq!(
+            navigator.visible_rows(&conns),
+            navigator.rows(&conns),
+            "Esc must undo the filter, not just close the bar"
+        );
+    }
+
+    #[test]
+    fn enter_on_the_filter_bar_keeps_the_filter_and_closes_it() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.open_filter();
+        navigator.filter_key_event(KeyCode::Char('r'), KeyModifiers::NONE);
+
+        navigator.filter_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(!navigator.is_filtering());
+        assert_eq!(navigator.visible_rows(&conns), vec![Row::Connection(1)]);
+    }
+
+    #[test]
+    fn reopening_the_filter_prefills_what_was_already_applied() {
+        let mut navigator = NavigatorComponent::new();
+        navigator.open_filter();
+        navigator.filter_key_event(KeyCode::Char('x'), KeyModifiers::NONE);
+        navigator.filter_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        navigator.open_filter();
+
+        assert_eq!(navigator.filter_input.as_ref().unwrap().text(), "x");
     }
 }

@@ -53,6 +53,10 @@ pub struct QueryEngine {
     /// The in-flight query's task, kept so it can be aborted. `None`
     /// whenever nothing is running.
     running: Option<tokio::task::JoinHandle<()>>,
+    /// When the in-flight query was submitted, for the results pane's
+    /// elapsed-time readout. `tokio::time::Instant` for the same reason as
+    /// `last_ping` -- a paused clock in tests advances it.
+    running_since: Option<tokio::time::Instant>,
     last_outcome: Option<QueryOutcome>,
     outcome_tx: UnboundedSender<TaggedOutcome>,
     outcome_rx: UnboundedReceiver<TaggedOutcome>,
@@ -84,6 +88,7 @@ impl QueryEngine {
             epoch: 0,
             pending: false,
             running: None,
+            running_since: None,
             last_outcome: None,
             outcome_tx,
             outcome_rx,
@@ -109,6 +114,12 @@ impl QueryEngine {
 
     pub fn is_pending(&self) -> bool {
         self.pending
+    }
+
+    /// How long the in-flight query has been running, for the results
+    /// pane's elapsed-time readout. `None` when nothing is running.
+    pub fn elapsed_running(&self) -> Option<std::time::Duration> {
+        self.running_since.map(|since| since.elapsed())
     }
 
     /// Whether the most recent background ping succeeded -- see
@@ -186,6 +197,7 @@ impl QueryEngine {
         self.epoch += 1;
         let epoch = self.epoch;
         self.pending = true;
+        self.running_since = Some(tokio::time::Instant::now());
         self.history.push(query.clone());
 
         let driver = Arc::clone(&self.driver);
@@ -206,10 +218,17 @@ impl QueryEngine {
     /// `submit_query`. Unlike `submit_query`, this does **not** push into
     /// `history`: a sidebar click isn't a command the user typed and might
     /// want to recall with Ctrl+R.
+    /// The literal command `submit_browse(entry)` will run, for the browse
+    /// sidebar to echo -- see `QueryDriver::browse_command`.
+    pub fn browse_command(&self, entry: &SchemaInfo) -> Option<String> {
+        self.driver.browse_command(entry)
+    }
+
     pub fn submit_browse(&mut self, entry: SchemaInfo) {
         self.epoch += 1;
         let epoch = self.epoch;
         self.pending = true;
+        self.running_since = Some(tokio::time::Instant::now());
 
         let driver = Arc::clone(&self.driver);
         let tx = self.outcome_tx.clone();
@@ -231,6 +250,7 @@ impl QueryEngine {
         self.epoch += 1;
         let epoch = self.epoch;
         self.pending = true;
+        self.running_since = Some(tokio::time::Instant::now());
         for statement in &statements {
             self.history.push(statement.clone());
         }
@@ -272,6 +292,7 @@ impl QueryEngine {
         handle.abort();
         self.epoch += 1;
         self.pending = false;
+        self.running_since = None;
         self.last_outcome = None;
         true
     }
@@ -292,6 +313,7 @@ impl Session for QueryEngine {
                 Ok(tagged) if tagged.epoch == self.epoch => {
                     self.pending = false;
                     self.running = None;
+                    self.running_since = None;
                     self.last_outcome = Some(tagged.outcome);
                     changed = true;
                 }
@@ -312,6 +334,13 @@ impl Session for QueryEngine {
         }
         if !self.ping_in_flight && self.last_ping.elapsed() >= PING_INTERVAL {
             self.fire_ping();
+        }
+
+        // Redraw on every tick while a query is running, not just when an
+        // outcome lands -- the results pane's spinner/elapsed-time readout
+        // has nothing else to drive its animation.
+        if self.pending {
+            changed = true;
         }
 
         changed

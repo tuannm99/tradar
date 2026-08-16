@@ -191,6 +191,7 @@ impl QueryDriver for ElasticsearchDriver {
                     name: name.to_string(),
                     columns: index_fields(&mappings, name),
                     kind: None,
+                    ttl: None,
                 })
             })
             .collect())

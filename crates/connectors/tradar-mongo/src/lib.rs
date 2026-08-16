@@ -212,6 +212,7 @@ impl QueryDriver for MongoDriver {
                 name,
                 columns,
                 kind: None,
+                ttl: None,
             });
         }
         Ok(schema)

@@ -178,9 +178,10 @@ pub struct ResultsComponent {
     /// than driven: `draw` scrolls it just far enough to keep
     /// `selected_col` on screen, the way a spreadsheet follows its cursor.
     col_offset: usize,
-    /// Whether a query is in flight, so the pane can say so: without it a
-    /// slow query is indistinguishable from a key that didn't register.
-    running: bool,
+    /// How long the in-flight query has been running, so the pane can say
+    /// so: without it a slow query is indistinguishable from a key that
+    /// didn't register. `None` when nothing is running.
+    running: Option<std::time::Duration>,
     /// Kept between frames so the scroll offset survives, which is what
     /// makes a click land on the row that was actually pointed at.
     table_state: TableState,
@@ -208,6 +209,13 @@ pub struct ResultsComponent {
     /// rather than rebuilt every frame -- a document result can be large,
     /// and `draw()` runs on every redraw, not just when the result changes.
     doc_table: Option<(Vec<String>, Vec<Vec<String>>)>,
+    /// Each column's declared type, aligned by index with a `Table`
+    /// result's own `columns` -- told by the screen each frame (it alone
+    /// knows the source table and can reach the schema), same idiom as
+    /// `draw_running`. Empty whenever there's nothing to show: a write
+    /// result, a join, a `Documents` result flattened into a table (no SQL
+    /// schema applies there).
+    column_types: Vec<Option<String>>,
 }
 
 impl Default for ResultsComponent {
@@ -225,7 +233,7 @@ impl ResultsComponent {
             selected_col: 0,
             filter: String::new(),
             col_offset: 0,
-            running: false,
+            running: None,
             table_state: TableState::default(),
             list_state: ListState::default(),
             rows_area: Rect::ZERO,
@@ -234,12 +242,21 @@ impl ResultsComponent {
             preview_open: false,
             doc_view: DocumentView::Json,
             doc_table: None,
+            column_types: Vec::new(),
         }
     }
 
+    /// Told by the screen each frame, since only it can resolve the
+    /// current result's source table against the schema -- see
+    /// `query_driver::column_types`.
+    pub fn set_column_types(&mut self, types: Vec<Option<String>>) {
+        self.column_types = types;
+    }
+
     /// Told by the screen each frame, since the engine owns that state.
-    pub fn draw_running(&mut self, running: bool) {
-        self.running = running;
+    /// `Some(elapsed)` while a query is in flight, `None` otherwise.
+    pub fn draw_running(&mut self, elapsed: Option<std::time::Duration>) {
+        self.running = elapsed;
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
@@ -520,7 +537,7 @@ impl ResultsComponent {
         let theme = theme();
         // The row count belongs in the title: it's the first thing anyone
         // wants to know about a result, and it costs no extra space.
-        if self.running {
+        if let Some(elapsed) = self.running {
             let block = ui::panel("Results — running…", focused);
             let inner = block.inner(area);
             frame.render_widget(block, area);
@@ -531,9 +548,15 @@ impl ResultsComponent {
                     tradar_core::keymap::Command::CancelQuery,
                 )
                 .unwrap_or_default();
+            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let frame_index = (elapsed.as_millis() / 80) as usize % SPINNER.len();
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    format!("running… {cancel} to cancel"),
+                    format!(
+                        "{} Running query… │ {:.1}s elapsed │ {cancel} to cancel",
+                        SPINNER[frame_index],
+                        elapsed.as_secs_f64()
+                    ),
                     Style::default().fg(theme.text_dim),
                 )),
                 inner,
@@ -621,6 +644,7 @@ impl ResultsComponent {
                     inner,
                     columns,
                     rows,
+                    &self.column_types,
                     &self.filter,
                     self.selected,
                     self.preview_open,
@@ -636,12 +660,16 @@ impl ResultsComponent {
                 let Some((columns, rows)) = &self.doc_table else {
                     return;
                 };
+                // No SQL schema applies to a flattened document view, so
+                // no types to look up -- unlike a `Table` result, this
+                // never has `self.column_types` filled in for it.
                 draw_table_body(
                     frame,
                     theme,
                     inner,
                     columns,
                     rows,
+                    &[],
                     &self.filter,
                     self.selected,
                     self.preview_open,
@@ -713,6 +741,7 @@ fn draw_table_body(
     inner: Rect,
     columns: &[String],
     rows: &[Vec<String>],
+    column_types: &[Option<String>],
     filter: &str,
     selected: usize,
     preview_open: bool,
@@ -727,7 +756,21 @@ fn draw_table_body(
     // line up or the values can't be read down a column, which is most
     // of the point of tabular output.
     *selected_col = (*selected_col).min(columns.len().saturating_sub(1));
-    let widths = column_widths(columns, rows);
+    // `id INTEGER` rather than a bare `id` when the type is known --
+    // included in the width calculation below (not just the header cell
+    // text) so the type suffix isn't truncated to fit a width sized for
+    // the name alone.
+    let header_labels: Vec<String> = columns
+        .iter()
+        .enumerate()
+        .map(
+            |(index, name)| match column_types.get(index).and_then(|t| t.as_ref()) {
+                Some(type_name) => format!("{name} {type_name}"),
+                None => name.clone(),
+            },
+        )
+        .collect();
+    let widths = column_widths(&header_labels, rows);
 
     // A row-number gutter, wide enough for the highest number there is:
     // on a screen full of rows, "which one am I on" is otherwise
@@ -743,7 +786,7 @@ fn draw_table_body(
     let preview = if preview_open {
         visible_rows.get(selected).and_then(|&index| {
             let value = rows.get(index)?.get(*selected_col)?;
-            let column = columns.get(*selected_col)?;
+            let column = header_labels.get(*selected_col)?;
             Some((column.clone(), preview_text(value)))
         })
     } else {
@@ -788,7 +831,7 @@ fn draw_table_body(
             .chain(
                 visible
                     .iter()
-                    .map(|&index| Cell::from(truncate(&columns[index], widths[index]))),
+                    .map(|&index| Cell::from(truncate(&header_labels[index], widths[index]))),
             )
             .collect::<Vec<_>>(),
     )
@@ -955,6 +998,37 @@ mod tests {
             Some(name_column),
             "row 2 was: {second:?}, header: {header:?}"
         );
+    }
+
+    #[test]
+    fn a_known_column_type_is_shown_next_to_its_name_in_the_header() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        results.set_column_types(vec![
+            Some("INTEGER".to_string()),
+            None,
+            Some("INTEGER".to_string()),
+        ]);
+
+        let text = draw_component(&mut results, 60, 8);
+
+        assert!(text.contains("id INTEGER"), "buffer was: {text}");
+        // No type known for `name` -- it must show bare, not "name None"
+        // or any other stand-in for "nothing to say".
+        assert!(text.contains("name"), "buffer was: {text}");
+        assert!(!text.contains("name None"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn the_cell_preview_title_includes_the_column_s_type_when_known() {
+        let mut results = ResultsComponent::new();
+        results.set_result(table(1));
+        results.set_column_types(vec![Some("INTEGER".to_string())]);
+        results.toggle_preview();
+
+        let text = draw_component(&mut results, 40, 12);
+
+        assert!(text.contains("id INTEGER"), "buffer was: {text}");
     }
 
     #[test]

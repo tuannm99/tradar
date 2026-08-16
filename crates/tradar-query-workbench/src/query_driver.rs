@@ -23,6 +23,11 @@ pub struct SchemaInfo {
     /// a Mongo collection) and there's nothing to distinguish -- the browse
     /// sidebar treats `None` as "not applicable".
     pub kind: Option<String>,
+    /// Seconds until this entry expires (Redis: `TTL`). `None` for backends
+    /// with no expiry concept, and also for a Redis key with no expiry set
+    /// (`TTL` returns `-1`) -- the browse sidebar treats both the same way,
+    /// as nothing to show.
+    pub ttl: Option<i64>,
 }
 
 impl SchemaInfo {
@@ -33,6 +38,7 @@ impl SchemaInfo {
             name: name.into(),
             columns: Vec::new(),
             kind: None,
+            ttl: None,
         }
     }
 }
@@ -518,6 +524,34 @@ pub fn single_table_source(sql: &str) -> Option<String> {
     }
 }
 
+/// Each of `columns`' declared type from `schema`'s entry named `table`,
+/// aligned by name -- what the results header's `id int8`-style annotation
+/// and the cell preview panel's `(type)` show. `None` per column when
+/// there's no known source table at all (a join, a write, `edit_source`
+/// came back empty) or that particular one isn't in `schema` (an
+/// expression, an alias, a computed column) -- shown as nothing rather
+/// than guessed.
+pub fn column_types(
+    columns: &[String],
+    schema: &[SchemaInfo],
+    table: Option<&str>,
+) -> Vec<Option<String>> {
+    let types: std::collections::HashMap<&str, &str> = table
+        .and_then(|name| schema.iter().find(|entry| entry.name == name))
+        .map(|entry| {
+            entry
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c.type_name.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    columns
+        .iter()
+        .map(|name| types.get(name.as_str()).map(|t| t.to_string()))
+        .collect()
+}
+
 /// Words that start a clause after the `FROM` list, so they can't be an
 /// alias for the table that precedes them.
 fn is_clause_keyword(word: &str) -> bool {
@@ -790,6 +824,15 @@ pub trait QueryDriver: Send + Sync {
         anyhow::bail!("this connector has no browse view")
     }
 
+    /// The literal command `browse_entry` would run for `entry`, for the
+    /// browse sidebar to echo back (`127.0.0.1:6379> HGETALL user:1`) so
+    /// browsing doesn't feel like a black box next to the console mode that
+    /// shows exactly what you type. `None` by default, same as
+    /// `browse_entry` itself.
+    fn browse_command(&self, _entry: &SchemaInfo) -> Option<String> {
+        None
+    }
+
     /// A skeleton statement for `op` against `entry`, in this driver's own
     /// query language -- see `Component::crud_snippet`. `None` by default:
     /// most drivers don't override this until they're taught to.
@@ -821,6 +864,7 @@ mod tests {
                 ColumnInfo::new("email", "TEXT"),
             ],
             kind: None,
+            ttl: None,
         }
     }
 
@@ -882,6 +926,7 @@ mod tests {
                 .map(|i| ColumnInfo::new(format!("column_number_{i}"), "TEXT"))
                 .collect(),
             kind: None,
+            ttl: None,
         };
 
         for op in [CrudOp::Create, CrudOp::Update] {
@@ -901,11 +946,54 @@ mod tests {
             name: "logs".to_string(),
             columns: vec![ColumnInfo::new("message", "TEXT")],
             kind: None,
+            ttl: None,
         };
 
         assert_eq!(
             build_crud_snippet(&entry, CrudOp::Update),
             "UPDATE \"logs\" SET\n  \"message\" = <message>\nWHERE <condition>;"
+        );
+    }
+
+    #[test]
+    fn column_types_looks_up_each_column_by_name_in_the_source_table() {
+        let schema = vec![users_table()];
+        let columns = vec!["id".to_string(), "email".to_string()];
+
+        assert_eq!(
+            column_types(&columns, &schema, Some("users")),
+            vec![Some("INTEGER".to_string()), Some("TEXT".to_string())]
+        );
+    }
+
+    #[test]
+    fn column_types_is_none_for_a_column_the_source_table_does_not_have() {
+        let schema = vec![users_table()];
+        let columns = vec!["id".to_string(), "computed_alias".to_string()];
+
+        assert_eq!(
+            column_types(&columns, &schema, Some("users")),
+            vec![Some("INTEGER".to_string()), None]
+        );
+    }
+
+    #[test]
+    fn column_types_is_all_none_with_no_source_table() {
+        let columns = vec!["id".to_string(), "email".to_string()];
+
+        assert_eq!(
+            column_types(&columns, &[users_table()], None),
+            vec![None; 2]
+        );
+    }
+
+    #[test]
+    fn column_types_is_all_none_when_the_table_is_not_in_schema() {
+        let columns = vec!["id".to_string()];
+
+        assert_eq!(
+            column_types(&columns, &[users_table()], Some("ghost")),
+            vec![None]
         );
     }
 

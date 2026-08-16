@@ -72,10 +72,17 @@ impl BrowseSidebarComponent {
             .iter()
             .map(|entry| {
                 let kind = entry.kind.as_deref().unwrap_or("?");
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!(" {}", entry.name), Style::default().fg(theme.text)),
                     Span::styled(format!("  {kind}"), Style::default().fg(theme.text_dim)),
-                ]))
+                ];
+                if let Some(ttl) = entry.ttl {
+                    spans.push(Span::styled(
+                        format!("  ttl:{ttl}s"),
+                        Style::default().fg(theme.text_dim),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
 
@@ -104,6 +111,7 @@ mod tests {
             name: name.to_string(),
             columns: Vec::new(),
             kind: Some(kind.to_string()),
+            ttl: None,
         }
     }
 
@@ -152,5 +160,42 @@ mod tests {
 
         assert_eq!(sidebar.selected_entry(), None);
         assert_eq!(sidebar.error.as_deref(), Some("scan failed"));
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn a_key_with_a_ttl_shows_it_next_to_its_type() {
+        let mut sidebar = BrowseSidebarComponent::new(&Ok(vec![SchemaInfo {
+            name: "session:abc".to_string(),
+            columns: Vec::new(),
+            kind: Some("string".to_string()),
+            ttl: Some(3421),
+        }]));
+
+        let backend = ratatui::backend::TestBackend::new(40, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar.draw(frame, frame.area(), true))
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("ttl:3421s"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn a_key_with_no_ttl_shows_nothing_extra() {
+        let mut sidebar = sidebar();
+
+        let backend = ratatui::backend::TestBackend::new(40, 6);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar.draw(frame, frame.area(), true))
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(!text.contains("ttl:"), "buffer was: {text}");
     }
 }

@@ -145,10 +145,17 @@ impl QueryDriver for RedisDriver {
                 .arg(&name)
                 .query_async(&mut connection)
                 .await?;
+            let ttl: i64 = redis::cmd("TTL")
+                .arg(&name)
+                .query_async(&mut connection)
+                .await?;
             schema.push(SchemaInfo {
                 name,
                 columns: Vec::new(),
                 kind: Some(kind),
+                // -1 = no expiry set, -2 = key gone between SCAN and here
+                // (a race, not an error) -- neither is a duration to show.
+                ttl: (ttl >= 0).then_some(ttl),
             });
         }
         Ok(schema)
@@ -186,6 +193,11 @@ impl QueryDriver for RedisDriver {
             .ok_or_else(|| anyhow::anyhow!("no browse view for Redis type '{kind}'"))?;
         let result = self.execute(&browse_kind.command(&entry.name)).await?;
         Ok(reshape_for_browse(browse_kind, result))
+    }
+
+    fn browse_command(&self, entry: &SchemaInfo) -> Option<String> {
+        let kind = entry.kind.as_deref()?;
+        Some(BrowseKind::parse(kind)?.command(&entry.name))
     }
 
     /// Reuses `BrowseKind` (see "Redis: key browser" in `docs/backlog.md`)
@@ -454,6 +466,7 @@ mod tests {
             name: "user:1".to_string(),
             columns: Vec::new(),
             kind: Some("hash".to_string()),
+            ttl: None,
         };
 
         assert_eq!(
@@ -475,12 +488,42 @@ mod tests {
     }
 
     #[test]
+    fn browse_command_reports_the_literal_command_browse_entry_would_run() {
+        let driver = RedisDriver::new("redis://127.0.0.1:1");
+        let entry = SchemaInfo {
+            name: "user:1".to_string(),
+            columns: Vec::new(),
+            kind: Some("hash".to_string()),
+            ttl: None,
+        };
+
+        assert_eq!(
+            driver.browse_command(&entry),
+            Some("HGETALL user:1".to_string())
+        );
+    }
+
+    #[test]
+    fn browse_command_is_none_for_an_unknown_type() {
+        let driver = RedisDriver::new("redis://127.0.0.1:1");
+        let entry = SchemaInfo {
+            name: "events".to_string(),
+            columns: Vec::new(),
+            kind: Some("stream".to_string()),
+            ttl: None,
+        };
+
+        assert_eq!(driver.browse_command(&entry), None);
+    }
+
+    #[test]
     fn crud_snippet_is_none_for_an_unknown_type() {
         let driver = RedisDriver::new("redis://127.0.0.1:1");
         let entry = SchemaInfo {
             name: "events".to_string(),
             columns: Vec::new(),
             kind: Some("stream".to_string()),
+            ttl: None,
         };
 
         assert_eq!(
@@ -619,6 +662,7 @@ mod tests {
                 name: "greeting".to_string(),
                 columns: Vec::new(),
                 kind: Some("string".to_string()),
+                ttl: None,
             })
             .await
             .unwrap();
@@ -646,6 +690,7 @@ mod tests {
                 name: "user:1".to_string(),
                 columns: Vec::new(),
                 kind: Some("hash".to_string()),
+                ttl: None,
             })
             .await
             .unwrap();
@@ -678,6 +723,7 @@ mod tests {
                 name: "queue".to_string(),
                 columns: Vec::new(),
                 kind: Some("list".to_string()),
+                ttl: None,
             })
             .await
             .unwrap();
@@ -709,6 +755,7 @@ mod tests {
                 name: "tags".to_string(),
                 columns: Vec::new(),
                 kind: Some("set".to_string()),
+                ttl: None,
             })
             .await
             .unwrap();
@@ -744,6 +791,7 @@ mod tests {
                 name: "leaderboard".to_string(),
                 columns: Vec::new(),
                 kind: Some("zset".to_string()),
+                ttl: None,
             })
             .await
             .unwrap();
@@ -774,6 +822,7 @@ mod tests {
                 name: "events".to_string(),
                 columns: Vec::new(),
                 kind: Some("stream".to_string()),
+                ttl: None,
             })
             .await;
 
