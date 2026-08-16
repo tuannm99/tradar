@@ -14,7 +14,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
@@ -157,23 +157,24 @@ impl NavigatorComponent {
                     || entry.detail.to_lowercase().contains(&needle)
             }
         };
-        let mut keep = vec![false; all.len()];
-        for (index, row) in all.iter().enumerate() {
-            if !matches(row) {
-                continue;
-            }
-            keep[index] = true;
+        // Which connections have a matching entry under them, gathered in
+        // one pass rather than re-scanning `all` to find each match's
+        // owning connection row -- that would be quadratic in the number
+        // of matches.
+        let mut connections_with_a_match: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        for row in &all {
             if let Row::Entry { connection, .. } = row
-                && let Some(owner) = all
-                    .iter()
-                    .position(|r| matches!(r, Row::Connection(c) if c == connection))
+                && matches(row)
             {
-                keep[owner] = true;
+                connections_with_a_match.insert(*connection);
             }
         }
         all.into_iter()
-            .zip(keep)
-            .filter_map(|(row, keep)| keep.then_some(row))
+            .filter(|row| match row {
+                Row::Connection(index) => matches(row) || connections_with_a_match.contains(index),
+                Row::Entry { .. } => matches(row),
+            })
             .collect()
     }
 
@@ -359,11 +360,8 @@ impl NavigatorComponent {
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focused: bool, conns: &[NavConnection]) {
         let theme = theme();
         let (list_area, filter_bar_area) = if self.filter_input.is_some() {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(1)])
-                .split(area);
-            (rows[0], Some(rows[1]))
+            let (list_area, bar) = ui::split_bottom_bar(area, 1);
+            (list_area, Some(bar))
         } else {
             (area, None)
         };

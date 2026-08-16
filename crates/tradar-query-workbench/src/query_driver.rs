@@ -824,10 +824,13 @@ pub trait QueryDriver: Send + Sync {
         anyhow::bail!("this connector has no browse view")
     }
 
-    /// The literal command `browse_entry` would run for `entry`, for the
-    /// browse sidebar to echo back (`127.0.0.1:6379> HGETALL user:1`) so
-    /// browsing doesn't feel like a black box next to the console mode that
-    /// shows exactly what you type. `None` by default, same as
+    /// The full line to echo for what `browse_entry` will run against
+    /// `entry` -- e.g. `127.0.0.1:6379> HGETALL user:1` -- so browsing
+    /// doesn't feel like a black box next to the console mode that shows
+    /// exactly what you type. Already formatted (target and command
+    /// together): the caller only ever displays it verbatim, never parses
+    /// it, so a driver-specific detail like Redis's `redis://` scheme
+    /// never has to leak into shared code. `None` by default, same as
     /// `browse_entry` itself.
     fn browse_command(&self, _entry: &SchemaInfo) -> Option<String> {
         None

@@ -101,10 +101,10 @@ pub struct QueryScreenComponent {
     /// sidebar or leaves `ScreenMode::Console`.
     browse: Option<BrowseSidebarComponent>,
     mode: ScreenMode,
-    /// The literal Redis command behind the most recent browse-sidebar
-    /// `Enter`, echoed under the results grid -- see `open_selected_key`.
-    /// `None` before anything's been browsed yet, or for every connector
-    /// but Redis.
+    /// The driver-formatted echo line (`QueryDriver::browse_command`) for
+    /// the most recent browse-sidebar `Enter`, shown verbatim under the
+    /// results grid -- see `open_selected_key`. `None` before anything's
+    /// been browsed yet, or for every connector but Redis.
     last_browse_command: Option<String>,
 }
 
@@ -1091,6 +1091,13 @@ impl Component for QueryScreenComponent {
                 QueryOutcome::Completed { result } => self.results.set_result(result),
                 QueryOutcome::Failed { error } => self.results.set_error(error),
             }
+            // Recomputed only now that the result actually changed, not
+            // every `draw()` frame -- nothing it depends on (`last_query`,
+            // the just-set result, the schema) moves between outcomes, and
+            // a query left running redraws ~20x/second for the spinner
+            // alone (see `QueryEngine::tick`), which would otherwise mean
+            // rebuilding this for no reason on every one of those frames.
+            self.results.set_column_types(self.column_types());
         }
         changed
     }
@@ -1112,12 +1119,9 @@ impl Component for QueryScreenComponent {
             }
             self.editor_area = Rect::ZERO;
             if self.last_browse_command.is_some() {
-                let rows = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(3), Constraint::Length(1)])
-                    .split(columns[1]);
-                browse_command_area = Some(rows[1]);
-                rows[0]
+                let (content, bar) = ui::split_bottom_bar(columns[1], 1);
+                browse_command_area = Some(bar);
+                content
             } else {
                 columns[1]
             }
@@ -1163,7 +1167,6 @@ impl Component for QueryScreenComponent {
         };
 
         self.results.draw_running(self.engine.elapsed_running());
-        self.results.set_column_types(self.column_types());
         let results_area = match &self.search {
             Some(_) => Rect {
                 height: content_area.height.saturating_sub(1),
@@ -1173,21 +1176,17 @@ impl Component for QueryScreenComponent {
         };
         self.results
             .draw(frame, results_area, self.focus == Focus::Results);
-        if let (Some(area), Some(command)) = (browse_command_area, &self.last_browse_command) {
+        if let (Some(area), Some(line)) = (browse_command_area, &self.last_browse_command) {
+            // `line` (e.g. `127.0.0.1:6379> HGETALL user:1`) is already
+            // fully formatted by the driver -- see `QueryDriver::
+            // browse_command`'s doc comment for why this component never
+            // builds that string itself.
             let theme = tradar_core::theme::theme();
-            let full_target = &self.active_connection().target;
-            let target = full_target.strip_prefix("redis://").unwrap_or(full_target);
             frame.render_widget(
-                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
-                    ratatui::text::Span::styled(
-                        format!("{target}> "),
-                        ratatui::style::Style::default().fg(theme.text_dim),
-                    ),
-                    ratatui::text::Span::styled(
-                        command.as_str(),
-                        ratatui::style::Style::default().fg(theme.text),
-                    ),
-                ])),
+                ratatui::widgets::Paragraph::new(ratatui::text::Span::styled(
+                    line.as_str(),
+                    ratatui::style::Style::default().fg(theme.text),
+                )),
                 area,
             );
         }

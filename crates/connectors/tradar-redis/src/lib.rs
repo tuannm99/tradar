@@ -25,6 +25,16 @@ impl RedisDriver {
             connection: None,
         }
     }
+
+    /// `entry`'s browse type and the command that fetches its full value --
+    /// the one piece of logic `browse_entry` (runs it) and `browse_command`
+    /// (echoes it) both need, kept in one place so they can't drift apart.
+    fn browse_kind_and_command(&self, entry: &SchemaInfo) -> Option<(BrowseKind, String)> {
+        let kind = entry.kind.as_deref()?;
+        let browse_kind = BrowseKind::parse(kind)?;
+        let command = browse_kind.command(&entry.name);
+        Some((browse_kind, command))
+    }
 }
 
 #[async_trait]
@@ -110,13 +120,14 @@ impl QueryDriver for RedisDriver {
         Ok(())
     }
 
-    /// Every key, each with its Redis type -- what the browse sidebar
-    /// lists. SCAN is paginated 100 keys at a time and looped to
-    /// completion, then every key gets its own `TYPE` call: N+1 round
+    /// Every key, each with its Redis type and TTL -- what the browse
+    /// sidebar lists. SCAN is paginated 100 keys at a time and looped to
+    /// completion, then every key gets one `TYPE`+`TTL` round trip
+    /// (pipelined together, since both target the same key): N+1 round
     /// trips for N keys, the same trade-off already accepted for MongoDB's
     /// per-collection `find_one` in `list_schema`. Fine for a keyspace of
-    /// ordinary size; worth pipelining the `TYPE` calls if a very large
-    /// one ever makes this slow in practice.
+    /// ordinary size; worth pipelining across keys too if a very large one
+    /// ever makes this slow in practice.
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let mut connection = self
             .connection
@@ -141,11 +152,10 @@ impl QueryDriver for RedisDriver {
 
         let mut schema = Vec::with_capacity(keys.len());
         for name in keys {
-            let kind: String = redis::cmd("TYPE")
+            let (kind, ttl): (String, i64) = redis::pipe()
+                .cmd("TYPE")
                 .arg(&name)
-                .query_async(&mut connection)
-                .await?;
-            let ttl: i64 = redis::cmd("TTL")
+                .cmd("TTL")
                 .arg(&name)
                 .query_async(&mut connection)
                 .await?;
@@ -189,15 +199,25 @@ impl QueryDriver for RedisDriver {
     /// console mode uses), then reshapes that into rows/columns.
     async fn browse_entry(&self, entry: &SchemaInfo) -> anyhow::Result<QueryResult> {
         let kind = entry.kind.as_deref().unwrap_or_default();
-        let browse_kind = BrowseKind::parse(kind)
+        let (browse_kind, command) = self
+            .browse_kind_and_command(entry)
             .ok_or_else(|| anyhow::anyhow!("no browse view for Redis type '{kind}'"))?;
-        let result = self.execute(&browse_kind.command(&entry.name)).await?;
+        let result = self.execute(&command).await?;
         Ok(reshape_for_browse(browse_kind, result))
     }
 
+    /// The full echo line for `entry`'s browse command -- `<target>>
+    /// <command>`, e.g. `127.0.0.1:6379> HGETALL user:1`. Formats the
+    /// target itself (stripping the `redis://` scheme) rather than handing
+    /// back a bare command for the caller to prefix: `tradar-query-
+    /// workbench` must stay generic across connectors, so it only ever
+    /// gets an opaque string to print verbatim, the same way
+    /// `format_pg_error` keeps all its Postgres-specific formatting inside
+    /// that connector.
     fn browse_command(&self, entry: &SchemaInfo) -> Option<String> {
-        let kind = entry.kind.as_deref()?;
-        Some(BrowseKind::parse(kind)?.command(&entry.name))
+        let (_, command) = self.browse_kind_and_command(entry)?;
+        let target = self.url.strip_prefix("redis://").unwrap_or(&self.url);
+        Some(format!("{target}> {command}"))
     }
 
     /// Reuses `BrowseKind` (see "Redis: key browser" in `docs/backlog.md`)
@@ -488,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn browse_command_reports_the_literal_command_browse_entry_would_run() {
+    fn browse_command_echoes_the_target_and_the_literal_command_browse_entry_would_run() {
         let driver = RedisDriver::new("redis://127.0.0.1:1");
         let entry = SchemaInfo {
             name: "user:1".to_string(),
@@ -499,7 +519,7 @@ mod tests {
 
         assert_eq!(
             driver.browse_command(&entry),
-            Some("HGETALL user:1".to_string())
+            Some("127.0.0.1:1> HGETALL user:1".to_string())
         );
     }
 

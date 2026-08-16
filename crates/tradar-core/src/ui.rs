@@ -81,6 +81,18 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+/// Carves a `height`-row bar off the bottom of `area` for a one-line
+/// input/echo strip (a filter bar, a status line) below whatever fills the
+/// rest -- returns `(content, bar)`. Shared so this exact split doesn't get
+/// hand-rolled again per panel that wants one.
+pub fn split_bottom_bar(area: Rect, height: u16) -> (Rect, Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(height)])
+        .split(area);
+    (rows[0], rows[1])
+}
+
 /// Whether `area` covers the given cell -- the hit test every mouse
 /// handler starts with.
 pub fn contains(area: Rect, column: u16, row: u16) -> bool {
