@@ -250,9 +250,21 @@ impl RootComponent {
     /// Connects `connection` on a tab of its own -- reusing the active tab
     /// when it's still sitting on the picker, since an empty tab is exactly
     /// what a new connection wants.
+    /// Connects `index` into a tab: reuses the active one if it's still on
+    /// the picker, otherwise opens a new tab for it *without* switching
+    /// focus there -- the navigator is a reach-across tool (browsing/
+    /// inserting from another connection is meant to leave you where you
+    /// were, see `NavOutcome::Insert`/`Snippet`), and yanking focus away
+    /// to a connection you were only peeking at from the navigator would
+    /// undercut that. The new tab connects in the background and shows up
+    /// in the tab bar once it does, the way a browser's background tab
+    /// does -- `Ctrl+Right` reaches it same as any other tab.
     fn open_connection(&mut self, index: usize) -> Option<Action> {
         let connection = self.connections.get(index)?.clone();
-        if matches!(self.tabs[self.active_tab].screen, ScreenSlot::Active(_)) {
+        let previously_active = self.active_tab;
+        let opening_in_background =
+            matches!(self.tabs[self.active_tab].screen, ScreenSlot::Active(_));
+        if opening_in_background {
             self.new_tab();
         }
         let tab = self.active_tab;
@@ -263,6 +275,9 @@ impl RootComponent {
         let action = self.tabs[tab]
             .connection_picker
             .handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        if opening_in_background {
+            self.active_tab = previously_active;
+        }
         match action {
             Some(Action::OpenRequested {
                 connection: _,
@@ -1386,6 +1401,28 @@ mod tests {
         assert_eq!(connection.name, "local-postgres");
         assert_eq!(tab, 1, "the connected tab 0 is left alone");
         assert_eq!(root.tabs.len(), 2);
+    }
+
+    #[test]
+    fn opening_an_unconnected_connection_from_the_navigator_stays_on_the_current_tab() {
+        // Opening it is still a connect (see `open_connection`'s doc
+        // comment) -- but browsing/opening something from the navigator
+        // must not itself yank focus away from the tab you were on, the
+        // same way `NavOutcome::Insert`/`Snippet` never do either.
+        let (mut root, _) = root_with_navigator();
+        assert_eq!(root.active_tab, 0);
+
+        root.handle_key_event(KeyCode::Char('G'), KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            root.active_tab, 0,
+            "the new background tab must not steal focus"
+        );
+        assert!(
+            root.navigator_focused,
+            "the navigator stays open to reach across to something else"
+        );
     }
 
     #[test]
