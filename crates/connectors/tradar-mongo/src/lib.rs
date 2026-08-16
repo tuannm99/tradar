@@ -359,32 +359,41 @@ async fn run_method(
     }
 }
 
-/// Unwraps MongoDB Extended JSON's `{"$oid": "<hex>"}` (an `ObjectId`) and
-/// `{"$date": "<iso>"}` (a `DateTime`) into the plain string a human
-/// actually wants to read, recursively through nested documents/arrays.
-/// `into_relaxed_extjson()` -- and, identically, `serde_json`'s own
-/// `Serialize` impl for `Bson` when a driver result struct (`inserted_id`,
-/// ...) gets serialized -- still wraps these two even in "relaxed" mode,
-/// since JSON has no native representation for either. Safe to throw the
-/// wrapper away here: this driver's results are read-only display, never
-/// re-encoded back into BSON, and the type itself is still visible
-/// separately, via the navigator's schema (`Bson::element_type()` in
-/// `flatten_document`). Any other extJSON wrapper (`$numberLong`,
-/// `$numberDecimal`, `$binary`, ...) is left alone -- unwrapping those
+/// Reformats MongoDB Extended JSON's `{"$oid": "<hex>"}` (an `ObjectId`)
+/// and `{"$date": "<iso>"}` (a `DateTime`) into the same shell-literal
+/// text `mongosh` itself prints them as -- `ObjectId("<hex>")` /
+/// `ISODate("<iso>")` -- recursively through nested documents/arrays.
+/// Deliberately *not* a bare string: an `ObjectId` and a plain string
+/// field that happens to contain the same-looking hex text must stay
+/// visually distinguishable (`ObjectId("507f...")` vs `"507f..."`), which
+/// a bare-string unwrap -- tried first, then reverted after user feedback
+/// -- would erase entirely. `into_relaxed_extjson()` -- and, identically,
+/// `serde_json`'s own `Serialize` impl for `Bson` when a driver result
+/// struct (`inserted_id`, ...) gets serialized -- still wraps these two
+/// even in "relaxed" mode, since JSON has no native representation for
+/// either. Safe to reformat here: this driver's results are read-only
+/// display, never re-encoded back into BSON, and the type itself is also
+/// visible separately via the navigator's schema (`Bson::element_type()`
+/// in `flatten_document`). Any other extJSON wrapper (`$numberLong`,
+/// `$numberDecimal`, `$binary`, ...) is left alone -- reformatting those
 /// would lose a distinction (e.g. an int that overflowed `i32`) that
-/// isn't purely cosmetic the way a hex string or ISO timestamp is.
+/// isn't purely cosmetic the way an id or a timestamp is.
 fn simplify_extjson(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
-            let unwrapped = if map.len() == 1 {
+            let reformatted = if map.len() == 1 {
                 map.get("$oid")
-                    .or_else(|| map.get("$date"))
                     .and_then(|v| v.as_str())
-                    .map(str::to_string)
+                    .map(|hex| format!("ObjectId(\"{hex}\")"))
+                    .or_else(|| {
+                        map.get("$date")
+                            .and_then(|v| v.as_str())
+                            .map(|iso| format!("ISODate(\"{iso}\")"))
+                    })
             } else {
                 None
             };
-            match unwrapped {
+            match reformatted {
                 Some(s) => *value = serde_json::Value::String(s),
                 None => {
                     for v in map.values_mut() {
@@ -501,25 +510,51 @@ mod tests {
     }
 
     #[test]
-    fn simplify_extjson_unwraps_an_oid_to_a_plain_string() {
+    fn simplify_extjson_formats_an_oid_as_a_mongosh_style_literal() {
         let mut value = serde_json::json!({"$oid": "507f1f77bcf86cd799439011"});
 
         simplify_extjson(&mut value);
 
-        assert_eq!(value, serde_json::json!("507f1f77bcf86cd799439011"));
+        assert_eq!(
+            value,
+            serde_json::json!("ObjectId(\"507f1f77bcf86cd799439011\")")
+        );
     }
 
     #[test]
-    fn simplify_extjson_unwraps_a_date_to_a_plain_string() {
+    fn simplify_extjson_formats_a_date_as_a_mongosh_style_literal() {
         let mut value = serde_json::json!({"$date": "2026-08-16T00:00:00Z"});
 
         simplify_extjson(&mut value);
 
-        assert_eq!(value, serde_json::json!("2026-08-16T00:00:00Z"));
+        assert_eq!(
+            value,
+            serde_json::json!("ISODate(\"2026-08-16T00:00:00Z\")")
+        );
     }
 
     #[test]
-    fn simplify_extjson_unwraps_nested_and_array_occurrences() {
+    fn simplify_extjson_keeps_an_objectid_distinguishable_from_a_plain_string_field() {
+        // The whole point: a real string field that happens to contain
+        // the exact same hex text as an id must not render identically
+        // to the id itself.
+        let mut value = serde_json::json!({
+            "_id": {"$oid": "507f1f77bcf86cd799439011"},
+            "note": "507f1f77bcf86cd799439011",
+        });
+
+        simplify_extjson(&mut value);
+
+        assert_eq!(
+            value["_id"],
+            serde_json::json!("ObjectId(\"507f1f77bcf86cd799439011\")")
+        );
+        assert_eq!(value["note"], serde_json::json!("507f1f77bcf86cd799439011"));
+        assert_ne!(value["_id"], value["note"]);
+    }
+
+    #[test]
+    fn simplify_extjson_formats_nested_and_array_occurrences() {
         let mut value = serde_json::json!({
             "_id": {"$oid": "507f1f77bcf86cd799439011"},
             "name": "Ada",
@@ -532,10 +567,10 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "_id": "507f1f77bcf86cd799439011",
+                "_id": "ObjectId(\"507f1f77bcf86cd799439011\")",
                 "name": "Ada",
-                "createdBy": {"id": "507f191e810c19729de860ea"},
-                "history": ["2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z"],
+                "createdBy": {"id": "ObjectId(\"507f191e810c19729de860ea\")"},
+                "history": ["ISODate(\"2026-08-01T00:00:00Z\")", "ISODate(\"2026-08-02T00:00:00Z\")"],
             })
         );
     }
@@ -715,7 +750,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_reports_the_id_as_a_plain_hex_string_not_a_wrapped_oid() {
+    async fn find_reports_the_id_as_an_objectid_literal_not_a_wrapped_oid() {
         let container = Mongo::new().start().await.unwrap();
         let port = container.get_host_port_ipv4(27017).await.unwrap();
         let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
@@ -733,17 +768,15 @@ mod tests {
         let QueryResult::Documents(docs) = result else {
             panic!("expected Documents");
         };
-        let id = &docs[0]["_id"];
+        let id = docs[0]["_id"].as_str().expect("_id must be a string");
         assert!(
-            id.is_string(),
-            "_id must be a plain string, not a wrapped {{\"$oid\": ...}} object: {id:?}"
+            id.starts_with("ObjectId(\"") && id.ends_with("\")"),
+            "was: {id:?}"
         );
-        // A real ObjectId hex string is exactly 24 hex characters.
-        assert_eq!(id.as_str().unwrap().len(), 24);
     }
 
     #[tokio::test]
-    async fn insert_one_s_own_inserted_id_is_also_a_plain_string() {
+    async fn insert_one_s_own_inserted_id_is_also_an_objectid_literal() {
         let container = Mongo::new().start().await.unwrap();
         let port = container.get_host_port_ipv4(27017).await.unwrap();
         let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
@@ -757,10 +790,12 @@ mod tests {
         let QueryResult::Documents(docs) = result else {
             panic!("expected Documents");
         };
+        let id = docs[0]["insertedId"]
+            .as_str()
+            .expect("insertedId must be a string");
         assert!(
-            docs[0]["insertedId"].is_string(),
-            "was: {:?}",
-            docs[0]["insertedId"]
+            id.starts_with("ObjectId(\"") && id.ends_with("\")"),
+            "was: {id:?}"
         );
     }
 
