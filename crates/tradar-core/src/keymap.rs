@@ -292,6 +292,13 @@ pub enum Command {
     HttpOpenRequests,
     /// Delete the highlighted request, in the library overlay.
     HttpDeleteRequest,
+    /// Flip a two-pane split (editor/results, HTTP request/response)
+    /// between stacked and side-by-side.
+    ToggleSplitOrientation,
+    /// Grow whichever pane currently has focus, shrinking the other.
+    ZoomIn,
+    /// Undo one `ZoomIn` step for whichever pane currently has focus.
+    ZoomOut,
     /// Insert a Create/Read/Update/Delete skeleton for the highlighted
     /// navigator entry into its tab's editor -- see
     /// `Component::crud_snippet`.
@@ -386,6 +393,9 @@ impl Command {
             Self::HttpSaveRequest => "http-save-request",
             Self::HttpOpenRequests => "http-open-requests",
             Self::HttpDeleteRequest => "http-delete-request",
+            Self::ToggleSplitOrientation => "toggle-split-orientation",
+            Self::ZoomIn => "zoom-in",
+            Self::ZoomOut => "zoom-out",
             Self::CrudCreate => "crud-create",
             Self::CrudRead => "crud-read",
             Self::CrudUpdate => "crud-update",
@@ -413,7 +423,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 78] = [
+    const ALL: [Self; 81] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -472,6 +482,9 @@ impl Command {
         Self::HttpSaveRequest,
         Self::HttpOpenRequests,
         Self::HttpDeleteRequest,
+        Self::ToggleSplitOrientation,
+        Self::ZoomIn,
+        Self::ZoomOut,
         Self::CrudCreate,
         Self::CrudRead,
         Self::CrudUpdate,
@@ -555,6 +568,9 @@ impl Command {
             Self::HttpSaveRequest => "Save the request into the request library",
             Self::HttpOpenRequests => "Open the saved-request library",
             Self::HttpDeleteRequest => "Delete the selected saved request",
+            Self::ToggleSplitOrientation => "Flip the split between stacked and side-by-side",
+            Self::ZoomIn => "Grow the focused pane",
+            Self::ZoomOut => "Shrink the focused pane back",
             Self::CrudCreate => "Insert a Create snippet for the selected table",
             Self::CrudRead => "Insert a Read snippet for the selected table",
             Self::CrudUpdate => "Insert an Update snippet for the selected table",
@@ -725,6 +741,9 @@ impl Default for Keymap {
                 ("ctrl-y", Command::ExportCurl),
                 ("ctrl-e", Command::Export),
                 ("ctrl-g", Command::ToggleBrowseMode),
+                ("f6", Command::ToggleSplitOrientation),
+                ("ctrl-up", Command::ZoomIn),
+                ("ctrl-down", Command::ZoomOut),
                 ("?", Command::Help),
             ]),
         );
@@ -766,6 +785,9 @@ impl Default for Keymap {
                 ("ctrl-right", Command::HttpNextMethod),
                 ("ctrl-k", Command::HttpSaveRequest),
                 ("ctrl-l", Command::HttpOpenRequests),
+                ("f6", Command::ToggleSplitOrientation),
+                ("ctrl-up", Command::ZoomIn),
+                ("ctrl-down", Command::ZoomOut),
                 ("esc", Command::Back),
                 ("?", Command::Help),
             ]),

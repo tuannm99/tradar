@@ -3,7 +3,7 @@
 //! "Thiết kế UI: HTTP, gRPC, Socket" in docs/architecture.md for the design
 //! this implements.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -99,6 +99,23 @@ pub struct HttpScreen {
     name_prompt: Option<TextInput>,
     request_picker: Option<RequestPicker>,
     pending: Option<KeyPress>,
+    /// The request-builder/response split -- stacked or side by side, and
+    /// how much space each pane gets. Same widget and same `F6`/
+    /// `Ctrl+Up`/`Ctrl+Down` bindings as the query screen's editor/results
+    /// split -- see `tradar_core::ui::SplitPane`.
+    split: ui::SplitPane,
+    /// Where each field/pane was last drawn, so a click there can focus it
+    /// or hit-test a right-click -- same idea as `QueryScreenComponent`'s
+    /// `editor_area`.
+    url_area: Rect,
+    headers_area: Rect,
+    body_area: Rect,
+    response_area: Rect,
+    /// The full area this screen was last drawn into -- context-menu
+    /// clicks are hit-tested against the exact bounds it was drawn with.
+    screen_area: Rect,
+    /// Open after a right-click on the response pane.
+    context_menu: Option<ui::ContextMenu>,
 }
 
 impl HttpScreen {
@@ -119,6 +136,13 @@ impl HttpScreen {
             name_prompt: None,
             request_picker: None,
             pending: None,
+            split: ui::SplitPane::default(),
+            url_area: Rect::ZERO,
+            headers_area: Rect::ZERO,
+            body_area: Rect::ZERO,
+            response_area: Rect::ZERO,
+            screen_area: Rect::ZERO,
+            context_menu: None,
         }
     }
 
@@ -276,6 +300,36 @@ impl HttpScreen {
         None
     }
 
+    fn yank_response(&self) {
+        if let Some(response) = &self.session.response {
+            ui::yank_to_clipboard(&response.body);
+        }
+    }
+
+    /// Runs whatever `command` means for this screen -- shared by keyboard
+    /// dispatch and a right-click context menu's confirmed choice, so a
+    /// menu item runs through the exact same code a keyboard shortcut for
+    /// it would.
+    fn dispatch_command(&mut self, command: Command) -> Option<Action> {
+        match command {
+            Command::NextField => self.cycle_focus(1),
+            Command::PrevField => self.cycle_focus(-1),
+            Command::HttpSend => self.send(),
+            Command::HttpNextMethod => self.method = self.method.cycle(1),
+            Command::HttpPrevMethod => self.method = self.method.cycle(-1),
+            Command::HttpSaveRequest => self.open_save_prompt(),
+            Command::HttpOpenRequests => self.open_request_picker(),
+            Command::Yank if self.focus == Focus::Response => self.yank_response(),
+            Command::ToggleSplitOrientation => self.split.toggle_orientation(),
+            Command::ZoomIn => self.split.zoom_in(self.focus != Focus::Response),
+            Command::ZoomOut => self.split.zoom_out(self.focus != Focus::Response),
+            Command::Help => return Some(Action::ShowHelp),
+            Command::Back => return Some(Action::BackToPicker),
+            _ => {}
+        }
+        None
+    }
+
     fn draw_method_url(&mut self, frame: &mut Frame, area: Rect) {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -424,6 +478,17 @@ impl HttpScreen {
 
 impl Component for HttpScreen {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        if let Some(menu) = self.context_menu.as_mut() {
+            match menu.handle_key_event(code) {
+                ui::ContextMenuOutcome::Open => {}
+                ui::ContextMenuOutcome::Closed => self.context_menu = None,
+                ui::ContextMenuOutcome::Confirmed(command) => {
+                    self.context_menu = None;
+                    return self.dispatch_command(command);
+                }
+            }
+            return None;
+        }
         if self.request_picker.is_some() {
             return self.handle_request_picker_key(code, modifiers);
         }
@@ -449,21 +514,90 @@ impl Component for HttpScreen {
             }
             return None;
         }
-        match command {
-            Command::NextField => self.cycle_focus(1),
-            Command::PrevField => self.cycle_focus(-1),
-            Command::HttpSend => self.send(),
-            Command::HttpNextMethod => self.method = self.method.cycle(1),
-            Command::HttpPrevMethod => self.method = self.method.cycle(-1),
-            Command::HttpSaveRequest => self.open_save_prompt(),
-            Command::HttpOpenRequests => self.open_request_picker(),
-            Command::Yank if self.focus == Focus::Response => {
-                if let Some(response) = &self.session.response {
-                    ui::yank_to_clipboard(&response.body);
+        self.dispatch_command(command)
+    }
+
+    fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        if self.request_picker.is_some() || self.name_prompt.is_some() {
+            return None;
+        }
+
+        if let Some(menu) = self.context_menu.take() {
+            if let MouseEventKind::Down(MouseButton::Left) = event.kind
+                && let Some(command) = menu.click(self.screen_area, event.column, event.row)
+            {
+                return self.dispatch_command(command);
+            }
+            return None;
+        }
+
+        let point = (event.column, event.row);
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if ui::contains(self.url_area, point.0, point.1) {
+                    self.focus = Focus::Url;
+                } else if ui::contains(self.headers_area, point.0, point.1) {
+                    self.focus = Focus::Headers;
+                } else if ui::contains(self.body_area, point.0, point.1) {
+                    self.focus = Focus::Body;
+                } else if ui::contains(self.response_area, point.0, point.1) {
+                    self.focus = Focus::Response;
                 }
             }
-            Command::Help => return Some(Action::ShowHelp),
-            Command::Back => return Some(Action::BackToPicker),
+            MouseEventKind::Down(MouseButton::Right) => {
+                if ui::contains(self.response_area, point.0, point.1)
+                    && self.session.response.is_some()
+                {
+                    self.focus = Focus::Response;
+                    self.context_menu = Some(ui::ContextMenu::new(
+                        point,
+                        vec![("Yank body".to_string(), Command::Yank)],
+                    ));
+                }
+            }
+            MouseEventKind::Down(MouseButton::Middle) => {
+                // X11 middle-click-pastes convention -- whichever field is
+                // under the click gets focused (same as a left click
+                // would), and gets the paste when a clipboard is actually
+                // available (headless/SSH with no display forwarding
+                // commonly has none -- focusing still happens, the paste
+                // just quietly doesn't).
+                let text = ui::paste_from_clipboard();
+                if ui::contains(self.url_area, point.0, point.1) {
+                    self.focus = Focus::Url;
+                    if let Some(text) = &text {
+                        self.url.insert_str(text);
+                    }
+                } else if ui::contains(self.headers_area, point.0, point.1) {
+                    self.focus = Focus::Headers;
+                    if let Some(text) = &text {
+                        self.headers.insert_str(text);
+                    }
+                } else if ui::contains(self.body_area, point.0, point.1) {
+                    self.focus = Focus::Body;
+                    if let Some(text) = &text {
+                        self.body.insert_str(text);
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown if ui::contains(self.response_area, point.0, point.1) => {
+                let len = self.response_line_count();
+                vim_list::apply(
+                    vim_list::VimMove::Down,
+                    &mut self.response_scroll,
+                    len,
+                    self.response_visible_height,
+                );
+            }
+            MouseEventKind::ScrollUp if ui::contains(self.response_area, point.0, point.1) => {
+                let len = self.response_line_count();
+                vim_list::apply(
+                    vim_list::VimMove::Up,
+                    &mut self.response_scroll,
+                    len,
+                    self.response_visible_height,
+                );
+            }
             _ => {}
         }
         None
@@ -478,10 +612,11 @@ impl Component for HttpScreen {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(area);
+        self.screen_area = area;
+        // Stacked or side by side, and how much of the split the request
+        // builder gets, per `self.split` -- same `F6`/`Ctrl+Up`/
+        // `Ctrl+Down` bindings as the query screen's editor/results split.
+        let (form_area, response_area) = self.split.split(area);
         let form = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -489,15 +624,24 @@ impl Component for HttpScreen {
                 Constraint::Length(6),
                 Constraint::Min(3),
             ])
-            .split(outer[0]);
+            .split(form_area);
+
+        self.url_area = form[0];
+        self.headers_area = form[1];
+        self.body_area = form[2];
+        self.response_area = response_area;
 
         self.draw_method_url(frame, form[0]);
         self.draw_headers(frame, form[1]);
         self.draw_body(frame, form[2]);
-        self.draw_response(frame, outer[1]);
+        self.draw_response(frame, response_area);
 
         self.draw_save_prompt(frame, area);
         self.draw_request_picker(frame, area);
+
+        if let Some(menu) = &self.context_menu {
+            menu.draw(frame, area);
+        }
     }
 
     fn connection_alive(&self) -> Option<bool> {
@@ -685,6 +829,122 @@ mod tests {
         let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert!(matches!(action, Some(Action::BackToPicker)));
+    }
+
+    fn drawn(screen: &mut HttpScreen) {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+    }
+
+    #[test]
+    fn f6_toggles_the_split_between_stacked_and_side_by_side() {
+        let mut screen = screen();
+        drawn(&mut screen);
+        let stacked_response_area = screen.response_area;
+
+        screen.handle_key_event(KeyCode::F(6), KeyModifiers::NONE);
+        drawn(&mut screen);
+
+        assert_eq!(stacked_response_area.width, 80, "stacked: full width");
+        assert!(
+            screen.response_area.width < 80,
+            "side by side: response is now only part of the width"
+        );
+    }
+
+    #[test]
+    fn ctrl_up_grows_the_focused_response_pane() {
+        let mut screen = screen();
+        screen.focus = Focus::Response;
+        drawn(&mut screen);
+        let before = screen.response_area.height;
+
+        screen.handle_key_event(KeyCode::Up, KeyModifiers::CONTROL);
+        drawn(&mut screen);
+
+        assert!(
+            screen.response_area.height > before,
+            "zooming in on the focused response pane should grow it"
+        );
+    }
+
+    #[test]
+    fn left_click_focuses_the_field_under_the_cursor() {
+        let mut screen = screen();
+        drawn(&mut screen);
+        let point = (screen.headers_area.x + 1, screen.headers_area.y + 1);
+
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(screen.focus, Focus::Headers);
+    }
+
+    #[test]
+    fn right_click_on_the_response_pane_opens_a_yank_menu_only_when_there_is_a_response() {
+        let mut screen = screen();
+        drawn(&mut screen);
+        let point = (screen.response_area.x + 1, screen.response_area.y + 1);
+
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            screen.context_menu.is_none(),
+            "nothing to yank yet -- no menu"
+        );
+
+        screen.session.response = Some(crate::HttpResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+            body: "{}".to_string(),
+            elapsed_ms: 1,
+        });
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(screen.context_menu.is_some());
+        assert_eq!(screen.focus, Focus::Response);
+    }
+
+    #[test]
+    fn confirming_the_yank_menu_item_closes_it() {
+        let mut screen = screen();
+        drawn(&mut screen);
+        screen.session.response = Some(crate::HttpResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+            body: "{}".to_string(),
+            elapsed_ms: 1,
+        });
+        let point = (screen.response_area.x + 1, screen.response_area.y + 1);
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: point.0,
+            row: point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(screen.context_menu.is_some());
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.context_menu.is_none());
     }
 
     #[test]

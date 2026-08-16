@@ -267,15 +267,19 @@ async fn run(
                 // scrolls -- without this filter, dragging the mouse a long
                 // diagonal across the grid queues a redraw per motion event
                 // `handle_mouse_event` was going to ignore anyway (its match
-                // only reacts to `Down(Left)`/`ScrollDown`/`ScrollUp`), and
+                // only reacts to a handful of `MouseEventKind`s), and
                 // `event::read` only drains one event per loop iteration, so
                 // the whole burst has to be drawn away before the actual
                 // click lands. Distance-dependent lag: short move, few
-                // motion events; a click on a distant cell, many.
+                // motion events; a click on a distant cell, many. Right and
+                // Middle joined Left here once components started using them
+                // (context menus, paste) -- still not `Up`/`Drag`/`Moved`.
                 Event::Mouse(mouse)
                     if matches!(
                         mouse.kind,
                         MouseEventKind::Down(MouseButton::Left)
+                            | MouseEventKind::Down(MouseButton::Right)
+                            | MouseEventKind::Down(MouseButton::Middle)
                             | MouseEventKind::ScrollDown
                             | MouseEventKind::ScrollUp
                     ) =>

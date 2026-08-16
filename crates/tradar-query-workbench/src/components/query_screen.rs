@@ -114,6 +114,17 @@ pub struct QueryScreenComponent {
     /// results grid -- see `open_selected_key`. `None` before anything's
     /// been browsed yet, or for every connector but Redis.
     last_browse_command: Option<String>,
+    /// The editor/results split -- stacked or side by side, and how much
+    /// space each pane gets. Only used in `ScreenMode::Console`; Browse
+    /// mode has its own fixed sidebar+value layout (a different shape
+    /// entirely, not an editor/results pair).
+    split: ui::SplitPane,
+    /// Open after a right-click on a results row.
+    context_menu: Option<ui::ContextMenu>,
+    /// The full area this screen was last drawn into -- needed to hit-test
+    /// `context_menu` clicks against the exact same bounds it was drawn
+    /// with (it clamps its position to stay on screen).
+    screen_area: Rect,
 }
 
 /// The folder to start browsing/prefilling from: the parent of the most
@@ -233,11 +244,99 @@ impl QueryScreenComponent {
             browse,
             mode,
             last_browse_command: None,
+            split: ui::SplitPane::default(),
+            context_menu: None,
+            screen_area: Rect::ZERO,
         }
     }
 
     pub fn active_connection(&self) -> &SavedConnection {
         self.engine.connection()
+    }
+
+    /// Runs whatever `command` means for this screen -- shared by keyboard
+    /// dispatch (`handle_key_event`) and a right-click context menu's
+    /// confirmed choice (`handle_mouse_event`), so a menu item runs
+    /// through the exact same code a keyboard shortcut for it would, not a
+    /// second copy that can drift out of sync.
+    fn dispatch_command(&mut self, command: Command) -> Option<Action> {
+        match command {
+            Command::Back => return Some(Action::BackToPicker),
+            Command::Help => return Some(Action::ShowHelp),
+            Command::RunQuery => self.run_statement_at_cursor(),
+            Command::RunAll => self.run_all_statements(),
+            Command::CancelQuery => {
+                if self.engine.cancel() {
+                    self.results.set_error("query cancelled".to_string());
+                }
+            }
+            Command::Commit => self.submit_transaction_control("COMMIT"),
+            Command::Rollback => self.submit_transaction_control("ROLLBACK"),
+            Command::CycleFocus => {
+                self.focus = match self.mode {
+                    // No editor to land on in browse mode -- cycle between
+                    // the sidebar and whatever it last fetched into results.
+                    ScreenMode::Browse => match self.focus {
+                        Focus::Browse => Focus::Results,
+                        _ => Focus::Browse,
+                    },
+                    ScreenMode::Console => match self.focus {
+                        Focus::Editor => Focus::Results,
+                        _ => Focus::Editor,
+                    },
+                };
+            }
+            Command::SaveFile => self.open_prompt(PromptKind::Save),
+            Command::OpenFile => self.open_file_picker(),
+            Command::History => self.open_history(),
+            Command::SaveSnippet => self.open_snippet_prompt(),
+            Command::OpenSnippets => self.open_snippet_picker(),
+            Command::ExportCurl => self.export_curl(),
+            Command::Export => self.open_export_prompt(),
+            Command::Yank => {
+                if let Some(text) = self.results.selected_text() {
+                    ui::yank_to_clipboard(&text);
+                }
+            }
+            Command::PrevColumn => self.results.prev_column(),
+            Command::NextColumn => self.results.next_column(),
+            Command::TogglePreview => self.results.toggle_preview(),
+            Command::ToggleResultView => self.results.toggle_document_view(),
+            Command::EditCell => self.begin_edit_cell(),
+            Command::DeleteRow => self.begin_delete_row(),
+            Command::Search => {
+                self.search = Some(ui::TextInput::new(self.results.filter()));
+            }
+            Command::RetryQuery => self.retry_failed_query(),
+            Command::EditQuery => {
+                if self.results.last_error.is_some() {
+                    self.focus = Focus::Editor;
+                }
+            }
+            Command::CopyError => {
+                if let Some(error) = self.results.last_error.clone() {
+                    ui::yank_to_clipboard(&error);
+                }
+            }
+            Command::BrowseOpen => self.open_selected_key(),
+            Command::ToggleBrowseMode => self.toggle_browse_mode(),
+            Command::SearchInBuffer => self.open_buffer_search(),
+            Command::SearchNext => self.repeat_buffer_search(false),
+            Command::SearchPrev => self.repeat_buffer_search(true),
+            // No-op in Browse mode: it has its own fixed sidebar+value
+            // layout, not an editor/results pair to resize or reorient.
+            Command::ToggleSplitOrientation if self.mode != ScreenMode::Browse => {
+                self.split.toggle_orientation();
+            }
+            Command::ZoomIn if self.mode != ScreenMode::Browse => {
+                self.split.zoom_in(self.focus == Focus::Editor);
+            }
+            Command::ZoomOut if self.mode != ScreenMode::Browse => {
+                self.split.zoom_out(self.focus == Focus::Editor);
+            }
+            _ => {}
+        }
+        None
     }
 
     fn export_curl(&self) {
@@ -776,6 +875,18 @@ impl QueryScreenComponent {
 
 impl Component for QueryScreenComponent {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        if let Some(menu) = self.context_menu.as_mut() {
+            match menu.handle_key_event(code) {
+                ui::ContextMenuOutcome::Open => {}
+                ui::ContextMenuOutcome::Closed => self.context_menu = None,
+                ui::ContextMenuOutcome::Confirmed(command) => {
+                    self.context_menu = None;
+                    return self.dispatch_command(command);
+                }
+            }
+            return None;
+        }
+
         if let Some(prompt) = self.prompt.as_mut() {
             match prompt.handle_key_event(code, modifiers) {
                 Some(PromptOutcome::Cancelled) => self.prompt = None,
@@ -995,75 +1106,23 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
-        match command {
-            Command::Back => return Some(Action::BackToPicker),
-            Command::Help => return Some(Action::ShowHelp),
-            Command::RunQuery => self.run_statement_at_cursor(),
-            Command::RunAll => self.run_all_statements(),
-            Command::CancelQuery => {
-                if self.engine.cancel() {
-                    self.results.set_error("query cancelled".to_string());
-                }
-            }
-            Command::Commit => self.submit_transaction_control("COMMIT"),
-            Command::Rollback => self.submit_transaction_control("ROLLBACK"),
-            Command::CycleFocus => {
-                self.focus = match self.mode {
-                    // No editor to land on in browse mode -- cycle between
-                    // the sidebar and whatever it last fetched into results.
-                    ScreenMode::Browse => match self.focus {
-                        Focus::Browse => Focus::Results,
-                        _ => Focus::Browse,
-                    },
-                    ScreenMode::Console => match self.focus {
-                        Focus::Editor => Focus::Results,
-                        _ => Focus::Editor,
-                    },
-                };
-            }
-            Command::SaveFile => self.open_prompt(PromptKind::Save),
-            Command::OpenFile => self.open_file_picker(),
-            Command::History => self.open_history(),
-            Command::SaveSnippet => self.open_snippet_prompt(),
-            Command::OpenSnippets => self.open_snippet_picker(),
-            Command::ExportCurl => self.export_curl(),
-            Command::Export => self.open_export_prompt(),
-            Command::Yank => {
-                if let Some(text) = self.results.selected_text() {
-                    ui::yank_to_clipboard(&text);
-                }
-            }
-            Command::PrevColumn => self.results.prev_column(),
-            Command::NextColumn => self.results.next_column(),
-            Command::TogglePreview => self.results.toggle_preview(),
-            Command::ToggleResultView => self.results.toggle_document_view(),
-            Command::EditCell => self.begin_edit_cell(),
-            Command::DeleteRow => self.begin_delete_row(),
-            Command::Search => {
-                self.search = Some(ui::TextInput::new(self.results.filter()));
-            }
-            Command::RetryQuery => self.retry_failed_query(),
-            Command::EditQuery => {
-                if self.results.last_error.is_some() {
-                    self.focus = Focus::Editor;
-                }
-            }
-            Command::CopyError => {
-                if let Some(error) = self.results.last_error.clone() {
-                    ui::yank_to_clipboard(&error);
-                }
-            }
-            Command::BrowseOpen => self.open_selected_key(),
-            Command::ToggleBrowseMode => self.toggle_browse_mode(),
-            Command::SearchInBuffer => self.open_buffer_search(),
-            Command::SearchNext => self.repeat_buffer_search(false),
-            Command::SearchPrev => self.repeat_buffer_search(true),
-            _ => {}
-        }
-        None
+        self.dispatch_command(command)
     }
 
     fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        // A context menu is its own small overlay: a left click either
+        // hits one of its items or dismisses it (clicking away closes a
+        // popup, standard behavior) -- either way nothing behind it should
+        // also react to the same click.
+        if let Some(menu) = self.context_menu.take() {
+            if let MouseEventKind::Down(MouseButton::Left) = event.kind
+                && let Some(command) = menu.click(self.screen_area, event.column, event.row)
+            {
+                return self.dispatch_command(command);
+            }
+            return None;
+        }
+
         // An overlay covers the screen, so a click behind it would act on
         // something the user can't even see.
         if self.prompt.is_some()
@@ -1082,6 +1141,37 @@ impl Component for QueryScreenComponent {
                     self.focus = Focus::Results;
                 } else if ui::contains(self.editor_area, event.column, event.row) {
                     self.focus = Focus::Editor;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // Same hit test as a left click (selects the row/cell too),
+                // then offers whatever a keyboard shortcut could already do
+                // to it -- see `dispatch_command`'s doc comment for why
+                // confirming a menu item runs through the exact same code.
+                if self.results.click(event.column, event.row) {
+                    self.focus = Focus::Results;
+                    let items = vec![
+                        ("Edit cell".to_string(), Command::EditCell),
+                        ("Delete row".to_string(), Command::DeleteRow),
+                        ("Yank".to_string(), Command::Yank),
+                        ("Toggle preview".to_string(), Command::TogglePreview),
+                        ("Toggle table/JSON".to_string(), Command::ToggleResultView),
+                    ];
+                    self.context_menu =
+                        Some(ui::ContextMenu::new((event.column, event.row), items));
+                }
+            }
+            MouseEventKind::Down(MouseButton::Middle) => {
+                // The X11 middle-click-pastes convention, applied to the
+                // one text-entry surface this screen has -- the query
+                // editor. `insert_at_cursor` is the same method the
+                // navigator uses to insert a table/column name, so a paste
+                // lands exactly where typing would.
+                if ui::contains(self.editor_area, event.column, event.row) {
+                    self.focus = Focus::Editor;
+                    if let Some(text) = ui::paste_from_clipboard() {
+                        self.query_editor.insert_at_cursor(&text);
+                    }
                 }
             }
             MouseEventKind::ScrollDown => self.scroll_under_cursor(event, VimMove::Down),
@@ -1172,6 +1262,7 @@ impl Component for QueryScreenComponent {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        self.screen_area = area;
         // The schema tree used to live here as a sidebar; it's now the app
         // shell's navigator, which can show every connection rather than
         // only this screen's own. In console mode the screen is just
@@ -1195,32 +1286,30 @@ impl Component for QueryScreenComponent {
                 columns[1]
             }
         } else {
-            // The editor gets a third of the height (min 5 rows, so a short
-            // query still has room), results take the rest -- plus one row
-            // for the buffer-search bar, reclaimed from results, when it's
-            // open.
-            let editor_height = (area.height / 3).clamp(5, 12);
-            let search_bar_height = if self.buffer_search.is_some() { 1 } else { 0 };
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(editor_height),
-                    Constraint::Length(search_bar_height),
-                    Constraint::Min(3),
-                ])
-                .split(area);
+            // Stacked or side by side, and how much of the split the
+            // editor gets, per `self.split` -- `Ctrl+Up`/`Ctrl+Down` zooms
+            // whichever pane has focus, `F6` flips the orientation. The
+            // buffer-search bar, when open, is carved off the bottom of
+            // whatever the editor got, not off a separately reserved row.
+            let (editor_rect, main_rest) = self.split.split(area);
+            let (editor_draw_rect, search_bar_rect) = if self.buffer_search.is_some() {
+                let (top, bar) = ui::split_bottom_bar(editor_rect, 1);
+                (top, Some(bar))
+            } else {
+                (editor_rect, None)
+            };
 
             let connection_name = self.active_connection().name.clone();
-            self.editor_area = chunks[0];
+            self.editor_area = editor_draw_rect;
             self.query_editor.draw(
                 frame,
-                chunks[0],
+                editor_draw_rect,
                 &connection_name,
                 self.focus == Focus::Editor,
                 self.engine.alive(),
                 self.engine.in_transaction(),
             );
-            if let Some(buffer_search) = &self.buffer_search {
+            if let (Some(buffer_search), Some(bar)) = (&self.buffer_search, search_bar_rect) {
                 let theme = tradar_core::theme::theme();
                 let mut spans = vec![ratatui::text::Span::styled(
                     "/",
@@ -1229,10 +1318,10 @@ impl Component for QueryScreenComponent {
                 spans.extend(buffer_search.spans(true));
                 frame.render_widget(
                     ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans)),
-                    chunks[1],
+                    bar,
                 );
             }
-            chunks[2]
+            main_rest
         };
 
         self.results.draw_running(self.engine.elapsed_running());
@@ -1323,6 +1412,10 @@ impl Component for QueryScreenComponent {
             let popup = ui::centered_rect(70, 30, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             row_edit.draw(frame, popup);
+        }
+
+        if let Some(menu) = &self.context_menu {
+            menu.draw(frame, area);
         }
     }
 }
@@ -1868,6 +1961,174 @@ mod tests {
         // schema tree has moved out to the navigator.
         screen.handle_mouse_event(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(screen.focus, Focus::Editor);
+    }
+
+    #[test]
+    fn f6_toggles_the_split_between_stacked_and_side_by_side() {
+        let (mut screen, _rx) = screen();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let stacked_editor_area = screen.editor_area;
+
+        screen.handle_key_event(KeyCode::F(6), KeyModifiers::NONE);
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        assert_eq!(stacked_editor_area.width, 80, "stacked: full width");
+        assert!(
+            screen.editor_area.width < 80,
+            "side by side: editor is now only part of the width"
+        );
+        assert_eq!(
+            screen.editor_area.height, 24,
+            "side by side: editor spans the full height"
+        );
+    }
+
+    #[test]
+    fn ctrl_up_grows_the_focused_editor_pane() {
+        let (mut screen, _rx) = screen();
+        screen.focus = Focus::Editor;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let before = screen.editor_area.height;
+
+        screen.handle_key_event(KeyCode::Up, KeyModifiers::CONTROL);
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        assert!(
+            screen.editor_area.height > before,
+            "zooming in on the focused editor should grow it"
+        );
+    }
+
+    #[test]
+    fn ctrl_down_shrinks_the_focused_results_pane_back() {
+        let (mut screen, _rx) = screen();
+        screen.focus = Focus::Results;
+        screen.handle_key_event(KeyCode::Up, KeyModifiers::CONTROL); // grow results first
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let grown = screen.editor_area.height;
+
+        screen.handle_key_event(KeyCode::Down, KeyModifiers::CONTROL);
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        assert!(
+            screen.editor_area.height > grown,
+            "zooming the focused results pane back out should shrink results, growing editor"
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_result_row_opens_a_context_menu() {
+        let (mut screen, _rx) = screen();
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["a".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 5,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(screen.context_menu.is_some());
+        assert_eq!(screen.focus, Focus::Results);
+    }
+
+    #[test]
+    fn confirming_a_context_menu_item_runs_the_same_command_a_key_would() {
+        let (mut screen, _rx) = screen();
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["a".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 5,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(screen.context_menu.is_some());
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.context_menu.is_none(), "the menu closes on confirm");
+    }
+
+    #[test]
+    fn esc_closes_the_context_menu_without_running_anything() {
+        let (mut screen, _rx) = screen();
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["a".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 5,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.context_menu.is_none());
+        assert!(action.is_none(), "esc must not also trigger BackToPicker");
+    }
+
+    #[test]
+    fn middle_clicking_the_editor_focuses_it() {
+        let (mut screen, _rx) = screen();
+        screen.focus = Focus::Results;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        screen.handle_mouse_event(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Middle),
             column: 10,
             row: 2,
             modifiers: KeyModifiers::NONE,

@@ -57,6 +57,7 @@ Other standing principles from the design spec:
 - `serde` / `serde_json` — serialization
 - `anyhow` — error handling
 - `base64` — encodes yanked text for the OSC52 clipboard escape sequence (`tradar-core`'s `ui::yank_to_clipboard`, called from both `tradar-query-workbench` and `tradar-connector-http`)
+- `arboard` (`default-features = false`, text only — no `image`/`image-data`) — reads the OS clipboard for middle-click paste (`tradar-core`'s `ui::paste_from_clipboard`); OSC52 is copy-only and has no read side a terminal can answer, hence a real clipboard library for this direction
 - Dev-only: `tempfile` (driver/storage tests use real temp files, not mocks), `testcontainers-modules` (spins up real Postgres/MongoDB/Elasticsearch/Redis instances for connector tests), `testcontainers` directly via `GenericImage` (Cassandra/RabbitMQ/Kafka/HTTP — no `testcontainers-modules` support for those four)
 
 Present in `tradar-app/Cargo.toml` but not yet used by any code: `clap`, `thiserror`, `tracing`/`tracing-subscriber`.

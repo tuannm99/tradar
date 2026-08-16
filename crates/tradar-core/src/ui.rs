@@ -95,6 +95,209 @@ pub fn split_bottom_bar(area: Rect, height: u16) -> (Rect, Rect) {
     (rows[0], rows[1])
 }
 
+/// Which side of a [`SplitPane`] a pane is on -- stacked (top/bottom) or
+/// side by side (left/right).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitOrientation {
+    Vertical,
+    Horizontal,
+}
+
+/// Neither pane may shrink past this share of the split -- it stays
+/// visible and usable, just small. "Zoom" resizes, it never fully hides
+/// the other pane (a deliberate choice -- see "Query/HTTP screen: resizable
+/// split" in docs/architecture.md).
+const MIN_SPLIT_PERCENT: i16 = 20;
+const MAX_SPLIT_PERCENT: i16 = 80;
+const ZOOM_STEP_PERCENT: i16 = 10;
+
+/// A two-pane split (query editor/results, HTTP request/response) that can
+/// flip between stacked and side-by-side and can be zoomed -- growing
+/// whichever pane currently has focus, shrinking the other. Lives here
+/// (not in `tradar-query-workbench` or `tradar-connector-http`) because
+/// both want the exact same behavior and neither may depend on the other.
+#[derive(Debug, Clone, Copy)]
+pub struct SplitPane {
+    orientation: SplitOrientation,
+    /// Percent of the split given to the "primary" pane (the query editor,
+    /// the HTTP request builder) -- the other pane always gets the rest.
+    primary_percent: i16,
+}
+
+impl Default for SplitPane {
+    fn default() -> Self {
+        Self {
+            orientation: SplitOrientation::Vertical,
+            primary_percent: 50,
+        }
+    }
+}
+
+impl SplitPane {
+    pub fn toggle_orientation(&mut self) {
+        self.orientation = match self.orientation {
+            SplitOrientation::Vertical => SplitOrientation::Horizontal,
+            SplitOrientation::Horizontal => SplitOrientation::Vertical,
+        };
+    }
+
+    /// Grows whichever pane currently has focus by one step, shrinking the
+    /// other -- `focus_is_primary` says which pane that is. Clamped so
+    /// neither pane ever drops below [`MIN_SPLIT_PERCENT`].
+    pub fn zoom_in(&mut self, focus_is_primary: bool) {
+        self.adjust(if focus_is_primary {
+            ZOOM_STEP_PERCENT
+        } else {
+            -ZOOM_STEP_PERCENT
+        });
+    }
+
+    /// Undoes one zoom step for whichever pane has focus -- shrinks the
+    /// focused pane back toward center.
+    pub fn zoom_out(&mut self, focus_is_primary: bool) {
+        self.adjust(if focus_is_primary {
+            -ZOOM_STEP_PERCENT
+        } else {
+            ZOOM_STEP_PERCENT
+        });
+    }
+
+    fn adjust(&mut self, delta: i16) {
+        self.primary_percent =
+            (self.primary_percent + delta).clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+    }
+
+    /// Splits `area` into `(primary, secondary)` per the current
+    /// orientation/ratio.
+    pub fn split(&self, area: Rect) -> (Rect, Rect) {
+        let direction = match self.orientation {
+            SplitOrientation::Vertical => Direction::Vertical,
+            SplitOrientation::Horizontal => Direction::Horizontal,
+        };
+        let percent = self.primary_percent as u16;
+        let chunks = Layout::default()
+            .direction(direction)
+            .constraints([
+                Constraint::Percentage(percent),
+                Constraint::Percentage(100 - percent),
+            ])
+            .split(area);
+        (chunks[0], chunks[1])
+    }
+}
+
+/// A right-click popup: a small list of `(label, Command)` at the click
+/// point. Not keymap-integrated -- these are direct actions the caller
+/// already decided are relevant to whatever was clicked (a result row, a
+/// navigator entry), not remappable bindings, so confirming one just hands
+/// back the same `Command` a keyboard shortcut for that action would have
+/// produced, for the caller to dispatch through its own existing command
+/// handling -- no separate mouse-only code path to keep in sync.
+pub struct ContextMenu {
+    items: Vec<(String, Command)>,
+    selected: usize,
+    origin: (u16, u16),
+}
+
+/// What happened after a key reached an open [`ContextMenu`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenuOutcome {
+    /// Still open (moved the selection, or an unrecognized key -- any key
+    /// not explicitly handled just does nothing rather than falling
+    /// through to whatever's behind the menu).
+    Open,
+    Confirmed(Command),
+    Closed,
+}
+
+impl ContextMenu {
+    /// `origin` is the click point the menu should appear at (clamped to
+    /// stay on screen in `draw`/`click`). Empty `items` is a valid, useful
+    /// state -- nothing relevant was clicked, so `is_empty` tells the
+    /// caller not to bother opening it.
+    pub fn new(origin: (u16, u16), items: Vec<(String, Command)>) -> Self {
+        Self {
+            items,
+            selected: 0,
+            origin,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn handle_key_event(&mut self, code: crossterm::event::KeyCode) -> ContextMenuOutcome {
+        use crossterm::event::KeyCode;
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
+                ContextMenuOutcome::Open
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
+                ContextMenuOutcome::Open
+            }
+            KeyCode::Enter => ContextMenuOutcome::Confirmed(self.items[self.selected].1),
+            KeyCode::Esc => ContextMenuOutcome::Closed,
+            _ => ContextMenuOutcome::Open,
+        }
+    }
+
+    /// A click at `(column, row)` within `bounds` (the full screen/panel
+    /// area the menu was drawn into) -- `Some(command)` on a hit, `None`
+    /// otherwise (the caller should close the menu: clicking away from it
+    /// dismisses it, standard popup behavior).
+    pub fn click(&self, bounds: Rect, column: u16, row: u16) -> Option<Command> {
+        let rect = self.rect(bounds);
+        let inner = Rect {
+            x: rect.x + 1,
+            y: rect.y + 1,
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(2),
+        };
+        index_at(inner, 0, row, self.items.len())
+            .filter(|_| column >= inner.x && column < inner.x.saturating_add(inner.width))
+            .map(|i| self.items[i].1)
+    }
+
+    fn rect(&self, bounds: Rect) -> Rect {
+        let width = (self
+            .items
+            .iter()
+            .map(|(label, _)| label.chars().count())
+            .max()
+            .unwrap_or(0) as u16
+            + 4)
+        .min(bounds.width);
+        let height = (self.items.len() as u16 + 2).min(bounds.height);
+        let x = self.origin.0.min(bounds.width.saturating_sub(width));
+        let y = self.origin.1.min(bounds.height.saturating_sub(height));
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub fn draw(&self, frame: &mut Frame, bounds: Rect) {
+        let rect = self.rect(bounds);
+        frame.render_widget(Clear, rect);
+        let items: Vec<ListItem> = self
+            .items
+            .iter()
+            .map(|(label, _)| ListItem::new(label.as_str()))
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(self.selected));
+        let list = List::new(items)
+            .block(panel("", true))
+            .highlight_style(selection_style());
+        frame.render_stateful_widget(list, rect, &mut state);
+    }
+}
+
 /// Whether `area` covers the given cell -- the hit test every mouse
 /// handler starts with.
 pub fn contains(area: Rect, column: u16, row: u16) -> bool {
@@ -192,6 +395,18 @@ pub fn yank_to_clipboard(text: &str) {
     let _ = stdout.flush();
 }
 
+/// Reads text off the system clipboard, for middle-click paste. `None` on
+/// any failure -- no clipboard available (headless/SSH with no display
+/// forwarding is common for a terminal app), or its contents aren't text
+/// -- middle-click quietly doing nothing is a better failure mode here
+/// than an error box for something this incidental. Unlike
+/// `yank_to_clipboard` (OSC52, one-way, works over SSH/tmux with no local
+/// dependency) this reads the real OS clipboard via `arboard`, since OSC52
+/// has no read side a terminal can answer.
+pub fn paste_from_clipboard() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
 /// A single-line text field: the editing half of any prompt or form
 /// (`Ctrl+S`'s file path, the connection form's fields). Owns only the
 /// text and cursor -- confirming, cancelling and drawing a frame around it
@@ -215,6 +430,16 @@ impl TextInput {
 
     pub fn is_empty(&self) -> bool {
         self.chars.is_empty()
+    }
+
+    /// Inserts `text` at the cursor -- middle-click paste, mainly. Newlines
+    /// are dropped: this is a single-line field, and pasted text (a
+    /// clipboard URL, say) isn't expected to carry any.
+    pub fn insert_str(&mut self, text: &str) {
+        for c in text.chars().filter(|c| *c != '\n' && *c != '\r') {
+            self.chars.insert(self.cursor, c);
+            self.cursor += 1;
+        }
     }
 
     /// Handles one key of text editing. Returns whether the key was used,
@@ -337,6 +562,28 @@ impl TextArea {
 
     pub fn set_text(&mut self, text: &str) {
         *self = Self::new(text);
+    }
+
+    /// Inserts `text` at the cursor -- middle-click paste, mainly. A `\n`
+    /// starts a new line, same as pressing Enter while typing it, so a
+    /// multi-line clipboard paste (a JSON body, say) lands as real lines
+    /// rather than one line with embedded newline characters.
+    pub fn insert_str(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' => {
+                    let rest = self.lines[self.cursor_row].split_off(self.cursor_col);
+                    self.lines.insert(self.cursor_row + 1, rest);
+                    self.cursor_row += 1;
+                    self.cursor_col = 0;
+                }
+                '\r' => {}
+                c => {
+                    self.lines[self.cursor_row].insert(self.cursor_col, c);
+                    self.cursor_col += 1;
+                }
+            }
+        }
     }
 
     pub fn cursor_row(&self) -> usize {
@@ -767,6 +1014,36 @@ mod tests {
     }
 
     #[test]
+    fn text_input_insert_str_drops_embedded_newlines() {
+        let mut input = TextInput::new("ab");
+        input.cursor = 1;
+
+        input.insert_str("X\nY\r");
+
+        assert_eq!(input.text(), "aXYb");
+    }
+
+    #[test]
+    fn text_area_insert_str_splits_into_real_lines_on_newline() {
+        let mut area = TextArea::new("");
+
+        area.insert_str("line one\nline two");
+
+        assert_eq!(area.text(), "line one\nline two");
+        assert_eq!(area.cursor_row(), 1);
+    }
+
+    #[test]
+    fn text_area_insert_str_pastes_at_the_cursor_not_at_the_end() {
+        let mut area = TextArea::new("ac");
+        area.cursor_col = 1;
+
+        area.insert_str("b");
+
+        assert_eq!(area.text(), "abc");
+    }
+
+    #[test]
     fn backspace_at_the_start_of_a_line_merges_it_into_the_previous_one() {
         let mut area = TextArea::new("ab\ncd");
         area.cursor_row = 1;
@@ -848,5 +1125,164 @@ mod tests {
             6,
             "scrolls just enough to keep the cursor row visible"
         );
+    }
+
+    #[test]
+    fn split_pane_starts_vertical_and_even() {
+        let split = SplitPane::default();
+        let area = Rect::new(0, 0, 100, 100);
+
+        let (primary, secondary) = split.split(area);
+
+        assert_eq!(primary.height, secondary.height, "even 50/50 split");
+        assert_eq!(primary.width, area.width, "stacked, not side by side");
+        assert!(primary.y < secondary.y, "primary on top");
+    }
+
+    #[test]
+    fn toggle_orientation_switches_stacked_to_side_by_side() {
+        let mut split = SplitPane::default();
+        split.toggle_orientation();
+        let area = Rect::new(0, 0, 100, 100);
+
+        let (primary, secondary) = split.split(area);
+
+        assert_eq!(primary.width + secondary.width, area.width);
+        assert_eq!(primary.height, area.height, "full height, side by side");
+        assert!(primary.x < secondary.x, "primary on the left");
+    }
+
+    #[test]
+    fn zooming_in_on_the_focused_pane_grows_it_and_shrinks_the_other() {
+        let mut split = SplitPane::default();
+        let area = Rect::new(0, 0, 100, 100);
+
+        split.zoom_in(true);
+        let (primary, secondary) = split.split(area);
+        assert!(primary.height > secondary.height, "primary grew");
+
+        split.zoom_in(false);
+        let (primary, secondary) = split.split(area);
+        assert_eq!(
+            primary.height, secondary.height,
+            "zooming the secondary pane in undid the earlier zoom"
+        );
+    }
+
+    #[test]
+    fn zoom_never_shrinks_a_pane_past_the_minimum_share() {
+        let mut split = SplitPane::default();
+        for _ in 0..20 {
+            split.zoom_in(false);
+        }
+        let area = Rect::new(0, 0, 100, 100);
+
+        let (primary, _) = split.split(area);
+
+        assert!(primary.height >= 19, "primary never disappears entirely");
+    }
+
+    #[test]
+    fn zoom_out_reverses_zoom_in_for_the_same_focused_pane() {
+        let mut split = SplitPane::default();
+        let area = Rect::new(0, 0, 100, 100);
+        split.zoom_in(true);
+
+        split.zoom_out(true);
+        let (primary, secondary) = split.split(area);
+
+        assert_eq!(primary.height, secondary.height);
+    }
+
+    fn sample_menu() -> ContextMenu {
+        ContextMenu::new(
+            (5, 5),
+            vec![
+                ("Edit cell".to_string(), Command::EditCell),
+                ("Delete row".to_string(), Command::DeleteRow),
+                ("Yank".to_string(), Command::Yank),
+            ],
+        )
+    }
+
+    #[test]
+    fn context_menu_starts_with_the_first_item_selected() {
+        let mut menu = sample_menu();
+
+        let outcome = menu.handle_key_event(KeyCode::Enter);
+
+        assert_eq!(outcome, ContextMenuOutcome::Confirmed(Command::EditCell));
+    }
+
+    #[test]
+    fn down_then_enter_confirms_the_second_item() {
+        let mut menu = sample_menu();
+
+        menu.handle_key_event(KeyCode::Down);
+        let outcome = menu.handle_key_event(KeyCode::Enter);
+
+        assert_eq!(outcome, ContextMenuOutcome::Confirmed(Command::DeleteRow));
+    }
+
+    #[test]
+    fn selection_does_not_move_past_the_last_item() {
+        let mut menu = sample_menu();
+        for _ in 0..10 {
+            menu.handle_key_event(KeyCode::Down);
+        }
+
+        let outcome = menu.handle_key_event(KeyCode::Enter);
+
+        assert_eq!(outcome, ContextMenuOutcome::Confirmed(Command::Yank));
+    }
+
+    #[test]
+    fn esc_closes_the_menu() {
+        let mut menu = sample_menu();
+
+        let outcome = menu.handle_key_event(KeyCode::Esc);
+
+        assert_eq!(outcome, ContextMenuOutcome::Closed);
+    }
+
+    #[test]
+    fn an_unrecognized_key_leaves_the_menu_open() {
+        let mut menu = sample_menu();
+
+        let outcome = menu.handle_key_event(KeyCode::Char('z'));
+
+        assert_eq!(outcome, ContextMenuOutcome::Open);
+    }
+
+    #[test]
+    fn clicking_an_item_returns_its_command() {
+        let menu = sample_menu();
+        let bounds = Rect::new(0, 0, 80, 24);
+
+        // Origin (5, 5) -> rect (5, 5, 14, 5) -> inner starts at (6, 6), one
+        // row per item: row 6 is "Edit cell", row 7 is "Delete row".
+        assert_eq!(menu.click(bounds, 6, 6), Some(Command::EditCell));
+        assert_eq!(menu.click(bounds, 6, 7), Some(Command::DeleteRow));
+    }
+
+    #[test]
+    fn clicking_outside_the_menu_returns_none() {
+        let menu = sample_menu();
+        let bounds = Rect::new(0, 0, 80, 24);
+
+        let hit = menu.click(bounds, 79, 23);
+
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn the_menu_stays_on_screen_when_the_click_is_near_the_edge() {
+        let menu = ContextMenu::new((78, 22), vec![("Edit cell".to_string(), Command::EditCell)]);
+        let bounds = Rect::new(0, 0, 80, 24);
+
+        let rect = menu.rect(bounds);
+
+        assert!(rect.x + rect.width <= bounds.width);
+        assert!(rect.y + rect.height <= bounds.height);
     }
 }
