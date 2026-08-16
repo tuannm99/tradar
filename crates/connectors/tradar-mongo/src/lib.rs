@@ -222,7 +222,19 @@ impl QueryDriver for MongoDriver {
         let parsed = parse_shell_query(query)?;
         let db = self.database()?;
         let collection = db.collection::<Document>(&parsed.collection);
-        run_method(&collection, &parsed.method, &parsed.args).await
+        let mut result = run_method(&collection, &parsed.method, &parsed.args).await?;
+        // Every arm of `run_method` produces `Documents` via either
+        // `into_relaxed_extjson()` or serializing a driver result struct
+        // that itself contains `Bson` values (`inserted_id`, ...) -- both
+        // paths wrap an ObjectId/DateTime the same way, so simplifying
+        // once here covers every method uniformly instead of repeating
+        // the call at each of the eight call sites in `run_method`.
+        if let QueryResult::Documents(docs) = &mut result {
+            for doc in docs {
+                simplify_extjson(doc);
+            }
+        }
+        Ok(result)
     }
 
     fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
@@ -347,6 +359,49 @@ async fn run_method(
     }
 }
 
+/// Unwraps MongoDB Extended JSON's `{"$oid": "<hex>"}` (an `ObjectId`) and
+/// `{"$date": "<iso>"}` (a `DateTime`) into the plain string a human
+/// actually wants to read, recursively through nested documents/arrays.
+/// `into_relaxed_extjson()` -- and, identically, `serde_json`'s own
+/// `Serialize` impl for `Bson` when a driver result struct (`inserted_id`,
+/// ...) gets serialized -- still wraps these two even in "relaxed" mode,
+/// since JSON has no native representation for either. Safe to throw the
+/// wrapper away here: this driver's results are read-only display, never
+/// re-encoded back into BSON, and the type itself is still visible
+/// separately, via the navigator's schema (`Bson::element_type()` in
+/// `flatten_document`). Any other extJSON wrapper (`$numberLong`,
+/// `$numberDecimal`, `$binary`, ...) is left alone -- unwrapping those
+/// would lose a distinction (e.g. an int that overflowed `i32`) that
+/// isn't purely cosmetic the way a hex string or ISO timestamp is.
+fn simplify_extjson(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let unwrapped = if map.len() == 1 {
+                map.get("$oid")
+                    .or_else(|| map.get("$date"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            } else {
+                None
+            };
+            match unwrapped {
+                Some(s) => *value = serde_json::Value::String(s),
+                None => {
+                    for v in map.values_mut() {
+                        simplify_extjson(v);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                simplify_extjson(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn json_to_document(value: serde_json::Value) -> anyhow::Result<Document> {
     let bson = Bson::try_from(value)?;
     bson.as_document()
@@ -442,6 +497,75 @@ mod tests {
         assert_eq!(
             driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete),
             Some("db.users.deleteOne({_id: ObjectId(\"<id>\")})".to_string())
+        );
+    }
+
+    #[test]
+    fn simplify_extjson_unwraps_an_oid_to_a_plain_string() {
+        let mut value = serde_json::json!({"$oid": "507f1f77bcf86cd799439011"});
+
+        simplify_extjson(&mut value);
+
+        assert_eq!(value, serde_json::json!("507f1f77bcf86cd799439011"));
+    }
+
+    #[test]
+    fn simplify_extjson_unwraps_a_date_to_a_plain_string() {
+        let mut value = serde_json::json!({"$date": "2026-08-16T00:00:00Z"});
+
+        simplify_extjson(&mut value);
+
+        assert_eq!(value, serde_json::json!("2026-08-16T00:00:00Z"));
+    }
+
+    #[test]
+    fn simplify_extjson_unwraps_nested_and_array_occurrences() {
+        let mut value = serde_json::json!({
+            "_id": {"$oid": "507f1f77bcf86cd799439011"},
+            "name": "Ada",
+            "createdBy": {"id": {"$oid": "507f191e810c19729de860ea"}},
+            "history": [{"$date": "2026-08-01T00:00:00Z"}, {"$date": "2026-08-02T00:00:00Z"}],
+        });
+
+        simplify_extjson(&mut value);
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "_id": "507f1f77bcf86cd799439011",
+                "name": "Ada",
+                "createdBy": {"id": "507f191e810c19729de860ea"},
+                "history": ["2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z"],
+            })
+        );
+    }
+
+    #[test]
+    fn simplify_extjson_leaves_other_wrapper_shapes_alone() {
+        // `$numberLong`/`$numberDecimal`/`$binary`/... are not touched --
+        // see the function's own doc comment for why only `$oid`/`$date`
+        // are safe to treat as purely cosmetic.
+        let mut value = serde_json::json!({"$numberLong": "9223372036854775807"});
+
+        simplify_extjson(&mut value);
+
+        assert_eq!(
+            value,
+            serde_json::json!({"$numberLong": "9223372036854775807"})
+        );
+    }
+
+    #[test]
+    fn simplify_extjson_leaves_a_plain_object_with_a_dollar_key_and_other_keys_alone() {
+        // A one-key check, not "has a $oid/$date key anywhere" -- a real
+        // document field could coincidentally be named that.
+        let mut value = serde_json::json!({"$oid": "not-actually-an-id", "other": 1});
+
+        simplify_extjson(&mut value);
+
+        assert_eq!(
+            value,
+            serde_json::json!({"$oid": "not-actually-an-id", "other": 1})
         );
     }
 
@@ -588,6 +712,56 @@ mod tests {
             }
             other => panic!("expected Documents, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn find_reports_the_id_as_a_plain_hex_string_not_a_wrapped_oid() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+
+        let result = driver
+            .execute(r#"db.users.find({"name": "Ada"})"#)
+            .await
+            .unwrap();
+
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        let id = &docs[0]["_id"];
+        assert!(
+            id.is_string(),
+            "_id must be a plain string, not a wrapped {{\"$oid\": ...}} object: {id:?}"
+        );
+        // A real ObjectId hex string is exactly 24 hex characters.
+        assert_eq!(id.as_str().unwrap().len(), 24);
+    }
+
+    #[tokio::test]
+    async fn insert_one_s_own_inserted_id_is_also_a_plain_string() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+
+        let result = driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        assert!(
+            docs[0]["insertedId"].is_string(),
+            "was: {:?}",
+            docs[0]["insertedId"]
+        );
     }
 
     #[tokio::test]
