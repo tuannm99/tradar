@@ -33,6 +33,13 @@ const MAX_DRAIN_PER_TICK: usize = 64;
 /// connection logging or a low idle-connection limit.
 const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How often the results pane's running-query spinner glyph advances --
+/// shared with `components::results`'s own spinner-frame calculation so
+/// `tick()` knows the coarsest redraw cadence that still animates it
+/// smoothly, rather than requesting a redraw on every ~50ms input-poll
+/// cycle regardless of whether the glyph would actually look different.
+pub(crate) const SPINNER_FRAME_MS: u128 = 80;
+
 pub enum QueryOutcome {
     Completed { result: QueryResult },
     Failed { error: String },
@@ -57,6 +64,11 @@ pub struct QueryEngine {
     /// elapsed-time readout. `tokio::time::Instant` for the same reason as
     /// `last_ping` -- a paused clock in tests advances it.
     running_since: Option<tokio::time::Instant>,
+    /// Which `SPINNER_FRAME_MS`-sized tick of `running_since` was last
+    /// reported as a change, so `tick()` only asks for a redraw when the
+    /// spinner glyph would actually look different -- not on every ~50ms
+    /// input-poll cycle it happens to be called on while a query runs.
+    last_reported_spinner_frame: Option<u128>,
     last_outcome: Option<QueryOutcome>,
     outcome_tx: UnboundedSender<TaggedOutcome>,
     outcome_rx: UnboundedReceiver<TaggedOutcome>,
@@ -89,6 +101,7 @@ impl QueryEngine {
             pending: false,
             running: None,
             running_since: None,
+            last_reported_spinner_frame: None,
             last_outcome: None,
             outcome_tx,
             outcome_rx,
@@ -198,6 +211,7 @@ impl QueryEngine {
         let epoch = self.epoch;
         self.pending = true;
         self.running_since = Some(tokio::time::Instant::now());
+        self.last_reported_spinner_frame = None;
         self.history.push(query.clone());
 
         let driver = Arc::clone(&self.driver);
@@ -229,6 +243,7 @@ impl QueryEngine {
         let epoch = self.epoch;
         self.pending = true;
         self.running_since = Some(tokio::time::Instant::now());
+        self.last_reported_spinner_frame = None;
 
         let driver = Arc::clone(&self.driver);
         let tx = self.outcome_tx.clone();
@@ -251,6 +266,7 @@ impl QueryEngine {
         let epoch = self.epoch;
         self.pending = true;
         self.running_since = Some(tokio::time::Instant::now());
+        self.last_reported_spinner_frame = None;
         for statement in &statements {
             self.history.push(statement.clone());
         }
@@ -293,6 +309,7 @@ impl QueryEngine {
         self.epoch += 1;
         self.pending = false;
         self.running_since = None;
+        self.last_reported_spinner_frame = None;
         self.last_outcome = None;
         true
     }
@@ -314,6 +331,7 @@ impl Session for QueryEngine {
                     self.pending = false;
                     self.running = None;
                     self.running_since = None;
+                    self.last_reported_spinner_frame = None;
                     self.last_outcome = Some(tagged.outcome);
                     changed = true;
                 }
@@ -336,11 +354,20 @@ impl Session for QueryEngine {
             self.fire_ping();
         }
 
-        // Redraw on every tick while a query is running, not just when an
-        // outcome lands -- the results pane's spinner/elapsed-time readout
-        // has nothing else to drive its animation.
-        if self.pending {
-            changed = true;
+        // Redraw while a query is running, not just when an outcome lands
+        // -- the results pane's spinner/elapsed-time readout has nothing
+        // else to drive its animation. Gated on the spinner's own frame
+        // advancing (not every tick) so a slow query doesn't force a
+        // redraw on every ~50ms input-poll cycle when the glyph would
+        // look identical to the last one drawn.
+        if self.pending
+            && let Some(since) = self.running_since
+        {
+            let frame = since.elapsed().as_millis() / SPINNER_FRAME_MS;
+            if self.last_reported_spinner_frame != Some(frame) {
+                self.last_reported_spinner_frame = Some(frame);
+                changed = true;
+            }
         }
 
         changed
@@ -509,6 +536,24 @@ mod tests {
             engine.tick();
         }
         assert!(engine.take_outcome().is_none(), "no late result may land");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tick_only_reports_changed_when_the_spinner_frame_actually_advances() {
+        let mut engine = engine(Arc::new(HangingDriver));
+        engine.submit_query("SELECT pg_sleep(3600)".to_string());
+
+        // The very first tick after submitting always sees a fresh frame.
+        assert!(engine.tick());
+
+        // Still well inside the same SPINNER_FRAME_MS-wide frame -- nothing
+        // for the spinner to redraw.
+        tokio::time::advance(std::time::Duration::from_millis(30)).await;
+        assert!(!engine.tick(), "the spinner glyph hasn't moved yet");
+
+        // Past the next frame boundary -- now it has.
+        tokio::time::advance(std::time::Duration::from_millis(60)).await;
+        assert!(engine.tick(), "the spinner glyph should have advanced");
     }
 
     #[tokio::test]

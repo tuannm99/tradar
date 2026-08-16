@@ -28,7 +28,7 @@ use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
 use crate::components::row_edit::{RowEditComponent, RowEditOutcome};
-use crate::query_driver::{RowChange, RowEdit};
+use crate::query_driver::{RowChange, RowEdit, SchemaInfo};
 use crate::query_engine::{QueryEngine, QueryOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +66,12 @@ pub struct QueryScreenComponent {
     editor_area: Rect,
     /// Everything completable for this connection, built once on connect.
     completions: CompletionSource,
+    /// The navigator's flattened view of this connection's schema, built
+    /// once on connect rather than re-derived from `engine.schema()` (a
+    /// walk that clones every table/column name and type) on every single
+    /// navigator keypress and redraw -- `engine.schema()` never changes
+    /// after connect, so there's nothing to invalidate this on.
+    outline: Vec<OutlineEntry>,
     /// The suggestion list, present only while there is something to
     /// suggest -- so "no popup" and "no matches" are one state.
     completion: Option<CompletionPopup>,
@@ -124,6 +130,41 @@ fn last_used_dir(recent: &[String], queries_dir: &std::path::Path) -> std::path:
         .unwrap_or_else(|| queries_dir.to_path_buf())
 }
 
+/// `schema`, flattened for the navigator: each table at depth 0 with its
+/// columns at depth 1. Called once, in `QueryScreenComponent::new` -- the
+/// navigator decides what to show; this only says what there is, and a
+/// connection's schema never changes after connect, so there's nothing to
+/// recompute this for later.
+fn flatten_outline(schema: &Result<Vec<SchemaInfo>, String>) -> Vec<OutlineEntry> {
+    let Ok(schema) = schema else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for table in schema {
+        entries.push(OutlineEntry {
+            depth: 0,
+            label: table.name.clone(),
+            detail: String::new(),
+            has_children: !table.columns.is_empty(),
+        });
+        for column in &table.columns {
+            entries.push(OutlineEntry {
+                depth: 1,
+                label: column.name.clone(),
+                // Which columns are the key decides whether the results
+                // grid can be edited, so it's worth seeing here.
+                detail: if column.primary_key {
+                    format!("{} pk", column.type_name)
+                } else {
+                    column.type_name.clone()
+                },
+                has_children: false,
+            });
+        }
+    }
+    entries
+}
+
 /// Copies `text` to the system clipboard via an OSC52 escape sequence,
 /// which the terminal emulator itself intercepts -- no clipboard crate
 /// needed, and it works through SSH/tmux as long as the terminal supports
@@ -151,6 +192,7 @@ impl QueryScreenComponent {
 
         let completions =
             CompletionSource::new(engine.keywords(), engine.schema().as_deref().unwrap_or(&[]));
+        let outline = flatten_outline(engine.schema());
 
         let mut query_editor = QueryEditorComponent::new();
         // Only Postgres/SQLite speak real SQL -- Mongo/Elasticsearch/Redis
@@ -188,6 +230,7 @@ impl QueryScreenComponent {
             history_picker: None,
             editor_area: Rect::ZERO,
             completions,
+            outline,
             completion: None,
             last_query: None,
             row_edit: None,
@@ -1002,37 +1045,11 @@ impl Component for QueryScreenComponent {
         (!text.trim().is_empty()).then_some(text)
     }
 
-    /// This connection's schema, flattened for the navigator: each table at
-    /// depth 0 with its columns at depth 1. The navigator decides what to
-    /// show; this only says what there is.
+    /// This connection's schema, flattened for the navigator -- computed
+    /// once in `new()` (see `outline` field) and just handed back here,
+    /// not re-derived on every call.
     fn outline(&self) -> Vec<OutlineEntry> {
-        let Ok(schema) = self.engine.schema() else {
-            return Vec::new();
-        };
-        let mut entries = Vec::new();
-        for table in schema {
-            entries.push(OutlineEntry {
-                depth: 0,
-                label: table.name.clone(),
-                detail: String::new(),
-                has_children: !table.columns.is_empty(),
-            });
-            for column in &table.columns {
-                entries.push(OutlineEntry {
-                    depth: 1,
-                    label: column.name.clone(),
-                    // Which columns are the key decides whether the results
-                    // grid can be edited, so it's worth seeing here.
-                    detail: if column.primary_key {
-                        format!("{} pk", column.type_name)
-                    } else {
-                        column.type_name.clone()
-                    },
-                    has_children: false,
-                });
-            }
-        }
-        entries
+        self.outline.clone()
     }
 
     fn outline_error(&self) -> Option<String> {

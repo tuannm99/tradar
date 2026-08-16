@@ -549,7 +549,9 @@ impl ResultsComponent {
                 )
                 .unwrap_or_default();
             const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let frame_index = (elapsed.as_millis() / 80) as usize % SPINNER.len();
+            let frame_index = (elapsed.as_millis() / crate::query_engine::SPINNER_FRAME_MS)
+                as usize
+                % SPINNER.len();
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     format!(

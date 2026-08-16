@@ -46,6 +46,23 @@ impl CandidateKind {
 pub struct Candidate {
     pub text: String,
     pub kind: CandidateKind,
+    /// `text.to_ascii_lowercase()`, computed once at build time rather
+    /// than inside `matches()` -- which runs on every keystroke, over
+    /// every candidate, and previously redid this same lowercasing twice
+    /// per match (once to filter, once more in the sort key).
+    text_lower: String,
+}
+
+impl Candidate {
+    fn new(text: impl Into<String>, kind: CandidateKind) -> Self {
+        let text = text.into();
+        let text_lower = text.to_ascii_lowercase();
+        Self {
+            text,
+            kind,
+            text_lower,
+        }
+    }
 }
 
 /// Everything completable for the current connection, built once when the
@@ -59,27 +76,18 @@ impl CompletionSource {
     pub fn new(keywords: &[&str], schema: &[SchemaInfo]) -> Self {
         let mut candidates: Vec<Candidate> = Vec::new();
         for name in keywords {
-            candidates.push(Candidate {
-                text: (*name).to_string(),
-                kind: CandidateKind::Keyword,
-            });
+            candidates.push(Candidate::new(*name, CandidateKind::Keyword));
         }
+        // The same column name usually appears in several tables; offering
+        // it once keeps the list short. A set rather than an `.any()` scan
+        // over the growing candidate list, which would make this quadratic
+        // in the number of columns for a schema with many of them.
+        let mut seen_columns: std::collections::HashSet<String> = std::collections::HashSet::new();
         for entry in schema {
-            candidates.push(Candidate {
-                text: entry.name.clone(),
-                kind: CandidateKind::Table,
-            });
+            candidates.push(Candidate::new(entry.name.clone(), CandidateKind::Table));
             for column in &entry.columns {
-                // The same column name usually appears in several tables;
-                // offering it once keeps the list short.
-                if !candidates
-                    .iter()
-                    .any(|c| c.kind == CandidateKind::Column && c.text == column.name)
-                {
-                    candidates.push(Candidate {
-                        text: column.name.clone(),
-                        kind: CandidateKind::Column,
-                    });
+                if seen_columns.insert(column.name.clone()) {
+                    candidates.push(Candidate::new(column.name.clone(), CandidateKind::Column));
                 }
             }
         }
@@ -101,10 +109,7 @@ impl CompletionSource {
         let mut matches: Vec<&Candidate> = self
             .candidates
             .iter()
-            .filter(|c| {
-                let text = c.text.to_ascii_lowercase();
-                text.starts_with(&needle) && text != needle
-            })
+            .filter(|c| c.text_lower.starts_with(&needle) && c.text_lower != needle)
             .collect();
         matches.sort_by_key(|c| {
             let rank = match c.kind {
@@ -112,7 +117,7 @@ impl CompletionSource {
                 CandidateKind::Column => 1,
                 CandidateKind::Keyword => 2,
             };
-            (rank, c.text.to_ascii_lowercase())
+            (rank, c.text_lower.clone())
         });
         matches.into_iter().cloned().collect()
     }

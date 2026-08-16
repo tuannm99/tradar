@@ -13,6 +13,7 @@
 //! `tradar_core::vim_list`, the same module every list-rendering component
 //! in the app shares.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -92,6 +93,10 @@ struct Snapshot {
 /// to editor history rather than query results.
 const MAX_UNDO_HISTORY: usize = 500;
 
+/// A memoized `(buffer snapshot, computed result)` pair -- see
+/// `fold_cache`/`highlight_cache`.
+type Memoized<T> = RefCell<Option<(Vec<Vec<char>>, T)>>;
+
 pub struct QueryEditorComponent {
     pub mode: EditorMode,
     dialect: Dialect,
@@ -120,6 +125,20 @@ pub struct QueryEditorComponent {
     /// the cursor is in before any edit, so typing into a folded statement
     /// always unfolds it first rather than hiding what was just typed.
     folded: HashSet<usize>,
+    /// Memoized `(buffer snapshot, foldable_ranges() result)`, reused
+    /// across calls whose buffer hasn't changed since the last one. A
+    /// `RefCell` rather than a plain field so `foldable_ranges`/callers
+    /// can stay `&self` -- this is a pure cache, not editor state, and
+    /// every other method that reads fold info is already `&self` too.
+    /// Matters because `draw()` now runs ~20x/second while a query is
+    /// running (the results pane's spinner keeps the whole screen dirty,
+    /// see `QueryEngine::tick`), and a query buffer is static while
+    /// nothing is being typed into it -- redoing the SQL statement split
+    /// on every one of those redraws would be pure waste.
+    fold_cache: Memoized<Vec<(usize, usize)>>,
+    /// Same idea for `line_colors`'s tree-sitter highlight, the more
+    /// expensive of the two to redo unnecessarily.
+    highlight_cache: Memoized<Vec<Vec<Color>>>,
 }
 
 impl Default for QueryEditorComponent {
@@ -147,6 +166,8 @@ impl QueryEditorComponent {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             folded: HashSet::new(),
+            fold_cache: RefCell::new(None),
+            highlight_cache: RefCell::new(None),
         }
     }
 
@@ -245,16 +266,24 @@ impl QueryEditorComponent {
     /// `db.<coll>.<method>(...)`, Redis's one-command-per-line, and
     /// Elasticsearch's `METHOD /path` + body are already one statement per
     /// line each, so there'd be nothing to fold even if this ran for them).
-    /// Recomputed from the live buffer on every call, same tradeoff
-    /// `line_colors` already makes for tree-sitter highlighting -- cheap
-    /// for a query-sized buffer, and simpler than keeping a parallel
-    /// structure in sync with every edit.
+    /// Memoized in `fold_cache`, keyed on the buffer itself: recomputing
+    /// the statement split is wasted work on a buffer that hasn't changed
+    /// since the last call, which is exactly what happens on every one of
+    /// the ~20/sec redraws a running query's spinner now drives (see
+    /// `QueryEngine::tick`) -- simpler than keeping a parallel structure
+    /// incrementally in sync with every edit, so still recomputed in
+    /// full, just not more often than the buffer actually changes.
     fn foldable_ranges(&self) -> Vec<(usize, usize)> {
         if self.dialect != Dialect::Sql {
             return Vec::new();
         }
+        if let Some((cached_lines, cached_ranges)) = self.fold_cache.borrow().as_ref()
+            && cached_lines == &self.lines
+        {
+            return cached_ranges.clone();
+        }
         let text = self.text();
-        query_driver::split_sql_statements(&text)
+        let ranges: Vec<(usize, usize)> = query_driver::split_sql_statements(&text)
             .into_iter()
             .filter_map(|stmt| {
                 let start_line = Self::line_at_byte_offset(&text, stmt.start);
@@ -262,7 +291,9 @@ impl QueryEditorComponent {
                 let end_line = Self::line_at_byte_offset(&text, last_byte);
                 (end_line > start_line).then_some((start_line, end_line))
             })
-            .collect()
+            .collect();
+        *self.fold_cache.borrow_mut() = Some((self.lines.clone(), ranges.clone()));
+        ranges
     }
 
     fn line_at_byte_offset(text: &str, offset: usize) -> usize {
@@ -949,10 +980,19 @@ impl QueryEditorComponent {
 
     /// One `Color` per line, indexed the same as `self.lines` -- `None` in
     /// `Dialect::PlainText`, or if highlighting the current buffer failed
-    /// (falls back to unstyled text either way).
+    /// (falls back to unstyled text either way). Memoized in
+    /// `highlight_cache` for the same reason `foldable_ranges` is: this is
+    /// a full tree-sitter parse of the whole buffer, and `draw()` -- which
+    /// is the only caller -- now runs far more often than the buffer
+    /// actually changes (see `foldable_ranges`'s doc comment).
     fn line_colors(&self) -> Option<Vec<Vec<Color>>> {
         if self.dialect != Dialect::Sql {
             return None;
+        }
+        if let Some((cached_lines, cached_colors)) = self.highlight_cache.borrow().as_ref()
+            && cached_lines == &self.lines
+        {
+            return Some(cached_colors.clone());
         }
         let text = self.text();
         let mut colors = sql_highlight::char_colors(&text)?.into_iter();
@@ -963,6 +1003,7 @@ impl QueryEditorComponent {
                 colors.next(); // the '\n' joining this line to the next
             }
         }
+        *self.highlight_cache.borrow_mut() = Some((self.lines.clone(), result.clone()));
         Some(result)
     }
 
@@ -1699,6 +1740,44 @@ mod tests {
         let text = draw_text(&mut editor);
         assert!(text.contains("SELECT 1"), "buffer: {text}");
         assert!(!text.contains("folded"), "nothing to fold: {text}");
+    }
+
+    #[test]
+    fn foldable_ranges_reflects_an_edit_after_the_cache_is_warm() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1;");
+        assert_eq!(
+            editor.foldable_ranges(),
+            Vec::new(),
+            "warms the cache with a one-line buffer that has nothing to fold"
+        );
+
+        editor.set_text("SELECT 1\nFROM users\nWHERE x = 1;");
+
+        assert_eq!(
+            editor.foldable_ranges(),
+            vec![(0, 2)],
+            "the cache must not serve the previous buffer's (empty) answer"
+        );
+    }
+
+    #[test]
+    fn line_colors_reflects_an_edit_after_the_cache_is_warm() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_dialect(Dialect::Sql);
+        editor.set_text("SELECT 1;");
+        assert!(editor.line_colors().is_some(), "warms the cache");
+
+        let longer = "SELECT column_one, column_two FROM a_much_longer_table_name;";
+        editor.set_text(longer);
+
+        let colors = editor.line_colors().expect("still Dialect::Sql");
+        assert_eq!(
+            colors[0].len(),
+            longer.chars().count(),
+            "the cache must not serve the previous (shorter) buffer's color vector"
+        );
     }
 
     #[test]
