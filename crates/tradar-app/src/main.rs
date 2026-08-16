@@ -89,6 +89,13 @@ async fn main() -> anyhow::Result<()> {
         storage::init_query_files(queries_dir, storage::RecentStore::at(recent_path));
     }
 
+    // The saved-snippet library (`Ctrl+K`/`Ctrl+L`). Same fallback as
+    // above: no config directory just means those keys have nothing to
+    // save into, not a reason to fail startup.
+    if let Ok(snippets_path) = storage::default_snippets_path() {
+        storage::init_snippets(storage::SnippetStore::at(snippets_path));
+    }
+
     let store = ConnectionStore::at(default_connections_path()?);
     let connections = store.load()?;
 

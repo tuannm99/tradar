@@ -80,6 +80,12 @@ pub enum Context {
     /// editor's own keys, so `tab` accepts a suggestion when one is on
     /// screen and cycles panes when none is.
     Completion,
+    /// The saved-snippet library overlay (`Ctrl+L`). Its own context
+    /// rather than `Prompt` -- `d`/`r` (delete/rename) have to be letter
+    /// keys, and `Prompt` is shared with plain text-entry widgets
+    /// (`FilePromptComponent`, the connection form) where a letter must
+    /// stay typable, never a command.
+    Snippets,
 }
 
 impl Context {
@@ -97,6 +103,7 @@ impl Context {
             Self::List => "list",
             Self::Prompt => "prompt",
             Self::Completion => "completion",
+            Self::Snippets => "snippets",
         }
     }
 
@@ -114,12 +121,13 @@ impl Context {
             "list" => Self::List,
             "prompt" => Self::Prompt,
             "completion" => Self::Completion,
+            "snippets" => Self::Snippets,
             _ => return None,
         })
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 12] {
+    pub fn all() -> [Self; 13] {
         [
             Self::Global,
             Self::Picker,
@@ -133,6 +141,7 @@ impl Context {
             Self::List,
             Self::Prompt,
             Self::Completion,
+            Self::Snippets,
         ]
     }
 }
@@ -168,6 +177,16 @@ pub enum Command {
     SaveFile,
     OpenFile,
     History,
+    /// Save the current buffer into the named snippet library, prompting
+    /// for a name -- distinct from `SaveFile`, which writes to a `.sql`
+    /// file on disk.
+    SaveSnippet,
+    /// Open the snippet library overlay to browse/insert one.
+    OpenSnippets,
+    /// Delete the highlighted snippet, in the library overlay.
+    DeleteSnippet,
+    /// Rename the highlighted snippet, in the library overlay.
+    RenameSnippet,
     ExportCurl,
     /// Export the current result to a CSV or JSON file -- format picked by
     /// the extension typed in the prompt, same idea as `SaveFile` picking a
@@ -289,6 +308,10 @@ impl Command {
             Self::SaveFile => "save-file",
             Self::OpenFile => "open-file",
             Self::History => "history",
+            Self::SaveSnippet => "save-snippet",
+            Self::OpenSnippets => "open-snippets",
+            Self::DeleteSnippet => "delete-snippet",
+            Self::RenameSnippet => "rename-snippet",
             Self::ExportCurl => "export-curl",
             Self::Export => "export",
             Self::Yank => "yank",
@@ -344,7 +367,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 68] = [
+    const ALL: [Self; 72] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -365,6 +388,10 @@ impl Command {
         Self::SaveFile,
         Self::OpenFile,
         Self::History,
+        Self::SaveSnippet,
+        Self::OpenSnippets,
+        Self::DeleteSnippet,
+        Self::RenameSnippet,
         Self::ExportCurl,
         Self::Export,
         Self::Yank,
@@ -438,6 +465,10 @@ impl Command {
             Self::SaveFile => "Save the query to a file",
             Self::OpenFile => "Load a query from a file",
             Self::History => "Browse query history",
+            Self::SaveSnippet => "Save the buffer as a named snippet",
+            Self::OpenSnippets => "Open the snippet library",
+            Self::DeleteSnippet => "Delete the selected snippet",
+            Self::RenameSnippet => "Rename the selected snippet",
             Self::ExportCurl => "Export the request as curl (Elasticsearch)",
             Self::Export => "Export the result to CSV/JSON",
             Self::Yank => "Copy the selected row/document",
@@ -631,6 +662,8 @@ impl Default for Keymap {
                 ("ctrl-s", Command::SaveFile),
                 ("ctrl-o", Command::OpenFile),
                 ("ctrl-r", Command::History),
+                ("ctrl-k", Command::SaveSnippet),
+                ("ctrl-l", Command::OpenSnippets),
                 ("ctrl-y", Command::ExportCurl),
                 ("ctrl-e", Command::Export),
                 ("ctrl-g", Command::ToggleBrowseMode),
@@ -737,6 +770,15 @@ impl Default for Keymap {
                 ("esc", Command::Cancel),
                 ("tab", Command::NextField),
                 ("backtab", Command::PrevField),
+            ]),
+        );
+        bindings.insert(
+            Context::Snippets,
+            parse_defaults(&[
+                ("enter", Command::Confirm),
+                ("esc", Command::Cancel),
+                ("d", Command::DeleteSnippet),
+                ("r", Command::RenameSnippet),
             ]),
         );
         Self { bindings }

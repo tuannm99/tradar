@@ -214,6 +214,143 @@ impl QueryFiles {
     }
 }
 
+/// A user-named, user-saved query, kept separate from the auto-generated
+/// CRUD snippets (`Component::crud_snippet`) -- this one is arbitrary text
+/// the user chose to keep, not derived from a schema entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedSnippet {
+    pub name: String,
+    /// A connector id (`"postgres"`, `"redis"`, ...), same meaning as
+    /// `SavedConnection::driver`. `name` only has to be unique within one
+    /// driver -- a Postgres snippet and a Redis snippet can share a name
+    /// without conflict, since the library overlay only ever shows one
+    /// driver's snippets at a time (the currently open connection's).
+    pub driver: String,
+    pub text: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SnippetsFile {
+    #[serde(default)]
+    snippets: Vec<SavedSnippet>,
+}
+
+pub fn default_snippets_path() -> anyhow::Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
+        anyhow::anyhow!("could not determine a config directory for this platform")
+    })?;
+    Ok(dirs.config_dir().join("snippets.toml"))
+}
+
+#[derive(Debug, Clone)]
+pub struct SnippetStore {
+    path: PathBuf,
+}
+
+impl SnippetStore {
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn load(&self) -> anyhow::Result<Vec<SavedSnippet>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents = std::fs::read_to_string(&self.path)?;
+        let file: SnippetsFile = toml::from_str(&contents)?;
+        Ok(file.snippets)
+    }
+
+    pub fn save(&self, snippets: &[SavedSnippet]) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = SnippetsFile {
+            snippets: snippets.to_vec(),
+        };
+        std::fs::write(&self.path, toml::to_string_pretty(&file)?)?;
+        Ok(())
+    }
+}
+
+/// The saved-snippet library. Process-global for the same reason
+/// [`QueryFiles`] is: `QueryScreenComponent` (deep inside a connector's
+/// `Screen`) is the only thing that wants this, and threading "where
+/// snippets live" through the connector SPI would put a UI-management
+/// concern into the trait every connector has to implement.
+pub struct Snippets {
+    store: SnippetStore,
+    list: std::sync::RwLock<Vec<SavedSnippet>>,
+}
+
+static SNIPPETS: std::sync::OnceLock<Snippets> = std::sync::OnceLock::new();
+
+/// Called once at startup, mirroring [`init_query_files`]. Before this --
+/// and in tests, which never call it -- [`snippets`] returns `None`.
+pub fn init_snippets(store: SnippetStore) {
+    let list = store.load().unwrap_or_default();
+    let _ = SNIPPETS.set(Snippets {
+        store,
+        list: std::sync::RwLock::new(list),
+    });
+}
+
+pub fn snippets() -> Option<&'static Snippets> {
+    SNIPPETS.get()
+}
+
+impl Snippets {
+    /// This driver's snippets, in save order -- what the library overlay
+    /// lists. Filtered here rather than by the caller so nothing outside
+    /// this module needs to know the `(name, driver)` uniqueness rule.
+    pub fn for_driver(&self, driver: &str) -> Vec<SavedSnippet> {
+        self.list
+            .read()
+            .map(|list| {
+                list.iter()
+                    .filter(|s| s.driver == driver)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Adds a new snippet, or overwrites the existing one with the same
+    /// name for this driver -- saving under a name already in use updates
+    /// it in place rather than erroring or duplicating it.
+    pub fn save(&self, name: String, driver: String, text: String) {
+        let Ok(mut guard) = self.list.write() else {
+            return;
+        };
+        guard.retain(|s| !(s.name == name && s.driver == driver));
+        guard.push(SavedSnippet { name, driver, text });
+        let _ = self.store.save(&guard);
+    }
+
+    pub fn delete(&self, driver: &str, name: &str) {
+        let Ok(mut guard) = self.list.write() else {
+            return;
+        };
+        guard.retain(|s| !(s.name == name && s.driver == driver));
+        let _ = self.store.save(&guard);
+    }
+
+    /// A no-op if `old_name` isn't found for `driver` -- the entry may
+    /// already have been deleted by a concurrent action.
+    pub fn rename(&self, driver: &str, old_name: &str, new_name: String) {
+        let Ok(mut guard) = self.list.write() else {
+            return;
+        };
+        if let Some(entry) = guard
+            .iter_mut()
+            .find(|s| s.name == old_name && s.driver == driver)
+        {
+            entry.name = new_name;
+        }
+        let _ = self.store.save(&guard);
+    }
+}
+
 pub fn default_session_path() -> anyhow::Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
         anyhow::anyhow!("could not determine a config directory for this platform")
@@ -315,6 +452,163 @@ mod tests {
         let loaded = store.load().unwrap();
 
         assert_eq!(loaded, vec![connection]);
+    }
+
+    #[test]
+    fn default_snippets_path_ends_with_snippets_toml() {
+        let path = default_snippets_path().unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "snippets.toml");
+    }
+
+    #[test]
+    fn loading_a_missing_snippets_file_returns_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let snippets = SnippetStore::at(dir.path().join("nope.toml"))
+            .load()
+            .unwrap();
+
+        assert!(snippets.is_empty());
+    }
+
+    #[test]
+    fn saving_a_snippet_then_loading_round_trips_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SnippetStore::at(dir.path().join("snippets.toml"));
+        let snippet = SavedSnippet {
+            name: "active-users".to_string(),
+            driver: "postgres".to_string(),
+            text: "SELECT * FROM users WHERE active;".to_string(),
+        };
+
+        store.save(std::slice::from_ref(&snippet)).unwrap();
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded, vec![snippet]);
+    }
+
+    /// A `Snippets` backed by a temp-dir store, bypassing the process-global
+    /// singleton (`init_snippets`/`snippets()`) entirely -- same reasoning
+    /// as testing `ConnectionStore`/`RecentStore` directly rather than
+    /// through `QueryFiles`.
+    fn test_snippets(dir: &std::path::Path) -> Snippets {
+        Snippets {
+            store: SnippetStore::at(dir.join("snippets.toml")),
+            list: std::sync::RwLock::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn saving_under_an_existing_name_and_driver_overwrites_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let snippets = test_snippets(dir.path());
+        snippets.save(
+            "q".to_string(),
+            "postgres".to_string(),
+            "SELECT 1".to_string(),
+        );
+
+        snippets.save(
+            "q".to_string(),
+            "postgres".to_string(),
+            "SELECT 2".to_string(),
+        );
+
+        assert_eq!(
+            snippets.for_driver("postgres"),
+            vec![SavedSnippet {
+                name: "q".to_string(),
+                driver: "postgres".to_string(),
+                text: "SELECT 2".to_string(),
+            }],
+            "saving under a name already in use must update it, not duplicate it"
+        );
+    }
+
+    #[test]
+    fn the_same_name_on_two_different_drivers_does_not_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let snippets = test_snippets(dir.path());
+
+        snippets.save(
+            "q".to_string(),
+            "postgres".to_string(),
+            "SELECT 1".to_string(),
+        );
+        snippets.save("q".to_string(), "redis".to_string(), "GET k".to_string());
+
+        assert_eq!(snippets.for_driver("postgres").len(), 1);
+        assert_eq!(snippets.for_driver("redis").len(), 1);
+    }
+
+    #[test]
+    fn for_driver_only_returns_that_driver_s_snippets() {
+        let dir = tempfile::tempdir().unwrap();
+        let snippets = test_snippets(dir.path());
+        snippets.save(
+            "a".to_string(),
+            "postgres".to_string(),
+            "SELECT 1".to_string(),
+        );
+        snippets.save("b".to_string(), "redis".to_string(), "GET k".to_string());
+
+        let entries = snippets.for_driver("postgres");
+        let names: Vec<&str> = entries.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a"]);
+    }
+
+    #[test]
+    fn deleting_removes_only_the_matching_driver_s_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let snippets = test_snippets(dir.path());
+        snippets.save(
+            "q".to_string(),
+            "postgres".to_string(),
+            "SELECT 1".to_string(),
+        );
+        snippets.save("q".to_string(), "redis".to_string(), "GET k".to_string());
+
+        snippets.delete("postgres", "q");
+
+        assert!(snippets.for_driver("postgres").is_empty());
+        assert_eq!(snippets.for_driver("redis").len(), 1);
+    }
+
+    #[test]
+    fn renaming_updates_the_name_and_persists_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let snippets = test_snippets(dir.path());
+        snippets.save(
+            "old".to_string(),
+            "postgres".to_string(),
+            "SELECT 1".to_string(),
+        );
+
+        snippets.rename("postgres", "old", "new".to_string());
+
+        assert_eq!(
+            snippets.for_driver("postgres"),
+            vec![SavedSnippet {
+                name: "new".to_string(),
+                driver: "postgres".to_string(),
+                text: "SELECT 1".to_string(),
+            }]
+        );
+        let reloaded = SnippetStore::at(dir.path().join("snippets.toml"))
+            .load()
+            .unwrap();
+        assert_eq!(reloaded[0].name, "new");
+    }
+
+    #[test]
+    fn renaming_a_snippet_that_does_not_exist_is_a_harmless_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let snippets = test_snippets(dir.path());
+
+        snippets.rename("postgres", "ghost", "new".to_string());
+
+        assert!(snippets.for_driver("postgres").is_empty());
     }
 
     #[test]

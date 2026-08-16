@@ -402,6 +402,7 @@ fn context_title(context: Context) -> &'static str {
         Context::List => "Lists (connections, schema, results, history)",
         Context::Prompt => "Prompts and overlays",
         Context::Completion => "Autocomplete (while suggestions show)",
+        Context::Snippets => "Snippet library (while open)",
     }
 }
 

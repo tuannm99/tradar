@@ -28,6 +28,7 @@ use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
 use crate::components::row_edit::{RowEditComponent, RowEditOutcome};
+use crate::components::snippet_picker::{SnippetOutcome, SnippetPickerComponent};
 use crate::query_driver::{RowChange, RowEdit, SchemaInfo};
 use crate::query_engine::{QueryEngine, QueryOutcome};
 
@@ -62,6 +63,10 @@ pub struct QueryScreenComponent {
     picker: Option<FilePickerComponent>,
     last_path: Option<String>,
     history_picker: Option<HistoryPickerComponent>,
+    /// The "name this snippet" prompt, open after `Ctrl+K`.
+    snippet_prompt: Option<ui::TextInput>,
+    /// The snippet library overlay, open after `Ctrl+L`.
+    snippet_picker: Option<SnippetPickerComponent>,
     /// Where the editor was last drawn, so a click there can focus it.
     editor_area: Rect,
     /// Everything completable for this connection, built once on connect.
@@ -228,6 +233,8 @@ impl QueryScreenComponent {
             picker: None,
             last_path: None,
             history_picker: None,
+            snippet_prompt: None,
+            snippet_picker: None,
             editor_area: Rect::ZERO,
             completions,
             outline,
@@ -346,6 +353,36 @@ impl QueryScreenComponent {
         }
         let entries = self.engine.history().iter().rev().cloned().collect();
         self.history_picker = Some(HistoryPickerComponent::new(entries));
+    }
+
+    /// `Ctrl+K`: prompts for a name, then saves the whole buffer into the
+    /// snippet library under it -- see `handle_snippet_name_confirmed`.
+    fn open_snippet_prompt(&mut self) {
+        self.snippet_prompt = Some(ui::TextInput::new(""));
+    }
+
+    fn handle_snippet_name_confirmed(&mut self, name: String) {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(store) = tradar_core::storage::snippets() {
+            store.save(
+                name,
+                self.active_connection().driver.clone(),
+                self.query_editor.text(),
+            );
+        }
+    }
+
+    /// `Ctrl+L`: opens the snippet library scoped to this connection's
+    /// driver.
+    fn open_snippet_picker(&mut self) {
+        let driver = self.active_connection().driver.clone();
+        let entries = tradar_core::storage::snippets()
+            .map(|s| s.for_driver(&driver))
+            .unwrap_or_default();
+        self.snippet_picker = Some(SnippetPickerComponent::new(driver, entries));
     }
 
     /// Fetches the sidebar's highlighted key into the results pane -- a
@@ -854,6 +891,35 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        if let Some(prompt) = self.snippet_prompt.as_mut() {
+            match code {
+                KeyCode::Esc => self.snippet_prompt = None,
+                KeyCode::Enter => {
+                    let name = prompt.text();
+                    self.snippet_prompt = None;
+                    self.handle_snippet_name_confirmed(name);
+                }
+                _ => {
+                    prompt.handle_key_event(code, modifiers);
+                }
+            }
+            return None;
+        }
+
+        if let Some(snippet_picker) = self.snippet_picker.as_mut() {
+            match snippet_picker.handle_key_event(code, modifiers) {
+                Some(SnippetOutcome::Cancelled) => self.snippet_picker = None,
+                Some(SnippetOutcome::Insert(text)) => {
+                    self.query_editor.set_text(&text);
+                    self.mode = ScreenMode::Console;
+                    self.focus = Focus::Editor;
+                    self.snippet_picker = None;
+                }
+                None => {}
+            }
+            return None;
+        }
+
         // While suggestions are showing they take the keys bound to them,
         // and nothing else -- every other key falls through to normal
         // editing, which then refilters the list.
@@ -974,6 +1040,8 @@ impl Component for QueryScreenComponent {
             Command::SaveFile => self.open_prompt(PromptKind::Save),
             Command::OpenFile => self.open_file_picker(),
             Command::History => self.open_history(),
+            Command::SaveSnippet => self.open_snippet_prompt(),
+            Command::OpenSnippets => self.open_snippet_picker(),
             Command::ExportCurl => self.export_curl(),
             Command::Export => self.open_export_prompt(),
             Command::Yank => {
@@ -1247,6 +1315,24 @@ impl Component for QueryScreenComponent {
             let popup = ui::centered_rect(70, 60, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             history_picker.draw(frame, popup);
+        }
+
+        if let Some(prompt) = &self.snippet_prompt {
+            let popup = ui::centered_rect(60, 20, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            let block = ui::panel("Save snippet as", true);
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(ratatui::text::Line::from(prompt.spans(true))),
+                inner,
+            );
+        }
+
+        if let Some(snippet_picker) = &mut self.snippet_picker {
+            let popup = ui::centered_rect(70, 60, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            snippet_picker.draw(frame, popup);
         }
 
         if let Some(row_edit) = &self.row_edit {
@@ -2262,6 +2348,89 @@ mod tests {
 
         assert!(screen.history_picker.is_none());
         assert_eq!(screen.query_editor.text(), "unsaved edit");
+    }
+
+    #[test]
+    fn ctrl_k_opens_the_snippet_name_prompt() {
+        let (mut screen, _rx) = screen();
+
+        screen.handle_key_event(KeyCode::Char('k'), KeyModifiers::CONTROL);
+
+        assert!(screen.snippet_prompt.is_some());
+    }
+
+    #[test]
+    fn esc_cancels_the_snippet_name_prompt() {
+        let (mut screen, _rx) = screen();
+        screen.handle_key_event(KeyCode::Char('k'), KeyModifiers::CONTROL);
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.snippet_prompt.is_none());
+    }
+
+    #[test]
+    fn enter_on_the_snippet_name_prompt_closes_it() {
+        // No global `Snippets` store is initialized in tests (same
+        // limitation `query_files()` has) -- confirming a name with
+        // nowhere to persist it must still close the prompt cleanly, not
+        // panic or leave it stuck open.
+        let (mut screen, _rx) = screen();
+        screen.handle_key_event(KeyCode::Char('k'), KeyModifiers::CONTROL);
+
+        for c in "my-query".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.snippet_prompt.is_none());
+    }
+
+    #[test]
+    fn ctrl_l_opens_the_snippet_picker() {
+        let (mut screen, _rx) = screen();
+
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+
+        assert!(screen.snippet_picker.is_some());
+    }
+
+    #[test]
+    fn esc_cancels_the_snippet_picker() {
+        let (mut screen, _rx) = screen();
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.snippet_picker.is_none());
+    }
+
+    #[test]
+    fn choosing_a_snippet_loads_it_into_the_editor() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("unrelated");
+        // Constructed directly rather than via `Ctrl+L`, since that reads
+        // the process-global store (empty in tests) -- this exercises the
+        // `SnippetOutcome::Insert` wiring on its own.
+        screen.snippet_picker = Some(
+            crate::components::snippet_picker::SnippetPickerComponent::new(
+                "sqlite",
+                vec![tradar_core::storage::SavedSnippet {
+                    name: "active-users".to_string(),
+                    driver: "sqlite".to_string(),
+                    text: "SELECT * FROM users WHERE active;".to_string(),
+                }],
+            ),
+        );
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.snippet_picker.is_none());
+        assert_eq!(
+            screen.query_editor.text(),
+            "SELECT * FROM users WHERE active;"
+        );
+        assert_eq!(screen.focus, Focus::Editor);
     }
 
     #[test]
