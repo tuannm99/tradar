@@ -14,6 +14,50 @@ use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::QueryResult;
 
+/// A compact, single/narrow-width glyph for `type_name`'s broad category
+/// -- shown in the header instead of the full name (see
+/// `draw_table_body`'s `header_labels`). ASCII-only on purpose: the header
+/// row's width is measured in `chars()`, not display width, and an emoji
+/// (typically double-width in a real terminal despite counting as one
+/// `char`) would silently throw off the same column alignment this app
+/// has already had to fix once before. Matched by substring,
+/// case-insensitively, against whatever the driver's own type name is
+/// (Postgres: `character varying`, `timestamp without time zone`; SQLite:
+/// `INTEGER`, `TEXT`; Cassandra: `text`, `list<text>`, ...) rather than an
+/// exact list, since no two drivers spell a type the same way. `None` for
+/// anything unrecognized -- the header just shows the bare name then,
+/// rather than guessing.
+fn type_icon(type_name: &str) -> Option<&'static str> {
+    let lower = type_name.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    if has(&["uuid"]) {
+        Some("U")
+    } else if has(&["json"]) {
+        Some("{}")
+    } else if has(&["bool"]) {
+        Some("B")
+    } else if has(&["timestamp", "date", "time"]) {
+        Some("@")
+    } else if has(&["blob", "bytea", "binary"]) {
+        Some("X")
+    } else if has(&["list", "array", "set<", "map<"]) {
+        Some("[]")
+    } else if has(&[
+        "int", "serial", "numeric", "decimal", "float", "double", "real",
+    ]) && !has(&["point"])
+    {
+        // "int" alone would also match Postgres's `point` (a geometric
+        // type, not a number) -- excluded explicitly rather than trying
+        // to make the substring check itself word-bounded, since this
+        // list is about covering what's common, not being airtight.
+        Some("#")
+    } else if has(&["char", "text", "string"]) {
+        Some("A")
+    } else {
+        None
+    }
+}
+
 /// Width for each column: whatever its widest value needs, capped at
 /// `MAX_COLUMN_WIDTH`, and never narrower than its own header.
 fn column_widths(columns: &[String], rows: &[Vec<String>]) -> Vec<usize> {
@@ -570,7 +614,7 @@ impl ResultsComponent {
             (Some(_), _) => "Results — error".to_string(),
             (None, Some(QueryResult::Table { truncated, .. })) => {
                 let total = self.total_count();
-                if !self.filter.is_empty() {
+                let mut title = if !self.filter.is_empty() {
                     // Both numbers, so a filtered view can never be read as
                     // the whole result.
                     format!(
@@ -585,7 +629,15 @@ impl ResultsComponent {
                     format!("Results (first {total} rows — truncated)")
                 } else {
                     format!("Results ({})", count(total, "row"))
+                };
+                // The full type name lives here instead of the header row
+                // (which only has room for a compact icon, see
+                // `type_icon`) -- moving the cell cursor across columns
+                // updates this without an extra keystroke.
+                if let Some(Some(type_name)) = self.column_types.get(self.selected_col) {
+                    title.push_str(&format!(" — {type_name}"));
                 }
+                title
             }
             (None, Some(QueryResult::Documents(_))) => {
                 let total = self.total_count();
@@ -758,16 +810,23 @@ fn draw_table_body(
     // line up or the values can't be read down a column, which is most
     // of the point of tabular output.
     *selected_col = (*selected_col).min(columns.len().saturating_sub(1));
-    // `id INTEGER` rather than a bare `id` when the type is known --
-    // included in the width calculation below (not just the header cell
-    // text) so the type suffix isn't truncated to fit a width sized for
-    // the name alone.
+    // `id #` rather than a bare `id` when the type is known -- a compact
+    // glyph, not the full type name (that's in the results pane's own
+    // title instead, see `ResultsComponent::draw`, updated as the cell
+    // cursor moves so it's always one glance away without spending header
+    // width on a name that can run long, e.g. `character varying`).
+    // Included in the width calculation below (not just the header cell
+    // text) so the icon isn't truncated to fit a width sized for the name
+    // alone.
     let header_labels: Vec<String> = columns
         .iter()
         .enumerate()
         .map(
             |(index, name)| match column_types.get(index).and_then(|t| t.as_ref()) {
-                Some(type_name) => format!("{name} {type_name}"),
+                Some(type_name) => match type_icon(type_name) {
+                    Some(icon) => format!("{name} {icon}"),
+                    None => name.clone(),
+                },
                 None => name.clone(),
             },
         )
@@ -951,6 +1010,32 @@ mod tests {
         buffer_text(terminal.backend().buffer())
     }
 
+    #[test]
+    fn type_icon_recognizes_common_types_across_drivers() {
+        // Postgres, SQLite, and Cassandra all spell types differently --
+        // the point of matching by substring is that all three land on
+        // the same icon.
+        assert_eq!(type_icon("uuid"), Some("U"));
+        assert_eq!(type_icon("jsonb"), Some("{}"));
+        assert_eq!(type_icon("json"), Some("{}"));
+        assert_eq!(type_icon("boolean"), Some("B"));
+        assert_eq!(type_icon("BOOL"), Some("B"), "matched case-insensitively");
+        assert_eq!(type_icon("timestamp without time zone"), Some("@"));
+        assert_eq!(type_icon("DATE"), Some("@"));
+        assert_eq!(type_icon("TIME"), Some("@"));
+        assert_eq!(type_icon("bytea"), Some("X"));
+        assert_eq!(type_icon("BLOB"), Some("X"));
+        assert_eq!(type_icon("list<text>"), Some("[]"));
+        assert_eq!(type_icon("INTEGER"), Some("#"));
+        assert_eq!(type_icon("character varying"), Some("A"));
+        assert_eq!(type_icon("TEXT"), Some("A"));
+    }
+
+    #[test]
+    fn type_icon_is_none_for_something_unrecognized() {
+        assert_eq!(type_icon("point"), None);
+    }
+
     fn table(rows: usize) -> QueryResult {
         QueryResult::Table {
             columns: vec!["id".to_string()],
@@ -1003,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn a_known_column_type_is_shown_next_to_its_name_in_the_header() {
+    fn a_known_column_type_is_shown_as_a_compact_icon_in_the_header() {
         let mut results = ResultsComponent::new();
         results.set_result(wide_table());
         results.set_column_types(vec![
@@ -1014,7 +1099,11 @@ mod tests {
 
         let text = draw_component(&mut results, 60, 8);
 
-        assert!(text.contains("id INTEGER"), "buffer was: {text}");
+        // The icon next to the name, not the spelled-out type name --
+        // that's in the panel title instead (see the next test), which is
+        // allowed to say "INTEGER" on its own line.
+        assert!(text.contains("id #"), "buffer was: {text}");
+        assert!(!text.contains("id INTEGER"), "buffer was: {text}");
         // No type known for `name` -- it must show bare, not "name None"
         // or any other stand-in for "nothing to say".
         assert!(text.contains("name"), "buffer was: {text}");
@@ -1022,7 +1111,34 @@ mod tests {
     }
 
     #[test]
-    fn the_cell_preview_title_includes_the_column_s_type_when_known() {
+    fn the_selected_column_s_full_type_name_is_shown_in_the_panel_title() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        results.set_column_types(vec![
+            Some("INTEGER".to_string()),
+            None,
+            Some("INTEGER".to_string()),
+        ]);
+
+        let text = draw_component(&mut results, 60, 8);
+        assert!(
+            text.contains("Results (2 rows) — INTEGER"),
+            "buffer was: {text}"
+        );
+
+        results.next_column();
+        let text = draw_component(&mut results, 60, 8);
+        assert!(
+            !text.contains("— INTEGER"),
+            "moved to a column with no known type: {text}"
+        );
+    }
+
+    #[test]
+    fn the_cell_preview_title_includes_the_column_s_type_icon_when_known() {
+        // Matches whatever the header itself shows (the icon) -- the
+        // spelled-out name is already one glance up, in the panel title
+        // (see `the_selected_column_s_full_type_name_is_shown_in_the_panel_title`).
         let mut results = ResultsComponent::new();
         results.set_result(table(1));
         results.set_column_types(vec![Some("INTEGER".to_string())]);
@@ -1030,7 +1146,7 @@ mod tests {
 
         let text = draw_component(&mut results, 40, 12);
 
-        assert!(text.contains("id INTEGER"), "buffer was: {text}");
+        assert!(text.contains("id #"), "buffer was: {text}");
     }
 
     #[test]
