@@ -1,0 +1,17 @@
+[package]
+name = "tradar-connector-cassandra"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tradar-core = { path = "../tradar-core" }
+tradar-connector-spi = { path = "../tradar-connector-spi" }
+tradar-query-workbench = { path = "../tradar-query-workbench" }
+
+async-trait = "0.1"
+anyhow = "1"
+scylla = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+testcontainers = "0.23"

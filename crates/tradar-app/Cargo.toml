@@ -9,16 +9,17 @@ path = "src/main.rs"
 
 [dependencies]
 tradar-core = { path = "../tradar-core" }
-tradar-connector-api = { path = "../tradar-connector-api" }
+tradar-connector-spi = { path = "../tradar-connector-spi" }
 tradar-query-workbench = { path = "../tradar-query-workbench" }
-tradar-postgres = { path = "../connectors/tradar-postgres" }
-tradar-sqlite = { path = "../connectors/tradar-sqlite" }
-tradar-elasticsearch = { path = "../connectors/tradar-elasticsearch" }
-tradar-redis = { path = "../connectors/tradar-redis" }
-tradar-mongo = { path = "../connectors/tradar-mongo" }
-tradar-cassandra = { path = "../connectors/tradar-cassandra" }
-tradar-rabbitmq = { path = "../connectors/tradar-rabbitmq" }
-tradar-kafka = { path = "../connectors/tradar-kafka" }
+tradar-connector-postgres = { path = "../tradar-connector-postgres" }
+tradar-connector-sqlite = { path = "../tradar-connector-sqlite" }
+tradar-connector-elasticsearch = { path = "../tradar-connector-elasticsearch" }
+tradar-connector-redis = { path = "../tradar-connector-redis" }
+tradar-connector-mongo = { path = "../tradar-connector-mongo" }
+tradar-connector-cassandra = { path = "../tradar-connector-cassandra" }
+tradar-connector-rabbitmq = { path = "../tradar-connector-rabbitmq" }
+tradar-connector-kafka = { path = "../tradar-connector-kafka" }
+tradar-connector-http = { path = "../tradar-connector-http" }
 
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.30"

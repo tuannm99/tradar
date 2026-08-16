@@ -5,15 +5,12 @@
 //! `QueryEngine` directly (not through `dyn Session`) since this screen only
 //! ever exists for a query-shaped connector's own engine.
 
-use std::io::Write;
-
-use base64::Engine;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
-use tradar_connector_api::Session;
+use tradar_connector_spi::Session;
 use tradar_core::action::{Action, Component, OutlineEntry};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::SavedConnection;
@@ -168,19 +165,6 @@ fn flatten_outline(schema: &Result<Vec<SchemaInfo>, String>) -> Vec<OutlineEntry
         }
     }
     entries
-}
-
-/// Copies `text` to the system clipboard via an OSC52 escape sequence,
-/// which the terminal emulator itself intercepts -- no clipboard crate
-/// needed, and it works through SSH/tmux as long as the terminal supports
-/// OSC52 (most modern ones do: iTerm2, kitty, Alacritty, WezTerm, Windows
-/// Terminal, ...).
-fn yank_to_clipboard(text: &str) {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
-    let sequence = format!("\x1b]52;c;{encoded}\x07");
-    let mut stdout = std::io::stdout();
-    let _ = stdout.write_all(sequence.as_bytes());
-    let _ = stdout.flush();
 }
 
 impl QueryScreenComponent {
@@ -1046,7 +1030,7 @@ impl Component for QueryScreenComponent {
             Command::Export => self.open_export_prompt(),
             Command::Yank => {
                 if let Some(text) = self.results.selected_text() {
-                    yank_to_clipboard(&text);
+                    ui::yank_to_clipboard(&text);
                 }
             }
             Command::PrevColumn => self.results.prev_column(),
@@ -1066,7 +1050,7 @@ impl Component for QueryScreenComponent {
             }
             Command::CopyError => {
                 if let Some(error) = self.results.last_error.clone() {
-                    yank_to_clipboard(&error);
+                    ui::yank_to_clipboard(&error);
                 }
             }
             Command::BrowseOpen => self.open_selected_key(),

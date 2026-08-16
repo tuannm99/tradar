@@ -351,6 +351,123 @@ impl Snippets {
     }
 }
 
+/// A user-named, user-saved HTTP request (`tradar-connector-http`'s Postman-style
+/// screen, `Ctrl+K`/`Ctrl+L`) -- a separate shape from [`SavedSnippet`]
+/// because a request has four structured fields, not one blob of text. See
+/// "Thiết kế UI: HTTP, gRPC, Socket" in docs/architecture.md.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedHttpRequest {
+    pub name: String,
+    pub method: String,
+    pub url: String,
+    /// Raw `Key: Value` lines, one header per line -- parsed at send time,
+    /// not structured here (see the design doc for why).
+    pub headers: String,
+    pub body: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct HttpRequestsFile {
+    #[serde(default)]
+    requests: Vec<SavedHttpRequest>,
+}
+
+pub fn default_http_requests_path() -> anyhow::Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
+        anyhow::anyhow!("could not determine a config directory for this platform")
+    })?;
+    Ok(dirs.config_dir().join("http_requests.toml"))
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpRequestStore {
+    path: PathBuf,
+}
+
+impl HttpRequestStore {
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn load(&self) -> anyhow::Result<Vec<SavedHttpRequest>> {
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents = std::fs::read_to_string(&self.path)?;
+        let file: HttpRequestsFile = toml::from_str(&contents)?;
+        Ok(file.requests)
+    }
+
+    pub fn save(&self, requests: &[SavedHttpRequest]) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = HttpRequestsFile {
+            requests: requests.to_vec(),
+        };
+        std::fs::write(&self.path, toml::to_string_pretty(&file)?)?;
+        Ok(())
+    }
+}
+
+/// The saved-request library. Process-global for the same reason
+/// [`Snippets`] is: `HttpScreen` (deep inside `tradar-connector-http`'s `Session`) is
+/// the only thing that wants this, and threading "where requests live"
+/// through the connector SPI would put a UI-management concern into a trait
+/// every connector implements.
+pub struct HttpRequests {
+    store: HttpRequestStore,
+    list: std::sync::RwLock<Vec<SavedHttpRequest>>,
+}
+
+static HTTP_REQUESTS: std::sync::OnceLock<HttpRequests> = std::sync::OnceLock::new();
+
+/// Called once at startup, mirroring [`init_snippets`]. Before this -- and
+/// in tests, which never call it -- [`http_requests`] returns `None`.
+pub fn init_http_requests(store: HttpRequestStore) {
+    let list = store.load().unwrap_or_default();
+    let _ = HTTP_REQUESTS.set(HttpRequests {
+        store,
+        list: std::sync::RwLock::new(list),
+    });
+}
+
+pub fn http_requests() -> Option<&'static HttpRequests> {
+    HTTP_REQUESTS.get()
+}
+
+impl HttpRequests {
+    /// Every saved request, in save order -- unlike [`Snippets`], not
+    /// scoped per-connector: one HTTP connection's saved requests are just
+    /// as useful to send against another (there's no schema/driver mismatch
+    /// concern the way there is with SQL).
+    pub fn all(&self) -> Vec<SavedHttpRequest> {
+        self.list
+            .read()
+            .map(|list| list.clone())
+            .unwrap_or_default()
+    }
+
+    /// Adds a new request, or overwrites the existing one with the same
+    /// name -- saving under a name already in use updates it in place.
+    pub fn save(&self, request: SavedHttpRequest) {
+        let Ok(mut guard) = self.list.write() else {
+            return;
+        };
+        guard.retain(|r| r.name != request.name);
+        guard.push(request);
+        let _ = self.store.save(&guard);
+    }
+
+    pub fn delete(&self, name: &str) {
+        let Ok(mut guard) = self.list.write() else {
+            return;
+        };
+        guard.retain(|r| r.name != name);
+        let _ = self.store.save(&guard);
+    }
+}
+
 pub fn default_session_path() -> anyhow::Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
         anyhow::anyhow!("could not determine a config directory for this platform")
@@ -759,5 +876,90 @@ mod tests {
         let loaded = store.load().unwrap();
 
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn default_http_requests_path_ends_with_http_requests_toml() {
+        let path = default_http_requests_path().unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "http_requests.toml");
+    }
+
+    #[test]
+    fn loading_a_missing_http_requests_file_returns_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let requests = HttpRequestStore::at(dir.path().join("nope.toml"))
+            .load()
+            .unwrap();
+
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn saving_an_http_request_then_loading_round_trips_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HttpRequestStore::at(dir.path().join("http_requests.toml"));
+        let request = SavedHttpRequest {
+            name: "list users".to_string(),
+            method: "GET".to_string(),
+            url: "https://api.example.com/users".to_string(),
+            headers: "Accept: application/json".to_string(),
+            body: String::new(),
+        };
+
+        store.save(std::slice::from_ref(&request)).unwrap();
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded, vec![request]);
+    }
+
+    fn test_http_requests(dir: &std::path::Path) -> HttpRequests {
+        HttpRequests {
+            store: HttpRequestStore::at(dir.join("http_requests.toml")),
+            list: std::sync::RwLock::new(Vec::new()),
+        }
+    }
+
+    fn sample_request(name: &str) -> SavedHttpRequest {
+        SavedHttpRequest {
+            name: name.to_string(),
+            method: "GET".to_string(),
+            url: "https://api.example.com".to_string(),
+            headers: String::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn saving_under_an_existing_name_overwrites_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = test_http_requests(dir.path());
+        requests.save(sample_request("q"));
+
+        let mut updated = sample_request("q");
+        updated.method = "POST".to_string();
+        requests.save(updated);
+
+        let all = requests.all();
+        assert_eq!(
+            all.len(),
+            1,
+            "saving under a used name must update, not duplicate"
+        );
+        assert_eq!(all[0].method, "POST");
+    }
+
+    #[test]
+    fn deleting_removes_the_matching_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = test_http_requests(dir.path());
+        requests.save(sample_request("a"));
+        requests.save(sample_request("b"));
+
+        requests.delete("a");
+
+        let names: Vec<String> = requests.all().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["b".to_string()]);
     }
 }

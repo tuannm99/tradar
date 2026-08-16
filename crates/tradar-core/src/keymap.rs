@@ -86,6 +86,23 @@ pub enum Context {
     /// (`FilePromptComponent`, the connection form) where a letter must
     /// stay typable, never a command.
     Snippets,
+    /// The HTTP screen's own bindings (send, cycle method, save/open
+    /// request) -- checked regardless of which field currently has focus.
+    /// Deliberately holds **only** non-printable-key bindings (`tab`,
+    /// `ctrl-enter`, `ctrl-k`, ...): every field on this screen (URL,
+    /// headers, body) is always in "insert mode", so a letter bound here
+    /// would become untypable the moment that field has focus -- see
+    /// "Thiết kế UI: HTTP, gRPC, Socket" in docs/architecture.md.
+    Http,
+    /// Only while the HTTP screen's response pane has focus -- `y` to
+    /// yank the body. Split out from `Http` for the same reason `Results`
+    /// is split from `QueryScreen`: a letter-key binding here would
+    /// shadow typing in the request fields if it lived in `Http` instead.
+    HttpResponse,
+    /// The saved-HTTP-request library overlay (`Ctrl+L`) -- same shape and
+    /// reasoning as `Snippets`, separate because it lists a different kind
+    /// of saved thing.
+    HttpRequests,
 }
 
 impl Context {
@@ -104,6 +121,9 @@ impl Context {
             Self::Prompt => "prompt",
             Self::Completion => "completion",
             Self::Snippets => "snippets",
+            Self::Http => "http",
+            Self::HttpResponse => "http-response",
+            Self::HttpRequests => "http-requests",
         }
     }
 
@@ -122,12 +142,15 @@ impl Context {
             "prompt" => Self::Prompt,
             "completion" => Self::Completion,
             "snippets" => Self::Snippets,
+            "http" => Self::Http,
+            "http-response" => Self::HttpResponse,
+            "http-requests" => Self::HttpRequests,
             _ => return None,
         })
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 13] {
+    pub fn all() -> [Self; 16] {
         [
             Self::Global,
             Self::Picker,
@@ -138,6 +161,9 @@ impl Context {
             Self::Browse,
             Self::Rabbit,
             Self::Kafka,
+            Self::Http,
+            Self::HttpResponse,
+            Self::HttpRequests,
             Self::List,
             Self::Prompt,
             Self::Completion,
@@ -252,6 +278,20 @@ pub enum Command {
     KafkaPauseFollow,
     /// Open the publish compose panel for the selected topic.
     KafkaPublish,
+    /// Send the current request.
+    HttpSend,
+    /// Cycle the method field (GET/POST/PUT/...) forward/backward, while
+    /// the method field has focus.
+    HttpNextMethod,
+    HttpPrevMethod,
+    /// Save the current request into the named request library, prompting
+    /// for a name -- same idea as `SaveSnippet`, separate command because it
+    /// saves a different shape (method/url/headers/body, not one string).
+    HttpSaveRequest,
+    /// Open the saved-request library overlay to load one.
+    HttpOpenRequests,
+    /// Delete the highlighted request, in the library overlay.
+    HttpDeleteRequest,
     /// Insert a Create/Read/Update/Delete skeleton for the highlighted
     /// navigator entry into its tab's editor -- see
     /// `Component::crud_snippet`.
@@ -340,6 +380,12 @@ impl Command {
             Self::KafkaTailEarliest => "kafka-tail-earliest",
             Self::KafkaPauseFollow => "kafka-pause-follow",
             Self::KafkaPublish => "kafka-publish",
+            Self::HttpSend => "http-send",
+            Self::HttpNextMethod => "http-next-method",
+            Self::HttpPrevMethod => "http-prev-method",
+            Self::HttpSaveRequest => "http-save-request",
+            Self::HttpOpenRequests => "http-open-requests",
+            Self::HttpDeleteRequest => "http-delete-request",
             Self::CrudCreate => "crud-create",
             Self::CrudRead => "crud-read",
             Self::CrudUpdate => "crud-update",
@@ -367,7 +413,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 72] = [
+    const ALL: [Self; 78] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -420,6 +466,12 @@ impl Command {
         Self::KafkaTailEarliest,
         Self::KafkaPauseFollow,
         Self::KafkaPublish,
+        Self::HttpSend,
+        Self::HttpNextMethod,
+        Self::HttpPrevMethod,
+        Self::HttpSaveRequest,
+        Self::HttpOpenRequests,
+        Self::HttpDeleteRequest,
         Self::CrudCreate,
         Self::CrudRead,
         Self::CrudUpdate,
@@ -497,6 +549,12 @@ impl Command {
             Self::KafkaTailEarliest => "Tail the selected topic from the earliest offset",
             Self::KafkaPauseFollow => "Pause/resume following new messages",
             Self::KafkaPublish => "Publish a message to the selected topic",
+            Self::HttpSend => "Send the request",
+            Self::HttpNextMethod => "Next HTTP method",
+            Self::HttpPrevMethod => "Previous HTTP method",
+            Self::HttpSaveRequest => "Save the request into the request library",
+            Self::HttpOpenRequests => "Open the saved-request library",
+            Self::HttpDeleteRequest => "Delete the selected saved request",
             Self::CrudCreate => "Insert a Create snippet for the selected table",
             Self::CrudRead => "Insert a Read snippet for the selected table",
             Self::CrudUpdate => "Insert an Update snippet for the selected table",
@@ -695,6 +753,33 @@ impl Default for Keymap {
                 ("p", Command::KafkaPublish),
                 ("esc", Command::Back),
                 ("?", Command::Help),
+            ]),
+        );
+        bindings.insert(
+            Context::Http,
+            parse_defaults(&[
+                ("tab", Command::NextField),
+                ("backtab", Command::PrevField),
+                ("ctrl-enter", Command::HttpSend),
+                ("f5", Command::HttpSend),
+                ("ctrl-left", Command::HttpPrevMethod),
+                ("ctrl-right", Command::HttpNextMethod),
+                ("ctrl-k", Command::HttpSaveRequest),
+                ("ctrl-l", Command::HttpOpenRequests),
+                ("esc", Command::Back),
+                ("?", Command::Help),
+            ]),
+        );
+        bindings.insert(
+            Context::HttpResponse,
+            parse_defaults(&[("y", Command::Yank)]),
+        );
+        bindings.insert(
+            Context::HttpRequests,
+            parse_defaults(&[
+                ("enter", Command::Confirm),
+                ("esc", Command::Cancel),
+                ("d", Command::HttpDeleteRequest),
             ]),
         );
         bindings.insert(

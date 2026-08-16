@@ -6,6 +6,8 @@
 //! `tradar-query-workbench` (editor, results, sidebar, overlays) draw
 //! these, and neither may depend on the other.
 
+use std::io::Write;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -174,6 +176,22 @@ pub fn draw_status_bar(frame: &mut Frame, area: Rect, hints: &[Hint], right: Opt
     }
 }
 
+/// Copies `text` to the system clipboard via an OSC52 escape sequence,
+/// which the terminal emulator itself intercepts -- no clipboard crate
+/// needed, and it works through SSH/tmux as long as the terminal supports
+/// OSC52 (most modern ones do: iTerm2, kitty, Alacritty, WezTerm, Windows
+/// Terminal, ...). Lives here (not `tradar-query-workbench`, its original
+/// home) because bespoke non-query screens (HTTP, RabbitMQ...) want to yank
+/// too, and connector crates may not depend on `tradar-query-workbench`.
+pub fn yank_to_clipboard(text: &str) {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let sequence = format!("\x1b]52;c;{encoded}\x07");
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(sequence.as_bytes());
+    let _ = stdout.flush();
+}
+
 /// A single-line text field: the editing half of any prompt or form
 /// (`Ctrl+S`'s file path, the connection form's fields). Owns only the
 /// text and cursor -- confirming, cancelling and drawing a frame around it
@@ -276,6 +294,181 @@ impl TextInput {
             ));
         }
         spans
+    }
+}
+
+/// A plain multi-line text box: headers/body fields for the HTTP screen's
+/// Postman-style request builder, request/response bodies for gRPC. Not
+/// vim-modal (`QueryEditorComponent` is, but that's a SQL-specific editor
+/// living in `tradar-query-workbench`, which connector crates may not
+/// depend on -- see "Thiết kế UI: HTTP, gRPC, Socket" in
+/// docs/architecture.md) -- always-insert like `TextInput`, just with
+/// newlines, since a header/JSON-body box has no vim power-user audience
+/// to justify modal editing.
+#[derive(Debug, Default, Clone)]
+pub struct TextArea {
+    lines: Vec<Vec<char>>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
+impl TextArea {
+    pub fn new(initial: &str) -> Self {
+        let mut lines: Vec<Vec<char>> = initial.lines().map(|l| l.chars().collect()).collect();
+        if lines.is_empty() {
+            lines.push(Vec::new());
+        }
+        let cursor_row = lines.len() - 1;
+        let cursor_col = lines[cursor_row].len();
+        Self {
+            lines,
+            cursor_row,
+            cursor_col,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|l| l.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn set_text(&mut self, text: &str) {
+        *self = Self::new(text);
+    }
+
+    pub fn cursor_row(&self) -> usize {
+        self.cursor_row
+    }
+
+    /// Handles one key of text editing. Same "did this field consume the
+    /// key" contract as `TextInput::handle_key_event`.
+    pub fn handle_key_event(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match code {
+            KeyCode::Char(c)
+                if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.lines[self.cursor_row].insert(self.cursor_col, c);
+                self.cursor_col += 1;
+                true
+            }
+            KeyCode::Enter => {
+                let rest = self.lines[self.cursor_row].split_off(self.cursor_col);
+                self.lines.insert(self.cursor_row + 1, rest);
+                self.cursor_row += 1;
+                self.cursor_col = 0;
+                true
+            }
+            KeyCode::Backspace => {
+                if self.cursor_col > 0 {
+                    self.cursor_col -= 1;
+                    self.lines[self.cursor_row].remove(self.cursor_col);
+                } else if self.cursor_row > 0 {
+                    let current = self.lines.remove(self.cursor_row);
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.lines[self.cursor_row].len();
+                    self.lines[self.cursor_row].extend(current);
+                }
+                true
+            }
+            KeyCode::Delete => {
+                if self.cursor_col < self.lines[self.cursor_row].len() {
+                    self.lines[self.cursor_row].remove(self.cursor_col);
+                } else if self.cursor_row + 1 < self.lines.len() {
+                    let next = self.lines.remove(self.cursor_row + 1);
+                    self.lines[self.cursor_row].extend(next);
+                }
+                true
+            }
+            KeyCode::Left => {
+                if self.cursor_col > 0 {
+                    self.cursor_col -= 1;
+                } else if self.cursor_row > 0 {
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.lines[self.cursor_row].len();
+                }
+                true
+            }
+            KeyCode::Right => {
+                if self.cursor_col < self.lines[self.cursor_row].len() {
+                    self.cursor_col += 1;
+                } else if self.cursor_row + 1 < self.lines.len() {
+                    self.cursor_row += 1;
+                    self.cursor_col = 0;
+                }
+                true
+            }
+            KeyCode::Up => {
+                if self.cursor_row > 0 {
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.cursor_col.min(self.lines[self.cursor_row].len());
+                }
+                true
+            }
+            KeyCode::Down => {
+                if self.cursor_row + 1 < self.lines.len() {
+                    self.cursor_row += 1;
+                    self.cursor_col = self.cursor_col.min(self.lines[self.cursor_row].len());
+                }
+                true
+            }
+            KeyCode::Home => {
+                self.cursor_col = 0;
+                true
+            }
+            KeyCode::End => {
+                self.cursor_col = self.lines[self.cursor_row].len();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Scroll offset that keeps the cursor row on screen for a viewport
+    /// `visible_height` rows tall.
+    pub fn scroll_offset(&self, visible_height: usize) -> u16 {
+        if visible_height == 0 || self.cursor_row < visible_height {
+            return 0;
+        }
+        (self.cursor_row - visible_height + 1) as u16
+    }
+
+    /// The field as styled lines. `focused` draws a block cursor, same
+    /// reasoning as `TextInput::spans`.
+    pub fn styled_lines(&self, focused: bool) -> Vec<Line<'static>> {
+        let theme = theme();
+        self.lines
+            .iter()
+            .enumerate()
+            .map(|(row, line)| {
+                let mut spans: Vec<Span<'static>> = line
+                    .iter()
+                    .enumerate()
+                    .map(|(col, c)| {
+                        let style = Style::default().fg(theme.text);
+                        if focused && row == self.cursor_row && col == self.cursor_col {
+                            Span::styled(c.to_string(), style.add_modifier(Modifier::REVERSED))
+                        } else {
+                            Span::styled(c.to_string(), style)
+                        }
+                    })
+                    .collect();
+                if focused && row == self.cursor_row && self.cursor_col >= line.len() {
+                    spans.push(Span::styled(
+                        " ",
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ));
+                }
+                Line::from(spans)
+            })
+            .collect()
     }
 }
 
@@ -399,6 +592,9 @@ fn context_title(context: Context) -> &'static str {
         Context::Browse => "Redis key browser (when focused)",
         Context::Rabbit => "RabbitMQ screen",
         Context::Kafka => "Kafka screen",
+        Context::Http => "HTTP screen",
+        Context::HttpResponse => "HTTP screen — response pane (when focused)",
+        Context::HttpRequests => "Saved-request library (while open)",
         Context::List => "Lists (connections, schema, results, history)",
         Context::Prompt => "Prompts and overlays",
         Context::Completion => "Autocomplete (while suggestions show)",
@@ -546,5 +742,111 @@ mod tests {
 
         let closed_on_esc = help.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
         assert!(closed_on_esc);
+    }
+
+    #[test]
+    fn text_area_starts_with_the_cursor_after_the_last_character() {
+        let area = TextArea::new("GET /foo\nHost: x");
+
+        assert_eq!(area.text(), "GET /foo\nHost: x");
+        assert_eq!(area.cursor_row(), 1);
+    }
+
+    #[test]
+    fn typing_inserts_at_the_cursor_and_enter_splits_the_line() {
+        let mut area = TextArea::new("");
+        for c in "hello".chars() {
+            area.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        area.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        for c in "world".chars() {
+            area.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(area.text(), "hello\nworld");
+    }
+
+    #[test]
+    fn backspace_at_the_start_of_a_line_merges_it_into_the_previous_one() {
+        let mut area = TextArea::new("ab\ncd");
+        area.cursor_row = 1;
+        area.cursor_col = 0;
+
+        area.handle_key_event(KeyCode::Backspace, KeyModifiers::NONE);
+
+        assert_eq!(area.text(), "abcd");
+        assert_eq!(area.cursor_row, 0);
+        assert_eq!(area.cursor_col, 2);
+    }
+
+    #[test]
+    fn delete_at_the_end_of_a_line_merges_the_next_one_up() {
+        let mut area = TextArea::new("ab\ncd");
+        area.cursor_row = 0;
+        area.cursor_col = 2;
+
+        area.handle_key_event(KeyCode::Delete, KeyModifiers::NONE);
+
+        assert_eq!(area.text(), "abcd");
+    }
+
+    #[test]
+    fn up_and_down_clamp_the_column_to_the_shorter_line() {
+        let mut area = TextArea::new("abcdef\nxy");
+        area.cursor_row = 0;
+        area.cursor_col = 6;
+
+        area.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(area.cursor_row, 1);
+        assert_eq!(area.cursor_col, 2, "clamped to the shorter line's length");
+
+        area.handle_key_event(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(area.cursor_row, 0);
+        assert_eq!(
+            area.cursor_col, 2,
+            "column position is preserved, not reset"
+        );
+    }
+
+    #[test]
+    fn left_and_right_cross_line_boundaries() {
+        let mut area = TextArea::new("ab\ncd");
+        area.cursor_row = 1;
+        area.cursor_col = 0;
+
+        area.handle_key_event(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!((area.cursor_row, area.cursor_col), (0, 2));
+
+        area.handle_key_event(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!((area.cursor_row, area.cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn set_text_replaces_content_and_resets_the_cursor() {
+        let mut area = TextArea::new("old content");
+        area.set_text("new\ntext");
+
+        assert_eq!(area.text(), "new\ntext");
+        assert_eq!(area.cursor_row(), 1);
+    }
+
+    #[test]
+    fn scroll_offset_only_moves_once_the_cursor_passes_the_viewport() {
+        let mut area = TextArea::new("");
+        for _ in 0..10 {
+            area.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        }
+        // 11 lines total (rows 0..=10), cursor on row 10.
+
+        assert_eq!(
+            area.scroll_offset(20),
+            0,
+            "fits entirely in a tall viewport"
+        );
+        assert_eq!(
+            area.scroll_offset(5),
+            6,
+            "scrolls just enough to keep the cursor row visible"
+        );
     }
 }

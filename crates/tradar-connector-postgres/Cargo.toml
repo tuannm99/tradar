@@ -1,0 +1,19 @@
+[package]
+name = "tradar-connector-postgres"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tradar-core = { path = "../tradar-core" }
+tradar-connector-spi = { path = "../tradar-connector-spi" }
+tradar-query-workbench = { path = "../tradar-query-workbench" }
+
+async-trait = "0.1"
+anyhow = "1"
+futures-util = "0.3"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "json", "chrono"] }
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+testcontainers-modules = { version = "0.11", features = ["postgres"] }

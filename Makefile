@@ -2,8 +2,8 @@ DOCKER_SERVICES := postgres redis mongo elasticsearch5 elasticsearch7 elasticsea
 
 .PHONY: help build run fmt fmt-check clippy check \
 	test test-unit test-docker \
-	test-core test-connector-api test-workbench test-app \
-	test-sqlite test-postgres test-redis test-mongo test-elasticsearch \
+	test-core test-connector-spi test-workbench test-app \
+	test-sqlite test-postgres test-redis test-mongo test-elasticsearch test-http \
 	up down ps
 
 CARGO := cargo
@@ -35,23 +35,24 @@ check: fmt-check clippy test-unit ## Fast pre-commit gate: fmt + clippy + tests 
 test: ## Run every test in the workspace (needs Docker for postgres/redis/mongo/elasticsearch)
 	$(CARGO) test --workspace
 
-test-unit: ## Tests that never touch Docker: core, connector-api, query-workbench, sqlite, app
+test-unit: ## Tests that never touch Docker: core, connector-spi, query-workbench, sqlite, app
 	$(CARGO) test --workspace \
-		--exclude tradar-postgres \
-		--exclude tradar-redis \
-		--exclude tradar-mongo \
-		--exclude tradar-elasticsearch \
-		--exclude tradar-cassandra \
-		--exclude tradar-rabbitmq \
-		--exclude tradar-kafka
+		--exclude tradar-connector-postgres \
+		--exclude tradar-connector-redis \
+		--exclude tradar-connector-mongo \
+		--exclude tradar-connector-elasticsearch \
+		--exclude tradar-connector-cassandra \
+		--exclude tradar-connector-rabbitmq \
+		--exclude tradar-connector-kafka \
+		--exclude tradar-connector-http
 
-test-docker: test-postgres test-redis test-mongo test-elasticsearch test-cassandra test-rabbitmq test-kafka ## Every connector whose tests need a Docker daemon (testcontainers)
+test-docker: test-postgres test-redis test-mongo test-elasticsearch test-cassandra test-rabbitmq test-kafka test-http ## Every connector whose tests need a Docker daemon (testcontainers)
 
 test-core: ## tradar-core only (keymap, storage, theme, config, ui, vim_list)
 	$(CARGO) test -p tradar-core --lib
 
-test-connector-api: ## tradar-connector-api only (CONNECT_TIMEOUT etc.)
-	$(CARGO) test -p tradar-connector-api --lib
+test-connector-spi: ## tradar-connector-spi only (CONNECT_TIMEOUT etc.)
+	$(CARGO) test -p tradar-connector-spi --lib
 
 test-workbench: ## tradar-query-workbench only (query editor, results, engine -- no Docker)
 	$(CARGO) test -p tradar-query-workbench --lib
@@ -59,29 +60,32 @@ test-workbench: ## tradar-query-workbench only (query editor, results, engine --
 test-app: ## tradar-app only (components, RootComponent -- no Docker)
 	$(CARGO) test -p tradar-app --lib
 
-test-sqlite: ## tradar-sqlite only (real temp-file DB, no Docker)
-	$(CARGO) test -p tradar-sqlite --lib
+test-sqlite: ## tradar-connector-sqlite only (real temp-file DB, no Docker)
+	$(CARGO) test -p tradar-connector-sqlite --lib
 
-test-postgres: ## tradar-postgres only -- needs Docker (testcontainers)
-	$(CARGO) test -p tradar-postgres --lib
+test-postgres: ## tradar-connector-postgres only -- needs Docker (testcontainers)
+	$(CARGO) test -p tradar-connector-postgres --lib
 
-test-redis: ## tradar-redis only -- needs Docker (testcontainers)
-	$(CARGO) test -p tradar-redis --lib
+test-redis: ## tradar-connector-redis only -- needs Docker (testcontainers)
+	$(CARGO) test -p tradar-connector-redis --lib
 
-test-mongo: ## tradar-mongo only -- needs Docker (testcontainers)
-	$(CARGO) test -p tradar-mongo --lib
+test-mongo: ## tradar-connector-mongo only -- needs Docker (testcontainers)
+	$(CARGO) test -p tradar-connector-mongo --lib
 
-test-elasticsearch: ## tradar-elasticsearch only -- needs Docker (testcontainers)
-	$(CARGO) test -p tradar-elasticsearch --lib
+test-elasticsearch: ## tradar-connector-elasticsearch only -- needs Docker (testcontainers)
+	$(CARGO) test -p tradar-connector-elasticsearch --lib
 
-test-cassandra: ## tradar-cassandra only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
-	$(CARGO) test -p tradar-cassandra --lib
+test-cassandra: ## tradar-connector-cassandra only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
+	$(CARGO) test -p tradar-connector-cassandra --lib
 
-test-rabbitmq: ## tradar-rabbitmq only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
-	$(CARGO) test -p tradar-rabbitmq --lib
+test-rabbitmq: ## tradar-connector-rabbitmq only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
+	$(CARGO) test -p tradar-connector-rabbitmq --lib
 
-test-kafka: ## tradar-kafka only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
-	$(CARGO) test -p tradar-kafka --lib
+test-kafka: ## tradar-connector-kafka only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
+	$(CARGO) test -p tradar-connector-kafka --lib
+
+test-http: ## tradar-connector-http only -- needs Docker (testcontainers, GenericImage; no long-lived compose service since it targets arbitrary URLs, not one fixed backend)
+	$(CARGO) test -p tradar-connector-http --lib
 
 # --- docker-compose (docker-compose.yml) ---
 # These are long-lived dev instances for manually running `tradar` against,

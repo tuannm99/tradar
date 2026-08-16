@@ -4718,21 +4718,22 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tradar-cassandra",
- "tradar-connector-api",
+ "tradar-connector-cassandra",
+ "tradar-connector-elasticsearch",
+ "tradar-connector-http",
+ "tradar-connector-kafka",
+ "tradar-connector-mongo",
+ "tradar-connector-postgres",
+ "tradar-connector-rabbitmq",
+ "tradar-connector-redis",
+ "tradar-connector-spi",
+ "tradar-connector-sqlite",
  "tradar-core",
- "tradar-elasticsearch",
- "tradar-kafka",
- "tradar-mongo",
- "tradar-postgres",
  "tradar-query-workbench",
- "tradar-rabbitmq",
- "tradar-redis",
- "tradar-sqlite",
 ]
 
 [[package]]
-name = "tradar-cassandra"
+name = "tradar-connector-cassandra"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4740,36 +4741,13 @@ dependencies = [
  "scylla",
  "testcontainers",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
  "tradar-query-workbench",
 ]
 
 [[package]]
-name = "tradar-connector-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "tokio",
- "tradar-core",
-]
-
-[[package]]
-name = "tradar-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "directories",
- "ratatui",
- "serde",
- "tempfile",
- "toml",
-]
-
-[[package]]
-name = "tradar-elasticsearch"
+name = "tradar-connector-elasticsearch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4778,13 +4756,29 @@ dependencies = [
  "serde_json",
  "testcontainers-modules",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
  "tradar-query-workbench",
 ]
 
 [[package]]
-name = "tradar-kafka"
+name = "tradar-connector-http"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crossterm",
+ "ratatui",
+ "reqwest",
+ "serde_json",
+ "testcontainers",
+ "tokio",
+ "tradar-connector-spi",
+ "tradar-core",
+]
+
+[[package]]
+name = "tradar-connector-kafka"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4795,12 +4789,12 @@ dependencies = [
  "rdkafka",
  "testcontainers",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
 ]
 
 [[package]]
-name = "tradar-mongo"
+name = "tradar-connector-mongo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4811,13 +4805,13 @@ dependencies = [
  "serde_json",
  "testcontainers-modules",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
  "tradar-query-workbench",
 ]
 
 [[package]]
-name = "tradar-postgres"
+name = "tradar-connector-postgres"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4826,31 +4820,13 @@ dependencies = [
  "sqlx",
  "testcontainers-modules",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
  "tradar-query-workbench",
 ]
 
 [[package]]
-name = "tradar-query-workbench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "crossterm",
- "ratatui",
- "serde_json",
- "tempfile",
- "tokio",
- "tradar-connector-api",
- "tradar-core",
- "tree-sitter-highlight",
- "tree-sitter-sequel",
-]
-
-[[package]]
-name = "tradar-rabbitmq"
+name = "tradar-connector-rabbitmq"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4862,12 +4838,12 @@ dependencies = [
  "serde_json",
  "testcontainers",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
 ]
 
 [[package]]
-name = "tradar-redis"
+name = "tradar-connector-redis"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4876,13 +4852,23 @@ dependencies = [
  "serde_json",
  "testcontainers-modules",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
  "tradar-query-workbench",
 ]
 
 [[package]]
-name = "tradar-sqlite"
+name = "tradar-connector-spi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
+ "tradar-core",
+]
+
+[[package]]
+name = "tradar-connector-sqlite"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4891,9 +4877,40 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
- "tradar-connector-api",
+ "tradar-connector-spi",
  "tradar-core",
  "tradar-query-workbench",
+]
+
+[[package]]
+name = "tradar-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "crossterm",
+ "directories",
+ "ratatui",
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "tradar-query-workbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crossterm",
+ "ratatui",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tradar-connector-spi",
+ "tradar-core",
+ "tree-sitter-highlight",
+ "tree-sitter-sequel",
 ]
 
 [[package]]

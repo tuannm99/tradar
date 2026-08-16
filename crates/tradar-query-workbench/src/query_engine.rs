@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use tradar_connector_api::Session;
+use tradar_connector_spi::Session;
 use tradar_core::action::{Action, Component};
 use tradar_core::storage::SavedConnection;
 

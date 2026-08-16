@@ -17,7 +17,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use tradar_app::components::RootComponent;
-use tradar_connector_api::{Connector, Session};
+use tradar_connector_spi::{Connector, Session};
 use tradar_core::action::{Action, Component};
 use tradar_core::config;
 use tradar_core::storage;
@@ -32,14 +32,15 @@ use tradar_core::storage::{
 /// docs/architecture.md).
 fn registry() -> HashMap<String, Box<dyn Connector>> {
     let connectors: Vec<Box<dyn Connector>> = vec![
-        tradar_postgres::connector(),
-        tradar_sqlite::connector(),
-        tradar_elasticsearch::connector(),
-        tradar_redis::connector(),
-        tradar_mongo::connector(),
-        tradar_cassandra::connector(),
-        tradar_rabbitmq::connector(),
-        tradar_kafka::connector(),
+        tradar_connector_postgres::connector(),
+        tradar_connector_sqlite::connector(),
+        tradar_connector_elasticsearch::connector(),
+        tradar_connector_redis::connector(),
+        tradar_connector_mongo::connector(),
+        tradar_connector_cassandra::connector(),
+        tradar_connector_rabbitmq::connector(),
+        tradar_connector_kafka::connector(),
+        tradar_connector_http::connector(),
     ];
     connectors
         .into_iter()
@@ -94,6 +95,12 @@ async fn main() -> anyhow::Result<()> {
     // save into, not a reason to fail startup.
     if let Ok(snippets_path) = storage::default_snippets_path() {
         storage::init_snippets(storage::SnippetStore::at(snippets_path));
+    }
+
+    // The saved-HTTP-request library (`Ctrl+K`/`Ctrl+L` on the HTTP
+    // screen). Same fallback as above.
+    if let Ok(http_requests_path) = storage::default_http_requests_path() {
+        storage::init_http_requests(storage::HttpRequestStore::at(http_requests_path));
     }
 
     let store = ConnectionStore::at(default_connections_path()?);
