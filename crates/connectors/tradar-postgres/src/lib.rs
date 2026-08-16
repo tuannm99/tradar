@@ -314,6 +314,28 @@ impl QueryDriver for PostgresDriver {
     }
 }
 
+/// Renders one cell as text for the results grid. `sqlx::query()` (the
+/// dynamic, non-macro API this driver uses throughout, since it has to run
+/// arbitrary user-typed SQL) always fetches results over the *binary*
+/// wire protocol -- confirmed in sqlx-postgres's executor, which only
+/// drops to the text protocol for a statement with a `None` argument list,
+/// and `sqlx::query()` always starts one at `Some(..)` even with nothing
+/// bound. That means `String`'s `Decode` impl -- which only declares
+/// itself compatible with genuinely text-shaped columns (`TEXT`,
+/// `VARCHAR`, `BPCHAR`, `NAME`, `UNKNOWN`, `citext`) -- silently fails
+/// `try_get` for every other type, including extremely common ones like
+/// `UUID`/`JSON(B)`/timestamps, and the old fallback here swallowed that
+/// `Err` into a plain `"NULL"` -- indistinguishable from an actual null
+/// value, and wrong for every row. Each of the types below needs its own
+/// typed decode (there is no single decoder that works for arbitrary
+/// binary-format columns) before it can be turned into text.
+///
+/// **Known gap**: types not listed here (arrays, enums, `inet`/`macaddr`,
+/// `money`, `interval`, `bytea`, ranges, composite/PostGIS types, ...)
+/// still fall through to the `String` attempt and still show as `NULL` --
+/// covers what a typical schema actually uses, not a claim of
+/// completeness. Extend this match arm by arm as a real gap turns up,
+/// same as the rest of this list was built.
 fn stringify_column(row: &PgRow, index: usize) -> String {
     let raw = row.try_get_raw(index).expect("valid column index");
     if raw.is_null() {
@@ -326,6 +348,24 @@ fn stringify_column(row: &PgRow, index: usize) -> String {
         "FLOAT4" => row.try_get::<f32, _>(index).map(|v| v.to_string()),
         "FLOAT8" | "NUMERIC" => row.try_get::<f64, _>(index).map(|v| v.to_string()),
         "BOOL" => row.try_get::<bool, _>(index).map(|v| v.to_string()),
+        "UUID" => row
+            .try_get::<sqlx::types::Uuid, _>(index)
+            .map(|v| v.to_string()),
+        "JSON" | "JSONB" => row
+            .try_get::<sqlx::types::JsonValue, _>(index)
+            .map(|v| v.to_string()),
+        "TIMESTAMP" => row
+            .try_get::<sqlx::types::chrono::NaiveDateTime, _>(index)
+            .map(|v| v.to_string()),
+        "TIMESTAMPTZ" => row
+            .try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(index)
+            .map(|v| v.to_string()),
+        "DATE" => row
+            .try_get::<sqlx::types::chrono::NaiveDate, _>(index)
+            .map(|v| v.to_string()),
+        "TIME" => row
+            .try_get::<sqlx::types::chrono::NaiveTime, _>(index)
+            .map(|v| v.to_string()),
         _ => row.try_get::<String, _>(index),
     }
     .unwrap_or_else(|_| "NULL".to_string())
@@ -447,6 +487,59 @@ mod tests {
                 rows: vec![vec!["1".to_string(), "Ada".to_string()]],
                 truncated: false,
             }
+        );
+    }
+
+    /// Regression test: `stringify_column`'s old fallback (a plain
+    /// `String` decode for anything it didn't special-case) fails outright
+    /// for these types under sqlx's binary wire protocol -- and used to
+    /// get swallowed into a plain "NULL", indistinguishable from an
+    /// actual null and wrong for every row that had one.
+    #[tokio::test]
+    async fn uuid_jsonb_and_timestamp_columns_decode_to_real_text_not_null() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        sqlx::query(
+            "CREATE TABLE events (
+                id UUID NOT NULL DEFAULT '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+                data JSONB NOT NULL,
+                at TIMESTAMP NOT NULL,
+                at_tz TIMESTAMPTZ NOT NULL,
+                on_day DATE NOT NULL,
+                nothing UUID
+            )",
+        )
+        .execute(driver.pool.as_ref().unwrap())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO events (data, at, at_tz, on_day, nothing) VALUES
+             ('{\"code\": \"ok\"}', '2026-08-04 00:46:57', '2026-08-04 00:46:57+00', '2026-08-04', NULL)",
+        )
+        .execute(driver.pool.as_ref().unwrap())
+        .await
+        .unwrap();
+
+        let result = driver
+            .execute("SELECT id, data, at, at_tz, on_day, nothing FROM events")
+            .await
+            .unwrap();
+
+        let QueryResult::Table { rows, .. } = result else {
+            panic!("expected a Table result");
+        };
+        let row = &rows[0];
+        assert_eq!(row[0], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
+        assert_eq!(row[1], "{\"code\":\"ok\"}");
+        assert_eq!(row[2], "2026-08-04 00:46:57");
+        assert!(row[3].starts_with("2026-08-04 00:46:57"), "was: {}", row[3]);
+        assert_eq!(row[4], "2026-08-04");
+        assert_eq!(
+            row[5], "NULL",
+            "an actual null must still say NULL, distinct from a decode failure"
         );
     }
 
