@@ -561,7 +561,7 @@ impl Command {
             Self::NextColumn => "Move to the next column",
             Self::EditCell => "Edit the selected cell",
             Self::DeleteRow => "Delete the selected row",
-            Self::Search => "Filter the results",
+            Self::Search => "Filter the list",
             Self::TogglePreview => "Show/hide the selected cell's full value",
             Self::RetryQuery => "Retry the failed query",
             Self::EditQuery => "Fix the failed query in the editor",
@@ -740,6 +740,7 @@ impl Default for Keymap {
                 ("a", Command::NewConnection),
                 ("e", Command::EditConnection),
                 ("d", Command::DeleteConnection),
+                ("/", Command::Search),
                 ("?", Command::Help),
             ]),
         );

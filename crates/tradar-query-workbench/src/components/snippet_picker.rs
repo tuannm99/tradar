@@ -8,7 +8,7 @@
 //! `Insert`/`Cancelled` do, since there's nothing for `QueryScreenComponent`
 //! to react to beyond "the list changed".
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -18,7 +18,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::SavedSnippet;
 use tradar_core::theme::theme;
-use tradar_core::ui::{self, TextInput};
+use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +41,14 @@ pub struct SnippetPickerComponent {
     /// current name. Takes every key until `Enter`/`Esc`, same as any
     /// other inline text field in this app.
     renaming: Option<TextInput>,
+    list_state: ListState,
+    list_area: Rect,
+    double_click: DoubleClickTracker,
+    /// Right-click menu: Insert/Rename/Delete on the row that was clicked.
+    /// See `ConnectionPickerComponent::context_menu`'s doc comment for why
+    /// confirming a menu item runs through the exact same `dispatch_command`
+    /// a keyboard shortcut would.
+    context_menu: Option<ui::ContextMenu>,
 }
 
 impl SnippetPickerComponent {
@@ -60,6 +68,10 @@ impl SnippetPickerComponent {
             visible_height: 0,
             confirming_delete: false,
             renaming: None,
+            list_state: ListState::default(),
+            list_area: Rect::ZERO,
+            double_click: DoubleClickTracker::new(),
+            context_menu: None,
         }
     }
 
@@ -81,6 +93,18 @@ impl SnippetPickerComponent {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<SnippetOutcome> {
+        if let Some(menu) = self.context_menu.as_mut() {
+            match menu.handle_key_event(code) {
+                ui::ContextMenuOutcome::Open => {}
+                ui::ContextMenuOutcome::Closed => self.context_menu = None,
+                ui::ContextMenuOutcome::Confirmed(command) => {
+                    self.context_menu = None;
+                    return self.dispatch_command(command);
+                }
+            }
+            return None;
+        }
+
         if let Some(input) = self.renaming.as_mut() {
             match code {
                 KeyCode::Esc => self.renaming = None,
@@ -136,6 +160,14 @@ impl SnippetPickerComponent {
             return None;
         }
 
+        self.dispatch_command(command)
+    }
+
+    /// Runs whatever `command` means here -- shared by keyboard dispatch
+    /// (`handle_key_event`) and a right-click context menu's confirmed
+    /// choice (`handle_mouse_event`), so a menu item runs through the exact
+    /// same code a keyboard shortcut for it would.
+    fn dispatch_command(&mut self, command: Command) -> Option<SnippetOutcome> {
         match command {
             Command::Cancel => Some(SnippetOutcome::Cancelled),
             Command::Confirm => self
@@ -151,6 +183,80 @@ impl SnippetPickerComponent {
                 if let Some(entry) = self.selected_entry() {
                     self.renaming = Some(TextInput::new(&entry.name));
                 }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// A left click selects the row it landed on, or confirms a menu item
+    /// if the right-click menu is open; a second left click on the same row
+    /// within the double-click window inserts it, same as `Enter`. Right
+    /// click opens the menu (Insert/Rename/Delete) on the row it landed on.
+    pub fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<SnippetOutcome> {
+        if let Some(menu) = self.context_menu.take() {
+            if let MouseEventKind::Down(MouseButton::Left) = event.kind
+                && let Some(command) = menu.click(self.list_area, event.column, event.row)
+            {
+                return self.dispatch_command(command);
+            }
+            return None;
+        }
+        if self.renaming.is_some() || self.confirming_delete {
+            return None;
+        }
+        let inner = Rect {
+            x: self.list_area.x.saturating_add(1),
+            y: self.list_area.y.saturating_add(1),
+            width: self.list_area.width.saturating_sub(2),
+            height: self.list_area.height.saturating_sub(2),
+        };
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let index = ui::index_at(
+                    inner,
+                    self.list_state.offset(),
+                    event.row,
+                    self.entries.len(),
+                )?;
+                self.selected = index;
+                if self.double_click.click(index) {
+                    return self.dispatch_command(Command::Confirm);
+                }
+                None
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                let index = ui::index_at(
+                    inner,
+                    self.list_state.offset(),
+                    event.row,
+                    self.entries.len(),
+                )?;
+                self.selected = index;
+                let items = vec![
+                    ("Insert".to_string(), Command::Confirm),
+                    ("Rename".to_string(), Command::RenameSnippet),
+                    ("Delete".to_string(), Command::DeleteSnippet),
+                ];
+                self.context_menu = Some(ui::ContextMenu::new((event.column, event.row), items));
+                None
+            }
+            MouseEventKind::ScrollDown => {
+                vim_list::apply(
+                    vim_list::VimMove::Down,
+                    &mut self.selected,
+                    self.entries.len(),
+                    self.visible_height,
+                );
+                None
+            }
+            MouseEventKind::ScrollUp => {
+                vim_list::apply(
+                    vim_list::VimMove::Up,
+                    &mut self.selected,
+                    self.entries.len(),
+                    self.visible_height,
+                );
                 None
             }
             _ => None,
@@ -180,9 +286,9 @@ impl SnippetPickerComponent {
             })
             .collect();
 
-        let mut state = ListState::default();
+        self.list_area = list_area;
         if !self.entries.is_empty() {
-            state.select(Some(self.selected));
+            self.list_state.select(Some(self.selected));
         }
 
         self.visible_height = list_area.height.saturating_sub(2) as usize;
@@ -208,12 +314,16 @@ impl SnippetPickerComponent {
         let list = List::new(items)
             .block(ui::panel(&title, true))
             .highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, list_area, &mut state);
+        frame.render_stateful_widget(list, list_area, &mut self.list_state);
 
         if let (Some(bar_area), Some(input)) = (rename_bar_area, &self.renaming) {
             let mut spans = vec![Span::styled("rename: ", Style::default().fg(theme.accent))];
             spans.extend(input.spans(true));
             frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
+
+        if let Some(menu) = &self.context_menu {
+            menu.draw(frame, list_area);
         }
     }
 
@@ -224,7 +334,19 @@ impl SnippetPickerComponent {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
+
+    fn click_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
 
     fn entry(name: &str, text: &str) -> SavedSnippet {
         SavedSnippet {
@@ -369,6 +491,118 @@ mod tests {
         assert_eq!(
             picker.renaming.as_ref().map(|input| input.text()),
             Some("active-usersjd".to_string())
+        );
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_without_inserting_it() {
+        let mut picker = picker();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        // Row 0 is the border, row 2 is "count-orders" (the second entry).
+        let outcome =
+            picker.handle_mouse_event(click_at(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert_eq!(outcome, None);
+        assert_eq!(
+            picker.selected_entry().map(|e| e.name.as_str()),
+            Some("count-orders")
+        );
+    }
+
+    #[test]
+    fn double_clicking_a_row_inserts_it_same_as_enter() {
+        let mut picker = picker();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        picker.handle_mouse_event(click_at(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        let outcome =
+            picker.handle_mouse_event(click_at(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert_eq!(
+            outcome,
+            Some(SnippetOutcome::Insert(
+                "SELECT count(*) FROM orders;".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_row_opens_a_menu_with_insert_rename_delete() {
+        let mut picker = picker();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        picker.handle_mouse_event(click_at(MouseEventKind::Down(MouseButton::Right), 2, 1));
+        assert!(picker.context_menu.is_some());
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Insert"), "buffer was: {text}");
+        assert!(text.contains("Rename"), "buffer was: {text}");
+        assert!(text.contains("Delete"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn confirming_delete_from_the_context_menu_asks_for_confirmation_first() {
+        let mut picker = picker();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+        picker.handle_mouse_event(click_at(MouseEventKind::Down(MouseButton::Right), 2, 1));
+
+        // "Insert" (0), "Rename" (1), "Delete" (2) -- move down twice.
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        let outcome = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(outcome, None, "delete must not run without a y/N confirm");
+        assert!(picker.confirming_delete);
+        assert_eq!(picker.entries.len(), 2, "nothing deleted yet");
+    }
+
+    #[test]
+    fn confirming_rename_from_the_context_menu_opens_the_rename_prompt() {
+        let mut picker = picker();
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+        picker.handle_mouse_event(click_at(MouseEventKind::Down(MouseButton::Right), 2, 1));
+
+        // "Rename" is the second item (index 1).
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            picker.renaming.as_ref().map(|input| input.text()),
+            Some("active-users".to_string())
+        );
+        assert!(
+            picker.context_menu.is_none(),
+            "the menu should close once a choice is confirmed"
         );
     }
 }

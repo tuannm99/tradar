@@ -2,8 +2,6 @@
 //! request a connect. Implements `Component` because `RootComponent`
 //! routes keys to it directly whenever it's the active screen.
 
-use std::time::{Duration, Instant};
-
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -15,19 +13,18 @@ use tradar_core::action::{Action, Component};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::{ConnectionStore, SavedConnection};
 use tradar_core::theme::theme;
-use tradar_core::ui;
+use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
 
 use crate::components::connection_form::{ConnectionFormComponent, FormMode, FormOutcome};
 
-/// A second `Down(Left)` on the same row inside this window counts as a
-/// double-click (open) rather than two separate single clicks (select).
-/// No platform-standard value exists in a terminal; 500ms matches what
-/// most desktop environments default to.
-const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
-
 pub struct ConnectionPickerComponent {
     pub connections: Vec<SavedConnection>,
+    /// Index into the *visible* (filtered) connections, not directly into
+    /// `connections` -- see `selected_connection_index`. Identical to an
+    /// index into `connections` whenever `filter` is empty (the default),
+    /// which is what every external setter of this field (`RootComponent`,
+    /// restoring a session or opening a tab) assumes.
     pub selected: usize,
     pub last_error: Option<String>,
     pub connect_epoch: u64,
@@ -63,10 +60,16 @@ pub struct ConnectionPickerComponent {
     /// `dispatch_command`'s doc comment for why confirming a menu item runs
     /// through the exact same code a keyboard shortcut would.
     context_menu: Option<ui::ContextMenu>,
-    /// The row and time of the last `Down(Left)`, to recognize a second one
-    /// on the same row within `DOUBLE_CLICK_WINDOW` as "open" rather than
-    /// "select (again)".
-    last_click: Option<(usize, Instant)>,
+    /// Recognizes a second `Down(Left)` on the same row as "open" rather
+    /// than "select (again)".
+    double_click: DoubleClickTracker,
+    /// A case-insensitive substring narrowing the list by name or driver --
+    /// see `visible_indices`. Kept even while `filter_input` is closed, so
+    /// the title can still say what's applied and a fresh `/` prefills it
+    /// rather than starting over. Same idiom as `NavigatorComponent`.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
     /// Connector ids compiled into this build, for the form's driver
     /// picker. Comes from `main.rs`'s registry via `RootComponent`.
     drivers: Vec<String>,
@@ -92,9 +95,76 @@ impl ConnectionPickerComponent {
             form: None,
             confirming_delete: false,
             context_menu: None,
-            last_click: None,
+            double_click: DoubleClickTracker::new(),
+            filter: String::new(),
+            filter_input: None,
             drivers: Vec::new(),
             store: None,
+        }
+    }
+
+    /// `connections` narrowed by `filter`, as indices into it -- what
+    /// `selected` actually counts through, and what the list draws. A
+    /// case-insensitive substring match against name or driver, same as
+    /// `NavigatorComponent::visible_rows`.
+    fn visible_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.connections.len()).collect();
+        }
+        let needle = self.filter.to_lowercase();
+        self.connections
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.name.to_lowercase().contains(&needle) || c.driver.to_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// `selected`, translated from an index into the *visible* list to the
+    /// real index into `connections` -- `None` when the filter matches
+    /// nothing, or `selected` has drifted past the end (shouldn't happen,
+    /// but every caller of this treats "nothing selected" as unremarkable
+    /// rather than unwrapping).
+    fn selected_connection_index(&self) -> Option<usize> {
+        self.visible_indices().get(self.selected).copied()
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied.
+    pub fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    pub fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys -- `Esc` cancels (clears
+    /// the bar *and* whatever was applied), `Enter` keeps the filter and
+    /// closes the bar, anything else edits live. Same contract as
+    /// `NavigatorComponent::filter_key_event`.
+    pub fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+            }
+        }
+        // The filtered set just changed shape -- keep the cursor in range
+        // rather than pointing past the end or at a row that no longer
+        // matches.
+        let len = self.visible_indices().len();
+        if self.selected >= len {
+            self.selected = len.saturating_sub(1);
         }
     }
 
@@ -147,6 +217,10 @@ impl ConnectionPickerComponent {
                 match mode {
                     FormMode::Add => {
                         self.connections.push(connection);
+                        // A stale filter could hide the very connection
+                        // just added -- clear it so what got added is what
+                        // ends up selected.
+                        self.filter.clear();
                         self.selected = self.connections.len() - 1;
                     }
                     FormMode::Edit(index) => {
@@ -162,27 +236,25 @@ impl ConnectionPickerComponent {
     }
 
     fn delete_selected(&mut self) {
-        if self.selected >= self.connections.len() {
+        let Some(index) = self.selected_connection_index() else {
             return;
-        }
-        self.connections.remove(self.selected);
-        if self.selected >= self.connections.len() {
-            self.selected = self.connections.len().saturating_sub(1);
+        };
+        self.connections.remove(index);
+        let len = self.visible_indices().len();
+        if self.selected >= len {
+            self.selected = len.saturating_sub(1);
         }
         self.persist();
     }
 
     fn apply_move(&mut self, mv: VimMove) {
-        vim_list::apply(
-            mv,
-            &mut self.selected,
-            self.connections.len(),
-            self.visible_height,
-        );
+        let len = self.visible_indices().len();
+        vim_list::apply(mv, &mut self.selected, len, self.visible_height);
     }
 
     fn open_selected(&mut self, force_new: bool) -> Option<Action> {
-        let connection = self.connections.get(self.selected).cloned()?;
+        let index = self.selected_connection_index()?;
+        let connection = self.connections[index].clone();
         self.connect_epoch += 1;
         // A stale error from a previous failed attempt must not keep
         // showing once a new attempt is underway.
@@ -225,15 +297,19 @@ impl ConnectionPickerComponent {
                 None
             }
             Command::EditConnection => {
-                if self.selected < self.connections.len() {
-                    self.open_form(FormMode::Edit(self.selected));
+                if let Some(index) = self.selected_connection_index() {
+                    self.open_form(FormMode::Edit(index));
                 }
                 None
             }
             Command::DeleteConnection => {
-                if self.store.is_some() && self.selected < self.connections.len() {
+                if self.store.is_some() && self.selected_connection_index().is_some() {
                     self.confirming_delete = true;
                 }
+                None
+            }
+            Command::Search => {
+                self.open_filter();
                 None
             }
             _ => None,
@@ -247,6 +323,14 @@ impl Component for ConnectionPickerComponent {
             if let Some(outcome) = form.handle_key_event(code, modifiers) {
                 self.apply_form_outcome(outcome);
             }
+            return None;
+        }
+
+        // The filter bar, while open, gets every key -- same idiom as
+        // `NavigatorComponent`: it has to see letters the keymap would
+        // otherwise treat as commands (`j`, `a`, `d`, ...).
+        if self.is_filtering() {
+            self.filter_key_event(code, modifiers);
             return None;
         }
 
@@ -301,44 +385,35 @@ impl Component for ConnectionPickerComponent {
             return None;
         }
 
-        // The form and the delete confirmation are modal: a click behind
-        // them would act on a list the user can't see.
-        if self.form.is_some() || self.confirming_delete {
+        // The form, the delete confirmation, and the filter bar are modal:
+        // a click behind any of them would act on a list the user can't
+        // see (or can only see narrowed by a filter they're mid-typing).
+        if self.form.is_some() || self.confirming_delete || self.is_filtering() {
             return None;
         }
+        let visible = self.visible_indices();
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let inner = self.inner_list_area();
-                if let Some(index) = ui::index_at(
-                    inner,
-                    self.list_state.offset(),
-                    event.row,
-                    self.connections.len(),
-                ) {
-                    let now = Instant::now();
-                    let is_double_click = self.last_click.is_some_and(|(prev, at)| {
-                        prev == index && now.duration_since(at) < DOUBLE_CLICK_WINDOW
-                    });
+                if let Some(index) =
+                    ui::index_at(inner, self.list_state.offset(), event.row, visible.len())
+                {
                     self.selected = index;
-                    if is_double_click {
-                        self.last_click = None;
+                    if self.double_click.click(index) {
                         return self.dispatch_command(Command::Open);
                     }
-                    self.last_click = Some((index, now));
                 }
                 None
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 let inner = self.inner_list_area();
-                if let Some(index) = ui::index_at(
-                    inner,
-                    self.list_state.offset(),
-                    event.row,
-                    self.connections.len(),
-                ) {
+                if let Some(index) =
+                    ui::index_at(inner, self.list_state.offset(), event.row, visible.len())
+                {
                     self.selected = index;
                     let mut items = Vec::new();
-                    match self.open_in_tab.get(index).copied().flatten() {
+                    let real_index = visible[index];
+                    match self.open_in_tab.get(real_index).copied().flatten() {
                         Some(tab) => {
                             items.push((format!("Switch to tab {}", tab + 1), Command::Open));
                             items.push(("Open new session".to_string(), Command::OpenNewSession));
@@ -388,12 +463,18 @@ impl Component for ConnectionPickerComponent {
                 (chunks[0], Some(chunks[1]))
             }
         };
+        let (list_area, filter_bar_area) = if self.filter_input.is_some() {
+            let (list_area, bar) = ui::split_bottom_bar(list_area, 1);
+            (list_area, Some(bar))
+        } else {
+            (list_area, None)
+        };
 
-        let items: Vec<ListItem> = self
-            .connections
+        let visible = self.visible_indices();
+        let items: Vec<ListItem> = visible
             .iter()
-            .enumerate()
-            .map(|(index, connection)| {
+            .map(|&index| {
+                let connection = &self.connections[index];
                 let mut spans = vec![
                     Span::styled(
                         format!("  {}", connection.name),
@@ -418,9 +499,10 @@ impl Component for ConnectionPickerComponent {
             })
             .collect();
 
-        if self.connections.is_empty() {
+        if visible.is_empty() {
             self.list_state.select(None);
         } else {
+            self.selected = self.selected.min(visible.len() - 1);
             self.list_state.select(Some(self.selected));
         }
         self.visible_height = list_area.height.saturating_sub(2) as usize;
@@ -449,10 +531,21 @@ impl Component for ConnectionPickerComponent {
                 key(Command::DeleteConnection),
             )
         };
+        let title = if self.filter.is_empty() {
+            title
+        } else {
+            format!("{title} — filter: {}", self.filter)
+        };
         let list = List::new(items)
             .block(ui::panel(&title, true))
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, list_area, &mut self.list_state);
+
+        if let (Some(bar_area), Some(input)) = (filter_bar_area, &self.filter_input) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme.accent))];
+            spans.extend(input.spans(true));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
 
         if let (Some(error_area), Some(error)) = (error_area, &self.last_error) {
             let error_box = Paragraph::new(Span::styled(
@@ -466,8 +559,8 @@ impl Component for ConnectionPickerComponent {
 
         if self.confirming_delete {
             let name = self
-                .connections
-                .get(self.selected)
+                .selected_connection_index()
+                .and_then(|index| self.connections.get(index))
                 .map(|c| c.name.as_str())
                 .unwrap_or_default();
             let popup = ui::centered_rect(60, 20, area);
@@ -962,9 +1055,9 @@ mod tests {
         picker.handle_mouse_event(click_at(5, 2));
         // Backdate the recorded click past the double-click window, standing
         // in for real time having passed between two separate single clicks.
-        picker.last_click = picker
-            .last_click
-            .map(|(index, at)| (index, at - DOUBLE_CLICK_WINDOW));
+        picker
+            .double_click
+            .age_last_click(std::time::Duration::from_secs(1));
         let second = picker.handle_mouse_event(click_at(5, 2));
 
         assert!(second.is_none());
@@ -1187,5 +1280,123 @@ mod tests {
 
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("connection refused"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn slash_opens_the_filter_bar() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+
+        assert!(picker.is_filtering());
+    }
+
+    #[test]
+    fn typing_in_the_filter_narrows_the_list_by_name() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.open_filter();
+
+        for c in "postgres".chars() {
+            picker.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(picker.visible_indices(), vec![1]);
+    }
+
+    #[test]
+    fn filtering_by_driver_also_matches() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.open_filter();
+
+        for c in "sqlite".chars() {
+            picker.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(picker.visible_indices(), vec![0]);
+    }
+
+    #[test]
+    fn esc_while_filtering_clears_the_filter_entirely() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.open_filter();
+        for c in "postgres".chars() {
+            picker.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        picker.filter_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(!picker.is_filtering());
+        assert_eq!(
+            picker.visible_indices(),
+            vec![0, 1],
+            "the filter itself is gone too"
+        );
+    }
+
+    #[test]
+    fn enter_while_filtering_keeps_the_filter_and_closes_the_bar() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.open_filter();
+        for c in "postgres".chars() {
+            picker.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        picker.filter_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(!picker.is_filtering(), "the bar closes");
+        assert_eq!(
+            picker.visible_indices(),
+            vec![1],
+            "but the filter stays applied"
+        );
+    }
+
+    #[test]
+    fn opening_a_connection_while_filtered_targets_the_right_one() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.open_filter();
+        for c in "postgres".chars() {
+            picker.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        picker.filter_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            picker.selected, 0,
+            "index 0 in the filtered (not real) list"
+        );
+
+        let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        match action {
+            Some(Action::OpenRequested { connection, .. }) => {
+                assert_eq!(connection.name, "local-postgres")
+            }
+            other => panic!(
+                "expected OpenRequested, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+    }
+
+    #[test]
+    fn deleting_while_filtered_removes_the_right_connection() {
+        let (mut picker, _dir, _path) = editable_picker();
+        picker.open_filter();
+        for c in "postgres".chars() {
+            picker.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        picker.filter_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        picker.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert_eq!(
+            picker
+                .connections
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local-sqlite"],
+            "only the filtered-to connection should be gone"
+        );
     }
 }

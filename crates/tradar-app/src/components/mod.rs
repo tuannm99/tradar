@@ -36,6 +36,14 @@ pub struct Tab {
     /// method and adding one just for this would leak a UI concern into
     /// every connector's `Screen`.
     pub title: Option<String>,
+    /// Whether this tab's most recent connect attempt finished while it
+    /// *wasn't* the active tab -- `Some(true)` succeeded, `Some(false)`
+    /// failed, `None` nothing to report (including "it did finish, but the
+    /// user already saw it"). Set in `RootComponent::update`'s `Opened`/
+    /// `OpenFailed` arms, cleared the moment this tab is actually drawn as
+    /// the active one -- same "background tab finished" notice a browser
+    /// gives, without needing a dedicated dismiss action.
+    unseen_outcome: Option<bool>,
 }
 
 impl Tab {
@@ -49,6 +57,7 @@ impl Tab {
             screen: ScreenSlot::ConnectionPicker,
             connection_picker,
             title: None,
+            unseen_outcome: None,
         }
     }
 
@@ -403,7 +412,15 @@ impl RootComponent {
             _ => None,
         };
 
-        match outcome? {
+        self.apply_nav_outcome(outcome?)
+    }
+
+    /// What choosing a navigator row actually does -- shared by `Enter`
+    /// (`handle_navigator_key`) and a double-click (`handle_mouse_event`),
+    /// so a mouse activation runs through the exact same code a keyboard
+    /// one would.
+    fn apply_nav_outcome(&mut self, outcome: NavOutcome) -> Option<Action> {
+        match outcome {
             NavOutcome::Open(index) => self.open_connection(index),
             NavOutcome::Focus(tab) => {
                 self.active_tab = tab;
@@ -498,8 +515,12 @@ impl Component for RootComponent {
             let connections = self.nav_connections();
             match event.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    self.navigator.click(event.column, event.row, &connections);
+                    let double_clicked =
+                        self.navigator.click(event.column, event.row, &connections);
                     self.navigator_focused = true;
+                    if double_clicked && let Some(outcome) = self.navigator.choose(&connections) {
+                        return self.apply_nav_outcome(outcome);
+                    }
                 }
                 MouseEventKind::ScrollDown => {
                     self.navigator.apply_move(VimMove::Down, &connections)
@@ -540,21 +561,35 @@ impl Component for RootComponent {
                 // switching that tab's screen back. `tab` may also no
                 // longer exist at all if the user closed it while this
                 // connect was in flight; `get_mut` makes that a no-op too.
+                let active_tab = self.active_tab;
                 if let Some(t) = self.tabs.get_mut(tab)
                     && epoch == t.connection_picker.connect_epoch
                 {
                     t.connection_picker.connecting = None;
                     t.title = Some(connection.name.clone());
                     t.screen = ScreenSlot::Active(screen);
+                    // A background connect (opened from the navigator, or
+                    // a superseded tab that's since lost focus) finishing
+                    // where the user isn't looking needs its own signal --
+                    // otherwise the only way to notice is to go check every
+                    // tab by hand, same as a browser badging a background
+                    // tab that just loaded.
+                    if tab != active_tab {
+                        t.unseen_outcome = Some(true);
+                    }
                 }
                 None
             }
             Action::OpenFailed { error, epoch, tab } => {
+                let active_tab = self.active_tab;
                 if let Some(t) = self.tabs.get_mut(tab)
                     && epoch == t.connection_picker.connect_epoch
                 {
                     t.connection_picker.last_error = Some(error);
                     t.connection_picker.connecting = None;
+                    if tab != active_tab {
+                        t.unseen_outcome = Some(false);
+                    }
                 }
                 None
             }
@@ -587,6 +622,13 @@ impl Component for RootComponent {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        // Seeing it drawn as the active tab *is* the acknowledgment -- no
+        // separate dismiss action needed for a badge the user is looking
+        // straight at. Cleared before `draw_tab_bar` below reads it, so the
+        // very frame that shows this tab as active is also the one where
+        // its badge is already gone, not one frame later.
+        self.tabs[self.active_tab].unseen_outcome = None;
+
         // A tab bar only when there's more than one tab (nothing to switch
         // between otherwise), and always a one-line hint bar at the bottom.
         let show_tab_bar = self.tabs.len() > 1;
@@ -713,7 +755,15 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) -> V
         .iter()
         .enumerate()
         .map(|(i, tab)| {
-            let label = format!(" {}: {} ", i + 1, tab.label());
+            // Quiet for the common case (nothing to report, or this is the
+            // tab the user is already looking at) -- only a background tab
+            // that just resolved gets called out.
+            let marker = match tab.unseen_outcome {
+                Some(true) => "✓ ",
+                Some(false) => "✗ ",
+                None => "",
+            };
+            let label = format!(" {}: {}{} ", i + 1, marker, tab.label());
             widths.push(label.chars().count() as u16);
             let style = if i == active {
                 Style::default()
@@ -721,7 +771,15 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) -> V
                     .fg(theme.tab_active_fg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.tab_inactive)
+                match tab.unseen_outcome {
+                    Some(true) => Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                    Some(false) => Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                    None => Style::default().fg(theme.tab_inactive),
+                }
             };
             Span::styled(label, style)
         })
@@ -1302,6 +1360,157 @@ mod tests {
         assert_eq!(root.active_tab, 1, "resolving tab 0 must not steal focus");
         assert!(matches!(root.tabs[0].screen, ScreenSlot::Active(_)));
         assert!(matches!(root.tabs[1].screen, ScreenSlot::ConnectionPicker));
+        assert_eq!(
+            root.tabs[0].unseen_outcome,
+            Some(true),
+            "a background tab resolving where the user isn't looking needs a badge"
+        );
+    }
+
+    #[test]
+    fn open_failed_for_a_background_tab_sets_the_unseen_badge() {
+        let mut root = root();
+        let request_a = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected OpenRequested for A");
+        };
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+
+        root.update(Action::OpenFailed {
+            error: "connection refused".to_string(),
+            epoch: epoch_a,
+            tab: 0,
+        });
+
+        assert_eq!(root.tabs[0].unseen_outcome, Some(false));
+    }
+
+    #[test]
+    fn opening_a_connection_on_the_active_tab_does_not_set_the_unseen_badge() {
+        let mut root = root();
+
+        root.update(Action::Opened {
+            connection: connections()[0].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: 0,
+            tab: 0,
+        });
+
+        assert_eq!(
+            root.tabs[0].unseen_outcome, None,
+            "nothing to notify about on the tab the user is already looking at"
+        );
+    }
+
+    #[test]
+    fn drawing_the_active_tab_clears_its_unseen_badge() {
+        let mut root = root();
+        let request_a = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected OpenRequested for A");
+        };
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        root.update(Action::Opened {
+            connection: connections()[0].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: epoch_a,
+            tab: 0,
+        });
+        assert_eq!(root.tabs[0].unseen_outcome, Some(true));
+
+        root.active_tab = 0;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        assert_eq!(
+            root.tabs[0].unseen_outcome, None,
+            "being drawn as the active tab is itself the acknowledgment"
+        );
+    }
+
+    #[test]
+    fn the_very_frame_that_switches_to_a_tab_already_omits_its_badge() {
+        // Regression test: `draw_tab_bar` reads `unseen_outcome` -- if the
+        // clear happens later in the same `draw()` call (after the tab bar
+        // is already rendered), the badge lingers in the tab bar for one
+        // extra frame after the user switched here, not gone from the very
+        // frame that shows this tab as active. Caught by hand in a real
+        // terminal: the marker was still visible right after switching and
+        // only disappeared on the *next* redraw.
+        let mut root = root();
+        let request_a = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected OpenRequested for A");
+        };
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        root.update(Action::Opened {
+            connection: connections()[0].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: epoch_a,
+            tab: 0,
+        });
+        root.active_tab = 0;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            !text.contains("✓"),
+            "the badge must be gone from this very frame, buffer was: {text}"
+        );
+    }
+
+    #[test]
+    fn draw_shows_the_unseen_badge_marker_in_the_tab_bar() {
+        let mut root = root();
+        let request_a = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        let Some(Action::OpenRequested { epoch: epoch_a, .. }) = request_a else {
+            panic!("expected OpenRequested for A");
+        };
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        root.update(Action::Opened {
+            connection: connections()[0].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: epoch_a,
+            tab: 0,
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("✓"), "buffer was: {text}");
     }
 
     #[test]
@@ -1480,6 +1689,26 @@ mod tests {
         assert_eq!(connections.len(), 2);
         assert_eq!(connections[0].tab, Some(0), "open on tab 0");
         assert_eq!(connections[1].tab, None, "never connected");
+    }
+
+    #[test]
+    fn double_clicking_an_open_connection_in_the_navigator_switches_to_its_tab() {
+        let (mut root, _inserted) = root_with_navigator();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        // Row 0 is the tab bar (2 tabs open), row 1 the navigator's border,
+        // row 2 "local-sqlite" -- the connection open on tab 0.
+        root.handle_mouse_event(click_at(2, 2));
+        let action = root.handle_mouse_event(click_at(2, 2));
+
+        assert!(action.is_none());
+        assert_eq!(root.active_tab, 0, "should have jumped to the open tab");
     }
 
     #[test]

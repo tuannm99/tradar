@@ -17,7 +17,7 @@ use tradar_core::storage::SavedConnection;
 use tradar_core::ui;
 use tradar_core::vim_list::VimMove;
 
-use crate::components::browse_sidebar::BrowseSidebarComponent;
+use crate::components::browse_sidebar::{BrowseClick, BrowseSidebarComponent};
 use crate::components::completion::{CompletionPopup, CompletionSource};
 use crate::components::file_picker::{FilePickerComponent, PickerOutcome};
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
@@ -444,6 +444,38 @@ impl QueryScreenComponent {
     /// snippet library under it -- see `handle_snippet_name_confirmed`.
     fn open_snippet_prompt(&mut self) {
         self.snippet_prompt = Some(ui::TextInput::new(""));
+    }
+
+    /// What a history picker outcome means -- shared by keyboard `Enter`
+    /// and a double-click on a row (`handle_mouse_event`), so both run the
+    /// exact same load-into-editor code.
+    fn handle_history_outcome(&mut self, outcome: Option<HistoryOutcome>) {
+        match outcome {
+            Some(HistoryOutcome::Cancelled) => self.history_picker = None,
+            Some(HistoryOutcome::Selected(query)) => {
+                self.query_editor.set_text(&query);
+                self.mode = ScreenMode::Console;
+                self.focus = Focus::Editor;
+                self.history_picker = None;
+            }
+            None => {}
+        }
+    }
+
+    /// What a snippet picker outcome means -- shared by keyboard dispatch
+    /// and mouse activation (double-click, or the picker's own right-click
+    /// menu), same reasoning as `handle_history_outcome`.
+    fn handle_snippet_picker_outcome(&mut self, outcome: Option<SnippetOutcome>) {
+        match outcome {
+            Some(SnippetOutcome::Cancelled) => self.snippet_picker = None,
+            Some(SnippetOutcome::Insert(text)) => {
+                self.query_editor.set_text(&text);
+                self.mode = ScreenMode::Console;
+                self.focus = Focus::Editor;
+                self.snippet_picker = None;
+            }
+            None => {}
+        }
     }
 
     fn handle_snippet_name_confirmed(&mut self, name: String) {
@@ -975,16 +1007,8 @@ impl Component for QueryScreenComponent {
         }
 
         if let Some(history_picker) = self.history_picker.as_mut() {
-            match history_picker.handle_key_event(code, modifiers) {
-                Some(HistoryOutcome::Cancelled) => self.history_picker = None,
-                Some(HistoryOutcome::Selected(query)) => {
-                    self.query_editor.set_text(&query);
-                    self.mode = ScreenMode::Console;
-                    self.focus = Focus::Editor;
-                    self.history_picker = None;
-                }
-                None => {}
-            }
+            let outcome = history_picker.handle_key_event(code, modifiers);
+            self.handle_history_outcome(outcome);
             return None;
         }
 
@@ -1004,16 +1028,8 @@ impl Component for QueryScreenComponent {
         }
 
         if let Some(snippet_picker) = self.snippet_picker.as_mut() {
-            match snippet_picker.handle_key_event(code, modifiers) {
-                Some(SnippetOutcome::Cancelled) => self.snippet_picker = None,
-                Some(SnippetOutcome::Insert(text)) => {
-                    self.query_editor.set_text(&text);
-                    self.mode = ScreenMode::Console;
-                    self.focus = Focus::Editor;
-                    self.snippet_picker = None;
-                }
-                None => {}
-            }
+            let outcome = snippet_picker.handle_key_event(code, modifiers);
+            self.handle_snippet_picker_outcome(outcome);
             return None;
         }
 
@@ -1129,12 +1145,24 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        if let Some(history_picker) = self.history_picker.as_mut() {
+            let outcome = history_picker.handle_mouse_event(event);
+            self.handle_history_outcome(outcome);
+            return None;
+        }
+
+        if let Some(snippet_picker) = self.snippet_picker.as_mut() {
+            let outcome = snippet_picker.handle_mouse_event(event);
+            self.handle_snippet_picker_outcome(outcome);
+            return None;
+        }
+
         // An overlay covers the screen, so a click behind it would act on
         // something the user can't even see.
         if self.prompt.is_some()
-            || self.history_picker.is_some()
             || self.picker.is_some()
             || self.row_edit.is_some()
+            || self.snippet_prompt.is_some()
         {
             return None;
         }
@@ -1145,6 +1173,17 @@ impl Component for QueryScreenComponent {
                 // mouse is for here -- and then selects the row hit.
                 if self.results.click(event.column, event.row) {
                     self.focus = Focus::Results;
+                } else if let Some(browse) = self.browse.as_mut() {
+                    match browse.click(event.column, event.row) {
+                        BrowseClick::Missed => {}
+                        BrowseClick::Selected => self.focus = Focus::Browse,
+                        // A double-click opens the key, same as
+                        // `Command::BrowseOpen` -- `open_selected_key`
+                        // reads `self.browse`'s own `selected_entry()`
+                        // (which `click` just updated) and moves focus to
+                        // `Results` itself, same as the keyboard shortcut.
+                        BrowseClick::Activated => self.open_selected_key(),
+                    }
                 } else if ui::contains(self.editor_area, event.column, event.row) {
                     self.focus = Focus::Editor;
                 }
@@ -2657,6 +2696,39 @@ mod tests {
     }
 
     #[test]
+    fn clicking_while_the_snippet_picker_is_open_does_not_leak_through_to_the_results_pane() {
+        let (mut screen, _rx) = screen();
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["a".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        });
+        screen.focus = Focus::Editor;
+        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert!(screen.snippet_picker.is_some());
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        // Inside the results pane -- if the click leaked through, this
+        // would switch focus there.
+        screen.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            screen.focus,
+            Focus::Editor,
+            "a click behind the open snippet picker must not reach the results pane"
+        );
+    }
+
+    #[test]
     fn choosing_a_snippet_loads_it_into_the_editor() {
         let (mut screen, _rx) = screen();
         screen.query_editor.set_text("unrelated");
@@ -3213,6 +3285,65 @@ mod tests {
             QueryResult::Table { rows, .. } => rows[0].clone(),
             other => panic!("expected a Table, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clicking_a_key_in_the_sidebar_selects_it_and_focuses_the_pane() {
+        let (mut screen, _rx) = redis_screen_with(empty_result(), Ok(redis_schema()));
+        screen.focus = Focus::Results;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+
+        // Row 0 is the sidebar's border, row 1 the one key ("user:1").
+        screen.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(screen.focus, Focus::Browse);
+        assert!(
+            screen.last_browse_command.is_none(),
+            "a single click must only select, not fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn double_clicking_a_key_in_the_sidebar_fetches_it_same_as_enter() {
+        let fetched = QueryResult::Table {
+            columns: vec!["field".to_string(), "value".to_string()],
+            rows: vec![vec!["name".to_string(), "Ada".to_string()]],
+            truncated: false,
+        };
+        let (mut screen, _rx) = redis_screen_with(fetched.clone(), Ok(redis_schema()));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        screen.handle_mouse_event(click);
+        screen.handle_mouse_event(click);
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+            screen.tick();
+            if !screen.engine.is_pending() {
+                break;
+            }
+        }
+
+        assert_eq!(screen.focus, Focus::Results);
+        assert_eq!(screen.results.selected_row(), Some(&fetched_row(&fetched)));
     }
 
     #[tokio::test]

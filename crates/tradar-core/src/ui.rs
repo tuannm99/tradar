@@ -7,6 +7,7 @@
 //! these, and neither may depend on the other.
 
 use std::io::Write;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -317,6 +318,48 @@ pub fn index_at(inner: Rect, offset: usize, row: u16, len: usize) -> Option<usiz
     }
     let index = offset + (row - inner.y) as usize;
     (index < len).then_some(index)
+}
+
+/// A second `Down(Left)` on the same index inside this window counts as a
+/// double-click; no platform-standard value exists in a terminal, 500ms
+/// matches what most desktop environments default to.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+
+/// Turns two single clicks on the same list row into "double-click", so
+/// every list-like panel (connection picker, navigator, history/snippet
+/// pickers) gets the same "double-click activates" behavior from one place
+/// instead of a copy of this timing logic each.
+#[derive(Default)]
+pub struct DoubleClickTracker {
+    last: Option<(usize, Instant)>,
+}
+
+impl DoubleClickTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a click on `index`; `true` if it lands within
+    /// `DOUBLE_CLICK_WINDOW` of the last recorded click on that same index.
+    /// A confirmed double-click resets the tracker -- a third click starts
+    /// counting fresh rather than chaining into a triple-click.
+    pub fn click(&mut self, index: usize) -> bool {
+        let now = Instant::now();
+        let is_double = self.last.is_some_and(|(prev, at)| {
+            prev == index && now.duration_since(at) < DOUBLE_CLICK_WINDOW
+        });
+        self.last = if is_double { None } else { Some((index, now)) };
+        is_double
+    }
+
+    /// Backdates the last recorded click for a test that needs to simulate
+    /// "two single clicks far enough apart to not be a double-click" without
+    /// an actual `DOUBLE_CLICK_WINDOW`-long sleep. `by` only needs to exceed
+    /// the window, not match it -- the exact value is a private constant of
+    /// this module.
+    pub fn age_last_click(&mut self, by: Duration) {
+        self.last = self.last.map(|(index, at)| (index, at - by));
+    }
 }
 
 /// One `key: label` pair in the status bar.
@@ -898,6 +941,44 @@ mod tests {
             None,
             "empty space past the last item must not select the last item"
         );
+    }
+
+    #[test]
+    fn a_second_click_on_the_same_row_within_the_window_is_a_double_click() {
+        let mut tracker = DoubleClickTracker::new();
+
+        assert!(!tracker.click(1), "first click is never a double-click");
+        assert!(tracker.click(1), "second click on the same row is");
+    }
+
+    #[test]
+    fn clicks_on_different_rows_never_count_as_a_double_click() {
+        let mut tracker = DoubleClickTracker::new();
+
+        tracker.click(1);
+
+        assert!(!tracker.click(2));
+    }
+
+    #[test]
+    fn a_confirmed_double_click_resets_so_a_third_click_starts_fresh() {
+        let mut tracker = DoubleClickTracker::new();
+        tracker.click(1);
+        assert!(tracker.click(1), "second click confirms the double-click");
+
+        assert!(
+            !tracker.click(1),
+            "a third click starts a new count, not a triple-click"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_same_row_after_the_window_elapsed_is_not_a_double_click() {
+        let mut tracker = DoubleClickTracker::new();
+        tracker.click(1);
+        tracker.age_last_click(DOUBLE_CLICK_WINDOW);
+
+        assert!(!tracker.click(1));
     }
 
     #[test]

@@ -12,10 +12,26 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use tradar_core::keymap::{Command, Context, keymap};
 use tradar_core::theme::theme;
-use tradar_core::ui;
+use tradar_core::ui::{self, DoubleClickTracker};
 use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::SchemaInfo;
+
+/// What a left click on the sidebar means -- `QueryScreenComponent` acts on
+/// this the same way it does `ResultsComponent::click`'s bool (focus the
+/// pane), plus a second case for the row-activating click `Results` doesn't
+/// have an equivalent of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowseClick {
+    /// The click missed the panel entirely.
+    Missed,
+    /// Landed on a row (or empty space below the list) -- worth focusing,
+    /// nothing more.
+    Selected,
+    /// A second click on the same row within the double-click window --
+    /// same as `Command::BrowseOpen` on it.
+    Activated,
+}
 
 pub struct BrowseSidebarComponent {
     entries: Vec<SchemaInfo>,
@@ -25,6 +41,9 @@ pub struct BrowseSidebarComponent {
     error: Option<String>,
     selected: usize,
     visible_height: usize,
+    list_state: ListState,
+    list_area: Rect,
+    double_click: DoubleClickTracker,
 }
 
 impl BrowseSidebarComponent {
@@ -38,6 +57,9 @@ impl BrowseSidebarComponent {
             error,
             selected: 0,
             visible_height: 0,
+            list_state: ListState::default(),
+            list_area: Rect::ZERO,
+            double_click: DoubleClickTracker::new(),
         }
     }
 
@@ -54,9 +76,34 @@ impl BrowseSidebarComponent {
         );
     }
 
+    /// See `BrowseClick`. A no-op (`Missed`) while `error` is showing --
+    /// there's no list to click into then.
+    pub fn click(&mut self, column: u16, row: u16) -> BrowseClick {
+        if self.error.is_some() || !ui::contains(self.list_area, column, row) {
+            return BrowseClick::Missed;
+        }
+        let inner = Rect {
+            x: self.list_area.x.saturating_add(1),
+            y: self.list_area.y.saturating_add(1),
+            width: self.list_area.width.saturating_sub(2),
+            height: self.list_area.height.saturating_sub(2),
+        };
+        let Some(index) = ui::index_at(inner, self.list_state.offset(), row, self.entries.len())
+        else {
+            return BrowseClick::Selected;
+        };
+        self.selected = index;
+        if self.double_click.click(index) {
+            BrowseClick::Activated
+        } else {
+            BrowseClick::Selected
+        }
+    }
+
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let theme = theme();
         self.visible_height = area.height.saturating_sub(2) as usize;
+        self.list_area = area;
 
         if let Some(error) = &self.error {
             let paragraph = Paragraph::new(error.as_str())
@@ -86,9 +133,8 @@ impl BrowseSidebarComponent {
             })
             .collect();
 
-        let mut state = ListState::default();
         if !self.entries.is_empty() {
-            state.select(Some(self.selected));
+            self.list_state.select(Some(self.selected));
         }
 
         let open = keymap()
@@ -98,7 +144,7 @@ impl BrowseSidebarComponent {
         let list = List::new(items)
             .block(ui::panel(&title, focused))
             .highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, area, &mut state);
+        frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 }
 
@@ -160,6 +206,65 @@ mod tests {
 
         assert_eq!(sidebar.selected_entry(), None);
         assert_eq!(sidebar.error.as_deref(), Some("scan failed"));
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it() {
+        let mut sidebar = sidebar();
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar.draw(frame, frame.area(), true))
+            .unwrap();
+
+        // Row 0 is the border, row 2 is "greeting" (the second entry).
+        let click = sidebar.click(2, 2);
+
+        assert_eq!(click, BrowseClick::Selected);
+        assert_eq!(sidebar.selected_entry(), Some(&entry("greeting", "string")));
+    }
+
+    #[test]
+    fn double_clicking_a_row_activates_it() {
+        let mut sidebar = sidebar();
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar.draw(frame, frame.area(), true))
+            .unwrap();
+
+        sidebar.click(2, 2);
+        let click = sidebar.click(2, 2);
+
+        assert_eq!(click, BrowseClick::Activated);
+    }
+
+    #[test]
+    fn a_click_outside_the_panel_is_reported_as_missed() {
+        let mut sidebar = sidebar();
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar.draw(frame, frame.area(), true))
+            .unwrap();
+
+        let click = sidebar.click(100, 100);
+
+        assert_eq!(click, BrowseClick::Missed);
+    }
+
+    #[test]
+    fn a_click_while_showing_an_error_is_always_missed() {
+        let mut sidebar = BrowseSidebarComponent::new(&Err("scan failed".to_string()));
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| sidebar.draw(frame, frame.area(), true))
+            .unwrap();
+
+        let click = sidebar.click(2, 2);
+
+        assert_eq!(click, BrowseClick::Missed);
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {

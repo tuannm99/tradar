@@ -3,7 +3,7 @@
 //! `QueryScreenComponent`, the same way `FilePromptComponent` is, and takes
 //! over all key input while open.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -12,7 +12,7 @@ use ratatui::widgets::{List, ListItem, ListState};
 
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::theme::theme;
-use tradar_core::ui;
+use tradar_core::ui::{self, DoubleClickTracker};
 use tradar_core::vim_list;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,9 @@ pub struct HistoryPickerComponent {
     selected: usize,
     pending: Option<KeyPress>,
     visible_height: usize,
+    list_state: ListState,
+    list_area: Rect,
+    double_click: DoubleClickTracker,
 }
 
 impl HistoryPickerComponent {
@@ -37,6 +40,9 @@ impl HistoryPickerComponent {
             selected: 0,
             pending: None,
             visible_height: 0,
+            list_state: ListState::default(),
+            list_area: Rect::ZERO,
+            double_click: DoubleClickTracker::new(),
         }
     }
 
@@ -75,6 +81,30 @@ impl HistoryPickerComponent {
         }
     }
 
+    /// A left click selects the row it landed on; a second one on that same
+    /// row within the double-click window loads it, same as `Enter`.
+    pub fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<HistoryOutcome> {
+        let MouseEventKind::Down(MouseButton::Left) = event.kind else {
+            return None;
+        };
+        let inner = Rect {
+            x: self.list_area.x.saturating_add(1),
+            y: self.list_area.y.saturating_add(1),
+            width: self.list_area.width.saturating_sub(2),
+            height: self.list_area.height.saturating_sub(2),
+        };
+        let index = ui::index_at(
+            inner,
+            self.list_state.offset(),
+            event.row,
+            self.entries.len(),
+        )?;
+        self.selected = index;
+        self.double_click
+            .click(index)
+            .then(|| HistoryOutcome::Selected(self.entries[index].clone()))
+    }
+
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let theme = theme();
         let items: Vec<ListItem> = self
@@ -88,9 +118,9 @@ impl HistoryPickerComponent {
             })
             .collect();
 
-        let mut state = ListState::default();
+        self.list_area = area;
         if !self.entries.is_empty() {
-            state.select(Some(self.selected));
+            self.list_state.select(Some(self.selected));
         }
 
         self.visible_height = area.height.saturating_sub(2) as usize;
@@ -106,16 +136,28 @@ impl HistoryPickerComponent {
                 true,
             ))
             .highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, area, &mut state);
+        frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
 
     fn picker() -> HistoryPickerComponent {
         HistoryPickerComponent::new(vec!["select 2".to_string(), "select 1".to_string()])
+    }
+
+    fn click_at(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     #[test]
@@ -203,5 +245,39 @@ mod tests {
         let outcome = picker.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert_eq!(outcome, Some(HistoryOutcome::Cancelled));
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_without_loading_it() {
+        let mut picker = picker();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        // Row 0 is the border, row 2 is "select 1" (the second entry).
+        let outcome = picker.handle_mouse_event(click_at(2, 2));
+
+        assert_eq!(outcome, None);
+        assert_eq!(picker.selected_entry(), Some("select 1"));
+    }
+
+    #[test]
+    fn double_clicking_a_row_loads_it_same_as_enter() {
+        let mut picker = picker();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        picker.handle_mouse_event(click_at(2, 2));
+        let outcome = picker.handle_mouse_event(click_at(2, 2));
+
+        assert_eq!(
+            outcome,
+            Some(HistoryOutcome::Selected("select 1".to_string()))
+        );
     }
 }

@@ -21,7 +21,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use tradar_core::action::{CrudOp, OutlineEntry};
 use tradar_core::theme::theme;
-use tradar_core::ui::{self, TextInput};
+use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
 
 /// What the host has to know about one connection to draw it: its name,
@@ -92,6 +92,9 @@ pub struct NavigatorComponent {
     filter: String,
     /// `Some` while the filter bar has the keys -- see `open_filter`.
     filter_input: Option<TextInput>,
+    /// Recognizes a second click on the same row as "activate" (same as
+    /// `Enter`) rather than "select (again)".
+    double_click: DoubleClickTracker,
 }
 
 impl NavigatorComponent {
@@ -334,8 +337,9 @@ impl NavigatorComponent {
         })
     }
 
-    /// Selects whatever row was clicked. Returns whether the click landed
-    /// in this panel at all.
+    /// Selects whatever row was clicked. Returns whether this was a second
+    /// click on that same row within the double-click window -- the host
+    /// treats that the same as `Enter` (see `choose`).
     pub fn click(&mut self, column: u16, row: u16, connections: &[NavConnection]) -> bool {
         if !ui::contains(self.list_area, column, row) {
             return false;
@@ -347,10 +351,11 @@ impl NavigatorComponent {
             height: self.list_area.height.saturating_sub(2),
         };
         let count = self.visible_rows(connections).len();
-        if let Some(index) = ui::index_at(inner, self.list_state.offset(), row, count) {
-            self.selected = index;
-        }
-        true
+        let Some(index) = ui::index_at(inner, self.list_state.offset(), row, count) else {
+            return false;
+        };
+        self.selected = index;
+        self.double_click.click(index)
     }
 
     pub fn contains(&self, column: u16, row: u16) -> bool {
@@ -708,6 +713,41 @@ mod tests {
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("disconnected"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn a_second_click_on_the_same_row_is_reported_as_a_double_click() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| navigator.draw(frame, frame.area(), true, &conns))
+            .unwrap();
+
+        // Row 0 is the border, row 1 is "local" (the first connection).
+        assert!(!navigator.click(2, 1, &conns), "a first click only selects");
+        assert!(
+            navigator.click(2, 1, &conns),
+            "a second click on the same row is a double-click"
+        );
+    }
+
+    #[test]
+    fn clicks_on_different_rows_never_report_a_double_click() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| navigator.draw(frame, frame.area(), true, &conns))
+            .unwrap();
+
+        navigator.click(2, 1, &conns); // "local"
+        let double_clicked = navigator.click(2, 2, &conns); // "remote"
+
+        assert!(!double_clicked);
+        assert_eq!(navigator.selected, 1, "the second click still selects");
     }
 
     #[test]
