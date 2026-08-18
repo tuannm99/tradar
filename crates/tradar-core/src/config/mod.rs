@@ -1,6 +1,7 @@
 //! Application configuration: `~/.config/tradar/config.toml`, holding the
-//! theme overrides and key bindings. Both are optional -- a missing file
-//! means "use the built-in defaults", which is the common case.
+//! theme overrides, key bindings, and editor mode. All optional -- a
+//! missing file means "use the built-in defaults", which is the common
+//! case.
 //!
 //! ```toml
 //! [theme]
@@ -13,15 +14,37 @@
 //! [keymap.list]
 //! move-down = ["j", "down"]   # or several
 //! move-top = "gg"             # or a two-key sequence
+//!
+//! [editor]
+//! vim-mode = true             # default false: plain, non-modal editing
 //! ```
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 
 use crate::keymap::{Keymap, set_keymap};
 use crate::theme::{Theme, set_theme};
+
+static VIM_MODE: OnceLock<bool> = OnceLock::new();
+
+/// Whether the query editor uses vim-modal editing (Normal/Insert/Visual,
+/// `hjkl`, `u`/`U`) or plain non-modal editing (type freely, arrows to
+/// move, `ctrl-z`/`ctrl-j` to undo/redo) -- `false` (non-modal) until
+/// `init()` loads a config that turns it on. Read once per
+/// `QueryEditorComponent` at construction, not on every keystroke: the app
+/// has no live toggle, only a config one, by design (a modal editor's key
+/// meanings are too different to swap under a user mid-session without
+/// confusion).
+pub fn vim_mode() -> bool {
+    *VIM_MODE.get_or_init(|| false)
+}
+
+fn set_vim_mode(enabled: bool) {
+    let _ = VIM_MODE.set(enabled);
+}
 
 /// A command can be bound to one key or a list of them; TOML users
 /// shouldn't have to write `["j"]` for the common single-binding case.
@@ -47,6 +70,14 @@ struct ConfigFile {
     theme: HashMap<String, String>,
     #[serde(default)]
     keymap: HashMap<String, HashMap<String, Keys>>,
+    #[serde(default)]
+    editor: EditorSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EditorSection {
+    #[serde(rename = "vim-mode", default)]
+    vim_mode: bool,
 }
 
 pub fn default_config_path() -> anyhow::Result<PathBuf> {
@@ -63,18 +94,19 @@ pub fn default_config_path() -> anyhow::Result<PathBuf> {
 /// the caller decides whether to warn and continue with defaults or bail,
 /// but silently dropping a user's config is never right.
 pub fn init(path: &std::path::Path) -> anyhow::Result<()> {
-    let (theme, keymap) = load(path)?;
+    let (theme, keymap, vim_mode) = load(path)?;
     set_theme(theme);
     set_keymap(keymap);
+    set_vim_mode(vim_mode);
     Ok(())
 }
 
-fn load(path: &std::path::Path) -> anyhow::Result<(Theme, Keymap)> {
+fn load(path: &std::path::Path) -> anyhow::Result<(Theme, Keymap, bool)> {
     let mut theme = Theme::default();
     let mut keymap = Keymap::default();
 
     if !path.exists() {
-        return Ok((theme, keymap));
+        return Ok((theme, keymap, false));
     }
 
     let contents = std::fs::read_to_string(path)?;
@@ -95,7 +127,7 @@ fn load(path: &std::path::Path) -> anyhow::Result<(Theme, Keymap)> {
         .collect();
     keymap.apply_overrides(&keymap_overrides)?;
 
-    Ok((theme, keymap))
+    Ok((theme, keymap, file.editor.vim_mode))
 }
 
 #[cfg(test)]
@@ -117,29 +149,40 @@ mod tests {
     fn a_missing_config_file_yields_the_defaults() {
         let dir = tempfile::tempdir().unwrap();
 
-        let (theme, keymap) = load(&dir.path().join("nope.toml")).unwrap();
+        let (theme, keymap, vim_mode) = load(&dir.path().join("nope.toml")).unwrap();
 
         assert_eq!(theme, Theme::default());
         assert_eq!(keymap, Keymap::default());
+        assert!(!vim_mode);
     }
 
     #[test]
     fn an_empty_config_file_yields_the_defaults() {
         let (_dir, path) = write_config("");
 
-        let (theme, keymap) = load(&path).unwrap();
+        let (theme, keymap, vim_mode) = load(&path).unwrap();
 
         assert_eq!(theme, Theme::default());
         assert_eq!(keymap, Keymap::default());
+        assert!(!vim_mode);
     }
 
     #[test]
     fn theme_overrides_are_applied() {
         let (_dir, path) = write_config("[theme]\nerror = \"#ff0000\"\n");
 
-        let (theme, _) = load(&path).unwrap();
+        let (theme, ..) = load(&path).unwrap();
 
         assert_eq!(theme.error, Color::Rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn vim_mode_defaults_to_off_and_can_be_turned_on() {
+        let (_dir, path) = write_config("[editor]\nvim-mode = true\n");
+
+        let (.., vim_mode) = load(&path).unwrap();
+
+        assert!(vim_mode);
     }
 
     #[test]
@@ -148,7 +191,7 @@ mod tests {
             "[keymap.global]\nnew-tab = \"ctrl-n\"\n\n[keymap.list]\nmove-down = [\"n\", \"down\"]\n",
         );
 
-        let (_, keymap) = load(&path).unwrap();
+        let (_, keymap, _) = load(&path).unwrap();
 
         let mut pending = None;
         assert_eq!(

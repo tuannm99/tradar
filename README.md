@@ -62,9 +62,9 @@ driver = "mongo"
 target = "mongodb://localhost:27017/mydb"
 ```
 
-`target` của MongoDB phải kèm theo một database path (`/mydb` ở trên) — `MongoDriver::connect()` báo lỗi "connection string must include a default database" nếu thiếu.
+`target` của MongoDB không bắt buộc phải kèm database path — connect được kể cả khi thiếu (`MongoDriver::connect()` chỉ ping `admin`, không đòi database mặc định). Có `/mydb` như trên thì tự chọn vào db đó; không có thì mặc định là `test`, giống `mongosh`. Dùng lệnh `use <db>` trong query editor để đổi database đang thao tác, `show dbs`/`show databases` để xem danh sách database trên server.
 
-## Cấu hình: theme và keymap
+## Cấu hình: theme, keymap, chế độ soạn thảo
 
 Tuỳ chọn, nằm ở `~/.config/tradar/config.toml`. Không có file thì dùng mặc định; file hỏng thì `tradar` in cảnh báo ra stderr rồi chạy tiếp bằng mặc định (không chết app).
 
@@ -83,9 +83,19 @@ new-tab = "ctrl-n"            # một phím
 move-down = ["j", "down"]     # hoặc nhiều phím cho cùng một lệnh
 move-top = "gg"               # hoặc chuỗi 2 phím
 close-tab = []                # rỗng = gỡ bỏ phím
+
+[editor]
+vim-mode = true                # mặc định false (soạn thảo kiểu textbox thường)
 ```
 
-Context gồm `global`, `picker`, `query-screen`, `navigator`, `results`, `list`, `prompt`, `completion` — bấm `?` trong app để xem toàn bộ lệnh và phím hiện hành của từng context. Chỉ những lệnh đó remap được; phím vim **bên trong** query editor (`i`/`a`/`o`/`x`/`dd`/`hjkl`...) cố định theo vim chuẩn.
+Context gồm `global`, `picker`, `query-screen`, `navigator`, `results`, `list`, `prompt`, `completion`, `editor` (`undo`/`redo`/search-trong-buffer) — bấm `?` trong app để xem toàn bộ lệnh và phím hiện hành của từng context. Chỉ những lệnh đó remap được.
+
+`vim-mode` chọn giữa 2 chế độ soạn thảo cho query editor, không đổi được lúc đang chạy (chỉ qua config, khởi động lại mới áp dụng):
+
+- **`false` (mặc định)** — soạn thảo kiểu textbox thường: gõ là chèn ngay, không cần bấm `i` trước, phím mũi tên di chuyển, `Backspace` xoá. `Esc` thoát thẳng về picker. Undo/redo qua `Ctrl+Z`/`Ctrl+J` (mỗi phím gõ là 1 bước undo riêng, không gộp theo phiên như vim).
+- **`true`** — soạn thảo vim-modal như trước giờ: `Normal`/`Insert`/`Visual`/`VisualLine`, `i`/`a`/`o`/`O`/`x`/`dd`/`yy`/`p`/`hjkl`... cố định theo vim chuẩn (không remap được qua `[keymap]`), `u`/`U` undo/redo theo phiên gõ (`U` thay vì `Ctrl-R` của vim thật). `Esc` cần bấm khi đang ở Insert để về Normal trước, bấm lần nữa mới về picker.
+
+Cả 2 chế độ đều tự đóng ngoặc/quote khi gõ (`(`, `[`, `{`, `"`, `'`) và bỏ qua thay vì chèn lặp khi gõ đúng ký tự đóng vừa tự chèn.
 
 ## Triết lý
 

@@ -323,6 +323,8 @@ impl QueryScreenComponent {
             Command::SearchInBuffer => self.open_buffer_search(),
             Command::SearchNext => self.repeat_buffer_search(false),
             Command::SearchPrev => self.repeat_buffer_search(true),
+            Command::Undo => self.query_editor.undo(),
+            Command::Redo => self.query_editor.redo(),
             // No-op in Browse mode: it has its own fixed sidebar+value
             // layout, not an editor/results pair to resize or reorient.
             Command::ToggleSplitOrientation if self.mode != ScreenMode::Browse => {
@@ -1047,11 +1049,15 @@ impl Component for QueryScreenComponent {
         }
 
         // `Esc` belongs to the editor while it's in a mode it can leave
-        // (Insert), and only means "back to the picker" from Normal mode.
-        // Checked before the keymap so a user rebinding `back` can't
-        // accidentally trap themselves in Insert mode.
+        // (Insert), and only means "back to the picker" from Normal mode --
+        // or, with vim mode off, always: there's no Normal mode there to
+        // drop into first, so every `Esc` goes straight through to the
+        // keymap's `back` binding below. Checked before the keymap so a
+        // user rebinding `back` can't accidentally trap themselves in
+        // Insert mode.
         if code == KeyCode::Esc
             && self.focus == Focus::Editor
+            && self.query_editor.vim_enabled()
             && self.query_editor.mode != EditorMode::Normal
         {
             self.query_editor
@@ -2732,6 +2738,49 @@ mod tests {
         let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert!(matches!(action, Some(Action::BackToPicker)));
+    }
+
+    #[test]
+    fn with_vim_mode_off_esc_goes_straight_back_to_the_picker() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_vim_enabled(false);
+        assert_eq!(screen.focus, Focus::Editor);
+
+        let action = screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(
+            matches!(action, Some(Action::BackToPicker)),
+            "there's no Normal mode to leave first, so Esc must not be swallowed by the editor"
+        );
+    }
+
+    #[test]
+    fn with_vim_mode_off_typing_works_without_ever_pressing_i() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_vim_enabled(false);
+
+        screen.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+        screen.handle_key_event(KeyCode::Char('b'), KeyModifiers::NONE);
+
+        assert_eq!(screen.query_editor.text(), "ab");
+    }
+
+    #[test]
+    fn ctrl_z_undoes_and_ctrl_j_redoes_regardless_of_vim_mode() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_vim_enabled(false);
+        screen.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(screen.query_editor.text(), "a");
+
+        screen.handle_key_event(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(
+            screen.query_editor.text(),
+            "",
+            "ctrl-z must undo the typed edit"
+        );
+
+        screen.handle_key_event(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(screen.query_editor.text(), "a", "ctrl-j must redo it");
     }
 
     fn screen_showing_cities() -> (QueryScreenComponent, mpsc::UnboundedReceiver<Action>) {

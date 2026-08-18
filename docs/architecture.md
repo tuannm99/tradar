@@ -16,7 +16,7 @@ crates/
       storage/                — saved connections + session state + query file/recent list dạng TOML (dùng crate `directories` để lấy config path); driver: String (connector id).
                                   QueryFiles (thư mục queries + recent list) là global của process như theme/keymap: screen được dựng bên trong connector nên luồn xuống
                                   sẽ phải nhét "file để ở đâu" vào SPI connector; init_query_files() gọi một lần trong main.rs, query_files() trả None nếu chưa init
-      config/                — load ~/.config/tradar/config.toml → theme + keymap (2026-08-13; trước đó là placeholder rỗng)
+      config/                — load ~/.config/tradar/config.toml → theme + keymap + vim_mode() (2026-08-13; trước đó là placeholder rỗng; vim_mode() thêm 2026-08-18 — OnceLock<bool> giống theme()/keymap(), đọc bởi QueryEngine::build_screen chứ không phải QueryEditorComponent::new() -- xem "Vim mode / Normal mode qua config" trong docs/backlog.md để rõ lý do)
       theme.rs                — bảng màu theo vai trò + override từ config
       keymap.rs               — Command × Context, resolve phím → lệnh, remap từ config, hỗ trợ chuỗi 2 phím (gg)
       ui.rs                   — widget dùng chung: panel có viền/focus, selection style, centered_rect, status hint bar, HelpOverlay, TextInput/TextArea, SplitPane, ContextMenu, yank/paste clipboard (OSC52 + arboard)

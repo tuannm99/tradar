@@ -1,9 +1,12 @@
 //! MongoDB connector: a minimal shell-subset parser for the literal shape
 //! `db.<collection>.<method>(<json-args>)`, not a real JS engine. Anything
 //! outside that shape — chained methods, `$where`, arbitrary expressions —
-//! is rejected with a clear error rather than guessed at.
+//! is rejected with a clear error rather than guessed at. Two mongosh shell
+//! helpers are special-cased on top of that: `use <db>` switches which
+//! database `db.<collection>...` targets, and `show dbs`/`show databases`
+//! lists every database on the server.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
@@ -86,6 +89,15 @@ fn split_top_level_args(text: &str) -> anyhow::Result<Vec<&str>> {
 struct MongoDriver {
     uri: String,
     client: Option<mongodb::Client>,
+    /// The database `db.<collection>...` currently targets. `None` until
+    /// either the connection URI names a default database (picked up in
+    /// `connect()`) or a `use <db>` statement runs; `current_db_name()`
+    /// falls back to `"test"` in that case, the same default `mongosh`
+    /// itself uses when no database was ever selected. A `Mutex` rather
+    /// than `&mut self` because `QueryDriver::execute` takes `&self` --
+    /// this is the one piece of session state a shell interpreter needs
+    /// that a stateless query driver otherwise wouldn't.
+    current_db: Mutex<Option<String>>,
 }
 
 impl MongoDriver {
@@ -93,17 +105,24 @@ impl MongoDriver {
         Self {
             uri: uri.to_string(),
             client: None,
+            current_db: Mutex::new(None),
         }
     }
 
-    fn database(&self) -> anyhow::Result<mongodb::Database> {
+    fn current_db_name(&self) -> String {
+        self.current_db
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "test".to_string())
+    }
+
+    fn database(&self) -> mongodb::Database {
         let client = self
             .client
             .as_ref()
             .expect("connect() must be called first");
-        client
-            .default_database()
-            .ok_or_else(|| anyhow::anyhow!("connection string must include a default database"))
+        client.database(&self.current_db_name())
     }
 }
 
@@ -111,19 +130,38 @@ impl MongoDriver {
 impl QueryDriver for MongoDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
         let client = mongodb::Client::with_uri_str(&self.uri).await?;
-        let db = client
-            .default_database()
-            .ok_or_else(|| anyhow::anyhow!("connection string must include a default database"))?;
-        db.run_command(mongodb::bson::doc! { "ping": 1 }).await?;
+        // `ping` is a no-data admin command that answers regardless of
+        // which database it's run against (or whether that database has
+        // ever been written to), so connectivity can be verified even when
+        // the URI names no database at all -- unlike the old code, which
+        // required a default database just to have somewhere to point this
+        // check at.
+        client
+            .database("admin")
+            .run_command(mongodb::bson::doc! { "ping": 1 })
+            .await?;
+        // A URI that does name one (`mongodb://host/mydb`) still auto-selects
+        // it, matching what `mongosh` does when given the same URI.
+        if let Some(db) = client.default_database() {
+            *self.current_db.lock().unwrap() = Some(db.name().to_string());
+        }
         self.client = Some(client);
         Ok(())
     }
 
-    /// The shell shapes this driver actually parses -- see the module
-    /// docs; anything else is rejected, so completing it would mislead.
+    /// The shell shapes this driver actually parses (the six methods, plus
+    /// `use`/`show dbs`) are a closed set -- completing anything else there
+    /// would mislead. The `$`-operators are different: they're free-form
+    /// JSON keys *inside* a method's filter/update/pipeline argument, so
+    /// every one MongoDB itself recognizes is fair to suggest regardless of
+    /// which method it ends up nested in.
     fn keywords(&self) -> &'static [&'static str] {
         &[
             "db",
+            "use",
+            "show",
+            "dbs",
+            "databases",
             "find",
             "aggregate",
             "insertOne",
@@ -132,14 +170,8 @@ impl QueryDriver for MongoDriver {
             "updateMany",
             "deleteOne",
             "deleteMany",
-            "$match",
-            "$group",
-            "$sort",
-            "$limit",
-            "$project",
-            "$lookup",
-            "$unwind",
-            "$set",
+            // Query/filter operators.
+            "$eq",
             "$gt",
             "$gte",
             "$lt",
@@ -150,8 +182,60 @@ impl QueryDriver for MongoDriver {
             "$and",
             "$or",
             "$not",
+            "$nor",
             "$exists",
             "$regex",
+            "$type",
+            "$mod",
+            "$all",
+            "$elemMatch",
+            "$size",
+            "$text",
+            "$search",
+            // Update operators.
+            "$set",
+            "$unset",
+            "$inc",
+            "$mul",
+            "$rename",
+            "$min",
+            "$max",
+            "$currentDate",
+            "$setOnInsert",
+            "$push",
+            "$pull",
+            "$pullAll",
+            "$pop",
+            "$addToSet",
+            "$each",
+            // Aggregation pipeline stages.
+            "$match",
+            "$group",
+            "$sort",
+            "$limit",
+            "$skip",
+            "$project",
+            "$addFields",
+            "$lookup",
+            "$unwind",
+            "$count",
+            "$facet",
+            "$bucket",
+            "$sample",
+            "$replaceRoot",
+            "$out",
+            "$merge",
+            "$graphLookup",
+            // Aggregation expressions/accumulators.
+            "$sum",
+            "$avg",
+            "$first",
+            "$last",
+            "$cond",
+            "$ifNull",
+            "$concat",
+            "$toLower",
+            "$toUpper",
         ]
     }
 
@@ -176,7 +260,7 @@ impl QueryDriver for MongoDriver {
     }
 
     async fn ping(&self) -> anyhow::Result<()> {
-        self.database()?
+        self.database()
             .run_command(mongodb::bson::doc! { "ping": 1 })
             .await?;
         Ok(())
@@ -191,8 +275,16 @@ impl QueryDriver for MongoDriver {
     /// with its own per-table `PRAGMA` round trip. A collection that fails
     /// to sample (empty, or a transient error) just reports no columns
     /// rather than failing schema browsing for every other collection.
+    ///
+    /// Scoped to whichever database was current *at connect time* (the
+    /// URI's default database, or `"test"` if it named none) -- the
+    /// navigator tree is fetched once up front (see `MongoConnector::connect`)
+    /// and has no live-refresh hook, so a `use <db>` run later from the query
+    /// editor switches what `db.<collection>...` queries target without
+    /// updating this tree. `show dbs` is the way to see what other
+    /// databases exist from inside the editor in the meantime.
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
-        let db = self.database()?;
+        let db = self.database();
         let names = db.list_collection_names().await?;
         let mut schema = Vec::with_capacity(names.len());
         for name in names {
@@ -219,8 +311,39 @@ impl QueryDriver for MongoDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
-        let parsed = parse_shell_query(query)?;
-        let db = self.database()?;
+        let trimmed = query.trim();
+        if let Some(rest) = trimmed.strip_prefix("use ") {
+            let name = rest.trim().trim_matches(['"', '\'']);
+            if name.is_empty() {
+                anyhow::bail!("use requires a database name");
+            }
+            *self.current_db.lock().unwrap() = Some(name.to_string());
+            return Ok(QueryResult::Documents(vec![
+                serde_json::json!({ "switched to db": name }),
+            ]));
+        }
+        if trimmed == "show dbs" || trimmed == "show databases" {
+            let client = self
+                .client
+                .as_ref()
+                .expect("connect() must be called first");
+            let docs = client
+                .list_databases()
+                .await?
+                .into_iter()
+                .map(|spec| {
+                    serde_json::json!({
+                        "name": spec.name,
+                        "sizeOnDisk": spec.size_on_disk,
+                        "empty": spec.empty,
+                    })
+                })
+                .collect();
+            return Ok(QueryResult::Documents(docs));
+        }
+
+        let parsed = parse_shell_query(trimmed)?;
+        let db = self.database();
         let collection = db.collection::<Document>(&parsed.collection);
         let mut result = run_method(&collection, &parsed.method, &parsed.args).await?;
         // Every arm of `run_method` produces `Documents` via either
@@ -725,6 +848,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_succeeds_when_the_uri_names_no_database() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}"));
+
+        let result = driver.connect().await;
+
+        assert!(result.is_ok(), "connect failed: {:?}", result.err());
+        // Falls back to mongosh's own default rather than staying unset.
+        assert_eq!(driver.current_db_name(), "test");
+    }
+
+    #[tokio::test]
+    async fn connect_auto_selects_the_uri_s_default_database() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/shop"));
+
+        driver.connect().await.unwrap();
+
+        assert_eq!(driver.current_db_name(), "shop");
+    }
+
+    #[tokio::test]
+    async fn use_switches_which_database_subsequent_queries_target() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/first"));
+        driver.connect().await.unwrap();
+
+        driver.execute("use second").await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+
+        assert_eq!(driver.current_db_name(), "second");
+        let in_second = driver
+            .database()
+            .collection::<Document>("users")
+            .find_one(Document::new())
+            .await
+            .unwrap();
+        assert!(
+            in_second.is_some(),
+            "insert should have landed in \"second\""
+        );
+        let in_first = mongodb::Client::with_uri_str(&format!("mongodb://127.0.0.1:{port}/first"))
+            .await
+            .unwrap()
+            .database("first")
+            .collection::<Document>("users")
+            .find_one(Document::new())
+            .await
+            .unwrap();
+        assert!(
+            in_first.is_none(),
+            "insert should not have landed in \"first\""
+        );
+    }
+
+    #[tokio::test]
+    async fn show_dbs_lists_a_database_that_has_data_in_it() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/shop"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.orders.insertOne({"item": "pen"})"#)
+            .await
+            .unwrap();
+
+        let result = driver.execute("show dbs").await.unwrap();
+
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        assert!(
+            docs.iter().any(|d| d["name"] == "shop"),
+            "dbs were: {docs:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_insert_one_then_find_round_trips_a_document() {
         let container = Mongo::new().start().await.unwrap();
         let port = container.get_host_port_ipv4(27017).await.unwrap();
@@ -914,12 +1121,7 @@ mod tests {
         let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
         driver.connect().await.unwrap();
         // Creates the collection without inserting a document to sample.
-        driver
-            .database()
-            .unwrap()
-            .create_collection("empty")
-            .await
-            .unwrap();
+        driver.database().create_collection("empty").await.unwrap();
 
         let schema = driver.list_schema().await.unwrap();
 

@@ -379,6 +379,9 @@ impl Session for QueryEngine {
         restore: Option<&str>,
     ) -> Box<dyn Component> {
         let mut screen = QueryScreenComponent::new(*self, action_tx);
+        screen
+            .query_editor
+            .set_vim_enabled(tradar_core::config::vim_mode());
         if let Some(text) = restore {
             screen.query_editor.set_text(text);
         }
@@ -447,6 +450,40 @@ mod tests {
             }
         }
         panic!("engine is still pending after 10,000 ticks");
+    }
+
+    #[test]
+    fn build_screen_applies_the_configured_vim_mode() {
+        let engine = engine(Arc::new(FakeDriver {
+            result: QueryResult::Documents(Vec::new()),
+        }));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut screen = Box::new(engine).build_screen(tx, None);
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        // The editor's own mode badge shows only when it's vim-enabled --
+        // whatever `tradar_core::config::vim_mode()` says right now (this
+        // test doesn't control it, just checks `build_screen` actually
+        // wired the setting through rather than leaving the editor on its
+        // own `new()` default of vim-on).
+        assert_eq!(
+            text.contains("NORMAL") || text.contains("INSERT"),
+            tradar_core::config::vim_mode(),
+            "buffer was: {text}"
+        );
     }
 
     #[tokio::test]

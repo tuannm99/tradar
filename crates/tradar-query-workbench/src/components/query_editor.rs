@@ -42,6 +42,26 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 
+/// The closer an auto-closeable opener pairs with -- brackets pair with a
+/// different character, quotes with themselves (there's no separate
+/// "closing quote" glyph to distinguish).
+fn auto_close_for(c: char) -> Option<char> {
+    match c {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        _ => None,
+    }
+}
+
+/// Whether `c` closes some auto-closeable pair -- the skip-over check in
+/// `type_char` needs this the other way around from `auto_close_for`.
+fn is_closer(c: char) -> bool {
+    matches!(c, ')' | ']' | '}' | '"' | '\'')
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorMode {
     Normal,
@@ -99,6 +119,13 @@ type Memoized<T> = RefCell<Option<(Vec<Vec<char>>, T)>>;
 
 pub struct QueryEditorComponent {
     pub mode: EditorMode,
+    /// Read once from `tradar_core::config::vim_mode()` at construction --
+    /// see that function's doc comment for why this is a config-time
+    /// choice, not a live toggle. `false` pins `mode` at `Insert` forever
+    /// (the editor behaves like a plain, non-modal text box: typing always
+    /// inserts, `Esc` never enters a Normal mode there isn't one of); `true`
+    /// is today's vim-modal behavior, unchanged.
+    vim_enabled: bool,
     dialect: Dialect,
     lines: Vec<Vec<char>>,
     cursor_row: usize,
@@ -148,9 +175,21 @@ impl Default for QueryEditorComponent {
 }
 
 impl QueryEditorComponent {
+    /// Starts vim-modal (`mode: Normal`) unconditionally -- callers that
+    /// want the config's `[editor] vim-mode` setting applied call
+    /// `set_vim_enabled` right after, which is what `QueryEngine::build_screen`
+    /// (the one production call site that turns a driver into a real
+    /// on-screen editor) does. Deliberately *not* read here: this
+    /// constructor has no notion of "once at startup" the way
+    /// `tradar_core::config::vim_mode()`'s `OnceLock` does, so every one of
+    /// this file's own tests that builds an editor straight off `new()` --
+    /// there are dozens, all written against vim-modal behavior -- would
+    /// otherwise silently start seeing whatever the *first* test in the
+    /// process happened to leave that global set to.
     pub fn new() -> Self {
         Self {
             mode: EditorMode::Normal,
+            vim_enabled: true,
             dialect: Dialect::PlainText,
             lines: vec![Vec::new()],
             cursor_row: 0,
@@ -173,6 +212,26 @@ impl QueryEditorComponent {
 
     pub fn set_dialect(&mut self, dialect: Dialect) {
         self.dialect = dialect;
+    }
+
+    /// Whether this editor is vim-modal -- `QueryScreenComponent` needs
+    /// this to know whether `Esc` has a Normal mode to drop into (vim) or
+    /// should go straight to "back to the picker" (there's no mode to
+    /// leave, so nothing to catch here).
+    pub fn vim_enabled(&self) -> bool {
+        self.vim_enabled
+    }
+
+    /// Applies the `[editor] vim-mode` config setting -- called once,
+    /// right after `new()`, before the editor is shown or touched (see
+    /// `new()`'s doc comment for why `new()` itself doesn't do this). Turning
+    /// it off snaps `mode` straight to `Insert`: there's no Normal mode to
+    /// linger in once it's disabled.
+    pub fn set_vim_enabled(&mut self, enabled: bool) {
+        self.vim_enabled = enabled;
+        if !enabled {
+            self.mode = EditorMode::Insert;
+        }
     }
 
     pub fn text(&self) -> String {
@@ -533,7 +592,10 @@ impl QueryEditorComponent {
         self.redo_stack.clear();
     }
 
-    fn undo(&mut self) {
+    /// `pub(crate)`: reached both from vim's Normal-mode `u` and, since
+    /// that's unreachable with vim mode off, `Command::Undo` (`ctrl-z`),
+    /// dispatched from `QueryScreenComponent` in this same crate.
+    pub(crate) fn undo(&mut self) {
         let Some(previous) = self.undo_stack.pop() else {
             return;
         };
@@ -545,7 +607,8 @@ impl QueryEditorComponent {
         self.restore(previous);
     }
 
-    fn redo(&mut self) {
+    /// `pub(crate)` -- see `undo`'s doc comment.
+    pub(crate) fn redo(&mut self) {
         let Some(next) = self.redo_stack.pop() else {
             return;
         };
@@ -587,6 +650,28 @@ impl QueryEditorComponent {
     fn insert_char(&mut self, c: char) {
         self.lines[self.cursor_row].insert(self.cursor_col, c);
         self.cursor_col += 1;
+    }
+
+    /// A single Insert-mode keystroke -- unlike `insert_char` (also used
+    /// for pastes and snippet/completion inserts, where literal text must
+    /// land untouched), this is where bracket/quote auto-closing and
+    /// skip-over live: typing an opener also inserts its closer and leaves
+    /// the cursor between them; typing a closer that's already sitting
+    /// right at the cursor (the one just auto-inserted) moves past it
+    /// instead of duplicating it. Quotes are their own closer, so the same
+    /// skip-over check doubles as "finish this string" for them.
+    fn type_char(&mut self, c: char) {
+        if is_closer(c) && self.lines[self.cursor_row].get(self.cursor_col) == Some(&c) {
+            self.cursor_col += 1;
+            return;
+        }
+        if let Some(closer) = auto_close_for(c) {
+            self.insert_char(c);
+            self.insert_char(closer);
+            self.cursor_col -= 1;
+            return;
+        }
+        self.insert_char(c);
     }
 
     /// Deletes the current line into `register` (linewise) -- `dd`.
@@ -913,19 +998,38 @@ impl QueryEditorComponent {
     fn handle_insert_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match code {
             KeyCode::Esc => {
-                self.mode = EditorMode::Normal;
-                self.clamp_col();
+                // With vim mode off there's no Normal mode to drop into --
+                // `QueryScreenComponent` doesn't even forward `Esc` here in
+                // that case (see its own doc comment on the check), but a
+                // guard here too means this method has no way to leave
+                // Insert mode behind vim's back if that ever changes.
+                if self.vim_enabled {
+                    self.mode = EditorMode::Normal;
+                    self.clamp_col();
+                }
             }
             KeyCode::Enter => {
+                self.checkpoint_if_non_modal();
                 let rest = self.lines[self.cursor_row].split_off(self.cursor_col);
                 self.lines.insert(self.cursor_row + 1, rest);
                 self.cursor_row += 1;
                 self.cursor_col = 0;
             }
             KeyCode::Backspace => {
+                self.checkpoint_if_non_modal();
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
-                    self.lines[self.cursor_row].remove(self.cursor_col);
+                    let removed = self.lines[self.cursor_row].remove(self.cursor_col);
+                    // Backspacing right inside an empty auto-closed pair
+                    // (`(|)`) removes the closer along with the opener, so
+                    // the pair disappears as the single unit typing it
+                    // created -- without this the closer is orphaned and
+                    // needs a second backspace of its own.
+                    if let Some(closer) = auto_close_for(removed)
+                        && self.lines[self.cursor_row].get(self.cursor_col) == Some(&closer)
+                    {
+                        self.lines[self.cursor_row].remove(self.cursor_col);
+                    }
                 } else if self.cursor_row > 0 {
                     let current = self.lines.remove(self.cursor_row);
                     self.cursor_row -= 1;
@@ -951,9 +1055,24 @@ impl QueryEditorComponent {
                 }
             }
             KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                self.insert_char(c);
+                self.checkpoint_if_non_modal();
+                self.type_char(c);
             }
             _ => {}
+        }
+    }
+
+    /// Vim mode gets undo granularity for free: `checkpoint()` already runs
+    /// once per Normal-to-Insert transition, so a whole typing session
+    /// undoes as one step. With vim mode off there's no such transition to
+    /// hook -- Insert is the only mode there is -- so this checkpoints
+    /// every mutating keystroke instead. Coarser than vim's grouping (each
+    /// character is its own undo step) but correct, and simple enough not
+    /// to need session-boundary tracking for what's meant to be the
+    /// simpler of the two editing modes.
+    fn checkpoint_if_non_modal(&mut self) {
+        if !self.vim_enabled {
+            self.checkpoint();
         }
     }
 
@@ -1145,12 +1264,6 @@ impl QueryEditorComponent {
         frame.render_widget(Paragraph::new(Text::from(lines)), text_area);
 
         if inner.height > text_height {
-            let (mode_label, mode_color) = match self.mode {
-                EditorMode::Normal => (" NORMAL ", theme.accent),
-                EditorMode::Insert => (" INSERT ", theme.warning),
-                EditorMode::Visual => (" VISUAL ", theme.selection_bg),
-                EditorMode::VisualLine => (" V-LINE ", theme.selection_bg),
-            };
             let mode_area = Rect {
                 x: inner.x,
                 y: inner.y + text_height,
@@ -1158,16 +1271,26 @@ impl QueryEditorComponent {
                 height: 1,
             };
             let position = format!(" {}:{} ", self.cursor_row + 1, self.cursor_col + 1);
-            let mut spans = vec![
-                Span::styled(
+            let mut spans = Vec::new();
+            // A mode badge only means something when there's more than one
+            // mode to be in -- with vim mode off this is always Insert, so
+            // showing it would just be noise next to the position.
+            if self.vim_enabled {
+                let (mode_label, mode_color) = match self.mode {
+                    EditorMode::Normal => (" NORMAL ", theme.accent),
+                    EditorMode::Insert => (" INSERT ", theme.warning),
+                    EditorMode::Visual => (" VISUAL ", theme.selection_bg),
+                    EditorMode::VisualLine => (" V-LINE ", theme.selection_bg),
+                };
+                spans.push(Span::styled(
                     mode_label,
                     Style::default()
                         .bg(mode_color)
                         .fg(theme.status_bar_bg)
                         .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(position, Style::default().fg(theme.text_dim)),
-            ];
+                ));
+            }
+            spans.push(Span::styled(position, Style::default().fg(theme.text_dim)));
             if !alive {
                 spans.push(Span::styled(
                     " ● disconnected ",
@@ -1256,6 +1379,123 @@ mod tests {
     }
 
     #[test]
+    fn typing_an_opening_bracket_auto_inserts_its_closer() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        editor.forward_key(key(KeyCode::Char('(')));
+
+        assert_eq!(editor.text(), "()");
+        assert_eq!(editor.cursor_col, 1, "cursor must land between the pair");
+    }
+
+    #[test]
+    fn typing_every_bracket_kind_auto_closes() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        type_str(&mut editor, "([{");
+
+        assert_eq!(editor.text(), "([{}])");
+    }
+
+    #[test]
+    fn typing_a_closing_bracket_right_at_the_auto_inserted_one_skips_over_it_instead_of_duplicating()
+     {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('(')));
+
+        editor.forward_key(key(KeyCode::Char(')')));
+
+        assert_eq!(editor.text(), "()");
+        assert_eq!(
+            editor.cursor_col, 2,
+            "cursor must move past the closer, not insert a second one"
+        );
+    }
+
+    #[test]
+    fn typing_text_inside_an_auto_closed_pair_lands_between_the_brackets() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('(')));
+
+        type_str(&mut editor, "a");
+
+        assert_eq!(editor.text(), "(a)");
+    }
+
+    #[test]
+    fn typing_a_quote_auto_closes_and_a_second_one_skips_over_it() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        editor.forward_key(key(KeyCode::Char('"')));
+        assert_eq!(editor.text(), "\"\"");
+
+        type_str(&mut editor, "hi");
+        assert_eq!(editor.text(), "\"hi\"");
+
+        editor.forward_key(key(KeyCode::Char('"')));
+        assert_eq!(
+            editor.text(),
+            "\"hi\"",
+            "the closing quote must skip over, not duplicate"
+        );
+    }
+
+    #[test]
+    fn a_closing_bracket_typed_where_nothing_matches_still_inserts_literally() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        editor.forward_key(key(KeyCode::Char(')')));
+
+        assert_eq!(editor.text(), ")");
+    }
+
+    #[test]
+    fn backspace_inside_an_empty_auto_closed_pair_removes_both_characters() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('(')));
+
+        editor.forward_key(key(KeyCode::Backspace));
+
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn backspace_with_content_inside_a_pair_only_removes_that_content() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('(')));
+        type_str(&mut editor, "a");
+
+        editor.forward_key(key(KeyCode::Backspace));
+
+        assert_eq!(
+            editor.text(),
+            "()",
+            "only the 'a' should go, not the pair around it"
+        );
+    }
+
+    #[test]
+    fn pasted_text_containing_brackets_is_not_auto_closed_or_skipped() {
+        let mut editor = QueryEditorComponent::new();
+
+        editor.insert_at_cursor("f(x)");
+
+        assert_eq!(
+            editor.text(),
+            "f(x)",
+            "insert_at_cursor is a paste/snippet path, not a keystroke -- it must land literally"
+        );
+    }
+
+    #[test]
     fn enter_in_insert_mode_splits_the_line_at_the_cursor() {
         let mut editor = QueryEditorComponent::new();
         editor.forward_key(key(KeyCode::Char('i')));
@@ -1310,6 +1550,65 @@ mod tests {
 
         // Cursor sat on 'b' (index 1) after Esc, so "X" lands before it.
         assert_eq!(editor.text(), "aXb");
+    }
+
+    #[test]
+    fn new_defaults_to_vim_enabled() {
+        let editor = QueryEditorComponent::new();
+
+        assert!(editor.vim_enabled());
+        assert_eq!(editor.mode, EditorMode::Normal);
+    }
+
+    #[test]
+    fn disabling_vim_mode_pins_the_editor_in_insert_mode() {
+        let mut editor = QueryEditorComponent::new();
+
+        editor.set_vim_enabled(false);
+
+        assert!(!editor.vim_enabled());
+        assert_eq!(editor.mode, EditorMode::Insert);
+    }
+
+    #[test]
+    fn with_vim_mode_off_esc_does_not_leave_insert_mode() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_vim_enabled(false);
+
+        editor.forward_key(key(KeyCode::Esc));
+
+        assert_eq!(
+            editor.mode,
+            EditorMode::Insert,
+            "there's no Normal mode to drop into with vim mode off"
+        );
+    }
+
+    #[test]
+    fn with_vim_mode_off_typing_needs_no_i_first() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_vim_enabled(false);
+
+        type_str(&mut editor, "ab");
+
+        assert_eq!(editor.text(), "ab");
+    }
+
+    #[test]
+    fn with_vim_mode_off_undo_is_reachable_and_per_keystroke() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_vim_enabled(false);
+        type_str(&mut editor, "ab");
+        assert_eq!(editor.text(), "ab");
+
+        editor.undo();
+
+        assert_eq!(
+            editor.text(),
+            "a",
+            "vim mode has no Normal-mode transition to checkpoint on, so each \
+             keystroke is its own undo step instead of a whole typing session"
+        );
     }
 
     #[test]
