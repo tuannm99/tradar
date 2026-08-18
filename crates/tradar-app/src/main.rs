@@ -137,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
             connection,
             epoch,
             tab,
+            ..
         } = action
         {
             spawn_connect(registry.clone(), connect_tx.clone(), connection, epoch, tab);
@@ -303,6 +304,7 @@ async fn run(
                     connection,
                     epoch,
                     tab,
+                    ..
                 } => {
                     spawn_connect(registry.clone(), connect_tx.clone(), connection, epoch, tab);
                 }

@@ -185,6 +185,9 @@ pub enum Command {
     ToggleNavigator,
     // Picker
     Open,
+    /// Like `Open`, but never redirects to a tab that already has the
+    /// selected connection open -- always dials a new, independent session.
+    OpenNewSession,
     NewConnection,
     EditConnection,
     DeleteConnection,
@@ -313,6 +316,14 @@ pub enum Command {
     SearchNext,
     /// `N`: repeat the last buffer search backward.
     SearchPrev,
+    /// `ctrl-z` in the editor -- the only way to undo with vim mode off,
+    /// since `u` only exists in vim's Normal mode. Also works with vim
+    /// mode on, as an extra alias alongside `u`.
+    Undo,
+    /// `ctrl-j` in the editor, the redo counterpart to `Undo` -- see its
+    /// own doc comment and the binding's comment in `Context::Editor` for
+    /// why not a more conventional key.
+    Redo,
     // Lists
     MoveDown,
     MoveUp,
@@ -342,6 +353,7 @@ impl Command {
             Self::PrevTab => "prev-tab",
             Self::ToggleNavigator => "toggle-navigator",
             Self::Open => "open",
+            Self::OpenNewSession => "open-new-session",
             Self::NewConnection => "new-connection",
             Self::EditConnection => "edit-connection",
             Self::DeleteConnection => "delete-connection",
@@ -403,6 +415,8 @@ impl Command {
             Self::SearchInBuffer => "search-in-buffer",
             Self::SearchNext => "search-next",
             Self::SearchPrev => "search-prev",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
             Self::MoveTop => "move-top",
@@ -423,7 +437,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 81] = [
+    const ALL: [Self; 84] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -431,6 +445,7 @@ impl Command {
         Self::PrevTab,
         Self::ToggleNavigator,
         Self::Open,
+        Self::OpenNewSession,
         Self::NewConnection,
         Self::EditConnection,
         Self::DeleteConnection,
@@ -492,6 +507,8 @@ impl Command {
         Self::SearchInBuffer,
         Self::SearchNext,
         Self::SearchPrev,
+        Self::Undo,
+        Self::Redo,
         Self::MoveDown,
         Self::MoveUp,
         Self::MoveTop,
@@ -516,7 +533,8 @@ impl Command {
             Self::NextTab => "Go to the next tab",
             Self::PrevTab => "Go to the previous tab",
             Self::ToggleNavigator => "Show/focus the database navigator",
-            Self::Open => "Connect to the selected connection",
+            Self::Open => "Connect (switches to the tab it's already open on, if any)",
+            Self::OpenNewSession => "Open a new session even if already connected",
             Self::NewConnection => "Add a connection",
             Self::EditConnection => "Edit the selected connection",
             Self::DeleteConnection => "Delete the selected connection",
@@ -578,6 +596,8 @@ impl Command {
             Self::SearchInBuffer => "Search the buffer",
             Self::SearchNext => "Repeat the last search forward",
             Self::SearchPrev => "Repeat the last search backward",
+            Self::Undo => "Undo the last edit",
+            Self::Redo => "Redo the last undone edit",
             Self::MoveDown => "Move down",
             Self::MoveUp => "Move up",
             Self::MoveTop => "Jump to the top",
@@ -716,6 +736,7 @@ impl Default for Keymap {
             parse_defaults(&[
                 ("q", Command::Quit),
                 ("enter", Command::Open),
+                ("ctrl-enter", Command::OpenNewSession),
                 ("a", Command::NewConnection),
                 ("e", Command::EditConnection),
                 ("d", Command::DeleteConnection),
@@ -845,6 +866,18 @@ impl Default for Keymap {
                 ("/", Command::SearchInBuffer),
                 ("n", Command::SearchNext),
                 ("N", Command::SearchPrev),
+                // Reachable regardless of vim mode -- unlike `u`/`U`
+                // (vim's own Normal-mode-only undo/redo), a modified key
+                // isn't shadowed by Insert mode's plain-character fast
+                // path, so it's the only way to undo/redo at all with vim
+                // mode off. `ctrl-r` (the closest standard redo binding)
+                // is already `History` in `Context::QueryScreen`, checked
+                // ahead of this context; `ctrl-y`/`ctrl-shift-z` are taken
+                // or, for shift, indistinguishable from plain `ctrl-z` in
+                // this keymap (see `KeyPress::new`) -- `ctrl-j` is the
+                // nearest free key to `ctrl-z` on the keyboard instead.
+                ("ctrl-z", Command::Undo),
+                ("ctrl-j", Command::Redo),
             ]),
         );
         bindings.insert(

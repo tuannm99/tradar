@@ -193,6 +193,11 @@ impl RootComponent {
                     connection,
                     epoch,
                     tab: tab_index,
+                    // Each tab in a saved session is its own deliberate
+                    // slot, even if two of them name the same connection --
+                    // restoring must reproduce that layout exactly, not
+                    // collapse duplicates into fewer tabs than were saved.
+                    force_new: true,
                 });
             }
         }
@@ -200,6 +205,53 @@ impl RootComponent {
             self.active_tab = session.active_tab.min(self.tabs.len() - 1);
         }
         requests
+    }
+
+    /// Which tab (if any) already has `name` open and connected.
+    fn tab_for_connection(&self, name: &str) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
+            tab.title.as_deref() == Some(name) && matches!(tab.screen, ScreenSlot::Active(_))
+        })
+    }
+
+    /// Post-processes whatever the active tab's screen (or its picker) just
+    /// returned. A picker's `OpenRequested` carries a placeholder `tab` --
+    /// it has no notion of tabs -- so this fills in the real one; it's also
+    /// the one place that knows what's open in every *other* tab, so unless
+    /// `force_new` says otherwise (`Ctrl+Enter`, "Open new session" from the
+    /// context menu), a request for a connection that's already open
+    /// elsewhere redirects into switching to that tab instead of dialing a
+    /// second session to it. Shared by `handle_key_event` (`Enter`) and
+    /// `handle_mouse_event` (double-click), so both paths get the same
+    /// redirect rather than one quietly missing it.
+    fn route_open_requested(&mut self, tab_index: usize, action: Option<Action>) -> Option<Action> {
+        match action {
+            Some(Action::OpenRequested {
+                connection,
+                epoch,
+                force_new,
+                ..
+            }) => {
+                if !force_new && let Some(existing) = self.tab_for_connection(&connection.name) {
+                    // The picker already set its own `connecting` indicator
+                    // and bumped `connect_epoch` before returning this --
+                    // undo that here, since no connect is actually going to
+                    // happen on `tab_index`. Left alone, that tab's picker
+                    // would show "connecting to '<name>'…" forever: nothing
+                    // is in flight to ever clear it.
+                    self.tabs[tab_index].connection_picker.connecting = None;
+                    self.active_tab = existing;
+                    return None;
+                }
+                Some(Action::OpenRequested {
+                    connection,
+                    epoch,
+                    tab: tab_index,
+                    force_new,
+                })
+            }
+            other => other,
+        }
     }
 
     /// The navigator's view of the world: every saved connection, plus what
@@ -210,10 +262,7 @@ impl RootComponent {
         self.connections
             .iter()
             .map(|connection| {
-                let tab = self.tabs.iter().position(|tab| {
-                    tab.title.as_deref() == Some(connection.name.as_str())
-                        && matches!(tab.screen, ScreenSlot::Active(_))
-                });
+                let tab = self.tab_for_connection(&connection.name);
                 let screen = tab.and_then(|index| match &self.tabs[index].screen {
                     ScreenSlot::Active(screen) => Some(screen),
                     ScreenSlot::ConnectionPicker => None,
@@ -287,6 +336,11 @@ impl RootComponent {
                 connection,
                 epoch,
                 tab,
+                // The navigator already established nothing has this open
+                // (that's exactly why `NavOutcome::Open` fired instead of
+                // `Focus`) -- no need to make `route_open_requested` look
+                // again.
+                force_new: true,
             }),
             _ => None,
         }
@@ -421,20 +475,7 @@ impl Component for RootComponent {
                 .handle_key_event(code, modifiers),
             ScreenSlot::Active(screen) => screen.handle_key_event(code, modifiers),
         };
-
-        // `ConnectionPickerComponent` has no notion of tabs, so it fills
-        // `tab` with a placeholder -- overwrite it with the real index here,
-        // the one place that actually knows it.
-        match action {
-            Some(Action::OpenRequested {
-                connection, epoch, ..
-            }) => Some(Action::OpenRequested {
-                connection,
-                epoch,
-                tab: tab_index,
-            }),
-            other => other,
-        }
+        self.route_open_requested(tab_index, action)
     }
 
     fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
@@ -472,11 +513,14 @@ impl Component for RootComponent {
             self.navigator_focused = false;
         }
 
-        let tab = &mut self.tabs[self.active_tab];
-        match &mut tab.screen {
-            ScreenSlot::ConnectionPicker => tab.connection_picker.handle_mouse_event(event),
+        let tab_index = self.active_tab;
+        let action = match &mut self.tabs[tab_index].screen {
+            ScreenSlot::ConnectionPicker => self.tabs[tab_index]
+                .connection_picker
+                .handle_mouse_event(event),
             ScreenSlot::Active(screen) => screen.handle_mouse_event(event),
-        }
+        };
+        self.route_open_requested(tab_index, action)
     }
 
     fn update(&mut self, action: Action) -> Option<Action> {
@@ -585,9 +629,23 @@ impl Component for RootComponent {
             content_area
         };
 
-        let tab = &mut self.tabs[self.active_tab];
+        let tab_index = self.active_tab;
+        // Recomputed on every draw rather than cached -- it's a walk over a
+        // list that's already in memory (same trade-off as `nav_connections`
+        // above), and the alternative is invalidating a cache whenever any
+        // tab connects, disconnects or closes.
+        let open_status: Vec<Option<usize>> = self.tabs[tab_index]
+            .connection_picker
+            .connections
+            .iter()
+            .map(|c| self.tab_for_connection(&c.name))
+            .collect();
+        let tab = &mut self.tabs[tab_index];
         match &mut tab.screen {
-            ScreenSlot::ConnectionPicker => tab.connection_picker.draw(frame, screen_area),
+            ScreenSlot::ConnectionPicker => {
+                tab.connection_picker.set_open_status(open_status);
+                tab.connection_picker.draw(frame, screen_area);
+            }
             ScreenSlot::Active(screen) => screen.draw(frame, screen_area),
         }
 
@@ -930,6 +988,106 @@ mod tests {
             panic!("expected OpenRequested");
         };
         assert_eq!(tab, 1);
+    }
+
+    #[test]
+    fn opening_a_connection_already_active_on_another_tab_switches_to_it_instead() {
+        let mut root = root();
+        root.update(Action::Opened {
+            connection: connections()[1].clone(), // "local-postgres"
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: 0,
+            tab: 0,
+        });
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+        root.handle_key_event(KeyCode::Down, KeyModifiers::NONE); // select "local-postgres"
+
+        let action = root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(
+            action.is_none(),
+            "the redirect must not also fire a second connect"
+        );
+        assert_eq!(root.active_tab, 0, "should have jumped back to tab 0");
+        assert!(
+            matches!(root.tabs[1].screen, ScreenSlot::ConnectionPicker),
+            "tab 1 must stay on the picker rather than starting a connect"
+        );
+        assert!(
+            root.tabs[1].connection_picker.connecting.is_none(),
+            "nothing is in flight for tab 1, so it must not be stuck showing \
+             a 'connecting…' indicator that will never clear"
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_opens_a_new_session_even_when_the_connection_is_already_open_elsewhere() {
+        let mut root = root();
+        root.update(Action::Opened {
+            connection: connections()[1].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: 0,
+            tab: 0,
+        });
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+        root.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+
+        let action = root.handle_key_event(KeyCode::Enter, KeyModifiers::CONTROL);
+
+        match action {
+            Some(Action::OpenRequested {
+                connection,
+                tab,
+                force_new,
+                ..
+            }) => {
+                assert_eq!(connection.name, "local-postgres");
+                assert_eq!(tab, 1);
+                assert!(force_new);
+            }
+            other => panic!(
+                "expected OpenRequested, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+        assert_eq!(
+            root.active_tab, 1,
+            "an explicit new session must not also jump tabs"
+        );
+    }
+
+    #[test]
+    fn double_clicking_a_connection_already_active_on_another_tab_switches_to_it_too() {
+        let mut root = root();
+        root.update(Action::Opened {
+            connection: connections()[1].clone(),
+            screen: Box::new(FakeScreen {
+                dropped: Rc::new(Cell::new(false)),
+            }),
+            epoch: 0,
+            tab: 0,
+        });
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| root.draw(frame, frame.area()))
+            .unwrap();
+
+        // Row 0 is the tab bar (2 tabs are open), row 1 the picker's
+        // border, row 3 "local-postgres" (the second saved connection).
+        root.handle_mouse_event(click_at(5, 3));
+        let second = root.handle_mouse_event(click_at(5, 3));
+
+        assert!(second.is_none());
+        assert_eq!(root.active_tab, 0);
     }
 
     #[test]

@@ -19,11 +19,20 @@ pub enum Action {
         /// Which tab issued this request. Set by the originating
         /// `ConnectionPickerComponent` to a placeholder and overwritten by
         /// `RootComponent` with the real tab index -- see
-        /// `RootComponent::handle_key_event` in `tradar-app`. Carried end to
-        /// end through `main.rs`'s connect task and back so a reply lands on
-        /// the right tab even if the user switched tabs while it was in
+        /// `RootComponent::route_open_requested` in `tradar-app`. Carried end
+        /// to end through `main.rs`'s connect task and back so a reply lands
+        /// on the right tab even if the user switched tabs while it was in
         /// flight.
         tab: usize,
+        /// `false` (the normal case: `Enter`, a single click via double-click)
+        /// lets `RootComponent` redirect this into switching to a tab that
+        /// already has `connection` open, instead of dialing a second,
+        /// independent session to it. `true` (`Ctrl+Enter`, or the context
+        /// menu's "Open new session") skips that redirect -- the user
+        /// explicitly asked for a parallel session, same idea as
+        /// Ctrl+clicking a link opens a new browser tab instead of switching
+        /// to one that's already open on it.
+        force_new: bool,
     },
     Opened {
         connection: SavedConnection,

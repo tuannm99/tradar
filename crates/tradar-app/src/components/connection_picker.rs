@@ -2,6 +2,8 @@
 //! request a connect. Implements `Component` because `RootComponent`
 //! routes keys to it directly whenever it's the active screen.
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -18,6 +20,12 @@ use tradar_core::vim_list::{self, VimMove};
 
 use crate::components::connection_form::{ConnectionFormComponent, FormMode, FormOutcome};
 
+/// A second `Down(Left)` on the same row inside this window counts as a
+/// double-click (open) rather than two separate single clicks (select).
+/// No platform-standard value exists in a terminal; 500ms matches what
+/// most desktop environments default to.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+
 pub struct ConnectionPickerComponent {
     pub connections: Vec<SavedConnection>,
     pub selected: usize,
@@ -30,6 +38,13 @@ pub struct ConnectionPickerComponent {
     /// Cleared by `RootComponent` once the matching `Opened`/`OpenFailed`
     /// lands (see its `update`).
     pub connecting: Option<String>,
+    /// Which tab (if any) already has each connection open, parallel to
+    /// `connections` -- refreshed by `RootComponent` right before every
+    /// `draw`, since only it knows about tabs. Drives both the "already
+    /// open" badge and the right-click menu's wording; empty (the default,
+    /// including in every test that doesn't call `set_open_status`) just
+    /// means nothing is known to be open, which is a safe thing to assume.
+    open_in_tab: Vec<Option<usize>>,
     /// Half-finished two-key binding (the first `g` of `gg`), owned here
     /// because it's per-list state -- see `tradar_core::keymap`.
     pending: Option<KeyPress>,
@@ -43,6 +58,15 @@ pub struct ConnectionPickerComponent {
     /// Set while a delete is waiting to be confirmed -- deleting a
     /// connection is one keystroke otherwise, and it edits a file.
     confirming_delete: bool,
+    /// Right-click menu: connect/switch, open a new session, edit, delete
+    /// -- whatever's relevant to the row that was clicked. See
+    /// `dispatch_command`'s doc comment for why confirming a menu item runs
+    /// through the exact same code a keyboard shortcut would.
+    context_menu: Option<ui::ContextMenu>,
+    /// The row and time of the last `Down(Left)`, to recognize a second one
+    /// on the same row within `DOUBLE_CLICK_WINDOW` as "open" rather than
+    /// "select (again)".
+    last_click: Option<(usize, Instant)>,
     /// Connector ids compiled into this build, for the form's driver
     /// picker. Comes from `main.rs`'s registry via `RootComponent`.
     drivers: Vec<String>,
@@ -60,15 +84,26 @@ impl ConnectionPickerComponent {
             last_error: None,
             connect_epoch: 0,
             connecting: None,
+            open_in_tab: Vec::new(),
             pending: None,
             list_state: ListState::default(),
             list_area: Rect::ZERO,
             visible_height: 0,
             form: None,
             confirming_delete: false,
+            context_menu: None,
+            last_click: None,
             drivers: Vec::new(),
             store: None,
         }
+    }
+
+    /// Called by `RootComponent` right before every `draw`, since it's the
+    /// only thing that knows what's open in which tab. `status` is parallel
+    /// to `connections` -- `Some(tab)` when that connection already has an
+    /// active tab, `None` when it doesn't.
+    pub fn set_open_status(&mut self, status: Vec<Option<usize>>) {
+        self.open_in_tab = status;
     }
 
     /// Wires up editing: without a driver list and a store the picker is
@@ -146,7 +181,7 @@ impl ConnectionPickerComponent {
         );
     }
 
-    fn open_selected(&mut self) -> Option<Action> {
+    fn open_selected(&mut self, force_new: bool) -> Option<Action> {
         let connection = self.connections.get(self.selected).cloned()?;
         self.connect_epoch += 1;
         // A stale error from a previous failed attempt must not keep
@@ -160,7 +195,49 @@ impl ConnectionPickerComponent {
             // index right after this call returns, since a lone picker has
             // no notion of which tab it belongs to.
             tab: 0,
+            force_new,
         })
+    }
+
+    /// The list's inner area (inside its border), for hit-testing a click.
+    fn inner_list_area(&self) -> Rect {
+        Rect {
+            x: self.list_area.x.saturating_add(1),
+            y: self.list_area.y.saturating_add(1),
+            width: self.list_area.width.saturating_sub(2),
+            height: self.list_area.height.saturating_sub(2),
+        }
+    }
+
+    /// Runs whatever `command` means for this screen -- shared by keyboard
+    /// dispatch (`handle_key_event`) and a right-click context menu's
+    /// confirmed choice (`handle_mouse_event`), so a menu item runs through
+    /// the exact same code a keyboard shortcut for it would, not a second
+    /// copy that can drift out of sync.
+    fn dispatch_command(&mut self, command: Command) -> Option<Action> {
+        match command {
+            Command::Quit => Some(Action::Quit),
+            Command::Open => self.open_selected(false),
+            Command::OpenNewSession => self.open_selected(true),
+            Command::Help => Some(Action::ShowHelp),
+            Command::NewConnection => {
+                self.open_form(FormMode::Add);
+                None
+            }
+            Command::EditConnection => {
+                if self.selected < self.connections.len() {
+                    self.open_form(FormMode::Edit(self.selected));
+                }
+                None
+            }
+            Command::DeleteConnection => {
+                if self.store.is_some() && self.selected < self.connections.len() {
+                    self.confirming_delete = true;
+                }
+                None
+            }
+            _ => None,
+        }
     }
 }
 
@@ -169,6 +246,18 @@ impl Component for ConnectionPickerComponent {
         if let Some(form) = self.form.as_mut() {
             if let Some(outcome) = form.handle_key_event(code, modifiers) {
                 self.apply_form_outcome(outcome);
+            }
+            return None;
+        }
+
+        if let Some(menu) = self.context_menu.as_mut() {
+            match menu.handle_key_event(code) {
+                ui::ContextMenuOutcome::Open => {}
+                ui::ContextMenuOutcome::Closed => self.context_menu = None,
+                ui::ContextMenuOutcome::Confirmed(command) => {
+                    self.context_menu = None;
+                    return self.dispatch_command(command);
+                }
             }
             return None;
         }
@@ -195,31 +284,23 @@ impl Component for ConnectionPickerComponent {
             return None;
         }
 
-        match command {
-            Command::Quit => Some(Action::Quit),
-            Command::Open => self.open_selected(),
-            Command::Help => Some(Action::ShowHelp),
-            Command::NewConnection => {
-                self.open_form(FormMode::Add);
-                None
-            }
-            Command::EditConnection => {
-                if self.selected < self.connections.len() {
-                    self.open_form(FormMode::Edit(self.selected));
-                }
-                None
-            }
-            Command::DeleteConnection => {
-                if self.store.is_some() && self.selected < self.connections.len() {
-                    self.confirming_delete = true;
-                }
-                None
-            }
-            _ => None,
-        }
+        self.dispatch_command(command)
     }
 
     fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        // A context menu is its own small overlay: a left click either hits
+        // one of its items or dismisses it (clicking away closes a popup,
+        // standard behavior) -- either way nothing behind it should also
+        // react to the same click.
+        if let Some(menu) = self.context_menu.take() {
+            if let MouseEventKind::Down(MouseButton::Left) = event.kind
+                && let Some(command) = menu.click(self.list_area, event.column, event.row)
+            {
+                return self.dispatch_command(command);
+            }
+            return None;
+        }
+
         // The form and the delete confirmation are modal: a click behind
         // them would act on a list the user can't see.
         if self.form.is_some() || self.confirming_delete {
@@ -227,12 +308,28 @@ impl Component for ConnectionPickerComponent {
         }
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let inner = Rect {
-                    x: self.list_area.x.saturating_add(1),
-                    y: self.list_area.y.saturating_add(1),
-                    width: self.list_area.width.saturating_sub(2),
-                    height: self.list_area.height.saturating_sub(2),
-                };
+                let inner = self.inner_list_area();
+                if let Some(index) = ui::index_at(
+                    inner,
+                    self.list_state.offset(),
+                    event.row,
+                    self.connections.len(),
+                ) {
+                    let now = Instant::now();
+                    let is_double_click = self.last_click.is_some_and(|(prev, at)| {
+                        prev == index && now.duration_since(at) < DOUBLE_CLICK_WINDOW
+                    });
+                    self.selected = index;
+                    if is_double_click {
+                        self.last_click = None;
+                        return self.dispatch_command(Command::Open);
+                    }
+                    self.last_click = Some((index, now));
+                }
+                None
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                let inner = self.inner_list_area();
                 if let Some(index) = ui::index_at(
                     inner,
                     self.list_state.offset(),
@@ -240,6 +337,20 @@ impl Component for ConnectionPickerComponent {
                     self.connections.len(),
                 ) {
                     self.selected = index;
+                    let mut items = Vec::new();
+                    match self.open_in_tab.get(index).copied().flatten() {
+                        Some(tab) => {
+                            items.push((format!("Switch to tab {}", tab + 1), Command::Open));
+                            items.push(("Open new session".to_string(), Command::OpenNewSession));
+                        }
+                        None => items.push(("Connect".to_string(), Command::Open)),
+                    }
+                    if self.store.is_some() {
+                        items.push(("Edit connection".to_string(), Command::EditConnection));
+                        items.push(("Delete connection".to_string(), Command::DeleteConnection));
+                    }
+                    self.context_menu =
+                        Some(ui::ContextMenu::new((event.column, event.row), items));
                 }
                 None
             }
@@ -281,8 +392,9 @@ impl Component for ConnectionPickerComponent {
         let items: Vec<ListItem> = self
             .connections
             .iter()
-            .map(|connection| {
-                ListItem::new(Line::from(vec![
+            .enumerate()
+            .map(|(index, connection)| {
+                let mut spans = vec![
                     Span::styled(
                         format!("  {}", connection.name),
                         Style::default().fg(theme.text),
@@ -291,7 +403,18 @@ impl Component for ConnectionPickerComponent {
                         format!("  {}", connection.driver),
                         Style::default().fg(theme.text_dim),
                     ),
-                ]))
+                ];
+                // Quiet when it's only open here or nowhere -- a badge on
+                // every row would just be noise; this calls out the one
+                // case that matters, that opening it again would land on an
+                // *existing* session elsewhere rather than a fresh one.
+                if let Some(Some(tab)) = self.open_in_tab.get(index) {
+                    spans.push(Span::styled(
+                        format!("  ● tab {}", tab + 1),
+                        Style::default().fg(theme.accent),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
 
@@ -380,6 +503,11 @@ impl Component for ConnectionPickerComponent {
             let popup = ui::centered_rect(70, 40, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             form.draw(frame, popup);
+        }
+
+        // Drawn last of all so it sits above everything, including the form.
+        if let Some(menu) = &self.context_menu {
+            menu.draw(frame, list_area);
         }
     }
 }
@@ -789,6 +917,210 @@ mod tests {
         picker.handle_mouse_event(click_at(5, 6));
 
         assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn double_clicking_a_row_opens_it() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        picker.handle_mouse_event(click_at(5, 2));
+        let second = picker.handle_mouse_event(click_at(5, 2));
+
+        match second {
+            Some(Action::OpenRequested {
+                connection,
+                force_new,
+                ..
+            }) => {
+                assert_eq!(connection.name, "local-postgres");
+                assert!(
+                    !force_new,
+                    "a plain double-click must not force a new session"
+                );
+            }
+            other => panic!(
+                "expected OpenRequested, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+    }
+
+    #[test]
+    fn two_single_clicks_on_the_same_row_far_apart_do_not_open_it() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        picker.handle_mouse_event(click_at(5, 2));
+        // Backdate the recorded click past the double-click window, standing
+        // in for real time having passed between two separate single clicks.
+        picker.last_click = picker
+            .last_click
+            .map(|(index, at)| (index, at - DOUBLE_CLICK_WINDOW));
+        let second = picker.handle_mouse_event(click_at(5, 2));
+
+        assert!(second.is_none());
+        assert_eq!(picker.selected, 1);
+    }
+
+    #[test]
+    fn ctrl_enter_requests_a_new_session_even_though_open_selected_normally_would_not() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+
+        let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::CONTROL);
+
+        match action {
+            Some(Action::OpenRequested { force_new, .. }) => assert!(force_new),
+            other => panic!(
+                "expected OpenRequested, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+    }
+
+    #[test]
+    fn plain_enter_requests_open_without_forcing_a_new_session() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+
+        let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        match action {
+            Some(Action::OpenRequested { force_new, .. }) => assert!(!force_new),
+            other => panic!(
+                "expected OpenRequested, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+    }
+
+    fn right_click_at(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn right_clicking_a_connection_not_open_elsewhere_offers_only_connect() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        picker.handle_mouse_event(right_click_at(5, 1));
+        assert!(picker.context_menu.is_some());
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Connect"), "buffer was: {text}");
+        assert!(!text.contains("Switch to tab"), "buffer was: {text}");
+        assert!(!text.contains("Open new session"), "buffer was: {text}");
+
+        // The one item present is `Command::Open`, not forcing a new session.
+        let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        match action {
+            Some(Action::OpenRequested { force_new, .. }) => assert!(!force_new),
+            other => panic!(
+                "expected OpenRequested, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+    }
+
+    #[test]
+    fn right_clicking_a_connection_open_elsewhere_offers_switch_and_a_new_session() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.set_open_status(vec![None, Some(2)]);
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        // Row 2 is "local-postgres" (index 1), the one marked open on tab 2.
+        picker.handle_mouse_event(right_click_at(5, 2));
+        assert!(picker.context_menu.is_some());
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Switch to tab 3"), "buffer was: {text}");
+        assert!(text.contains("Open new session"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn confirming_open_new_session_from_the_context_menu_dispatches_it() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.set_open_status(vec![None, Some(2)]);
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+        picker.handle_mouse_event(right_click_at(5, 2));
+
+        // "Switch to tab 3" is first (index 0); move down to "Open new
+        // session" and confirm it.
+        picker.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
+        let action = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        match action {
+            Some(Action::OpenRequested {
+                connection,
+                force_new,
+                ..
+            }) => {
+                assert_eq!(connection.name, "local-postgres");
+                assert!(force_new);
+            }
+            other => panic!(
+                "expected OpenRequested, got a different action or none: {}",
+                if other.is_some() { "Some(_)" } else { "None" }
+            ),
+        }
+        assert!(
+            picker.context_menu.is_none(),
+            "the menu should close once a choice is confirmed"
+        );
+    }
+
+    #[test]
+    fn draw_shows_the_already_open_badge_only_for_the_connection_that_has_one() {
+        let mut picker = ConnectionPickerComponent::new(connections());
+        picker.set_open_status(vec![None, Some(2)]);
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| picker.draw(frame, frame.area()))
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("tab 3"), "buffer was: {text}");
+        // `buffer_text` flattens every cell into one string with no row
+        // separators, so isolating "sqlite's row has no badge" means
+        // counting rather than searching a single line: exactly one
+        // connection (local-postgres, marked open) should carry a badge.
+        assert_eq!(
+            text.matches("● tab").count(),
+            1,
+            "expected exactly one badge, buffer was: {text}"
+        );
     }
 
     #[test]
