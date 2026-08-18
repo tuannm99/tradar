@@ -2,19 +2,21 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::event::{
-    self, Event, KeyEventKind, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    Event, EventStream, KeyEventKind, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     supports_keyboard_enhancement,
 };
+use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
+use tokio::time::MissedTickBehavior;
 
 use tradar_app::components::RootComponent;
 use tradar_connector_spi::{Connector, Session};
@@ -247,6 +249,21 @@ async fn run(
     } = wiring;
     terminal.draw(|frame| root.draw(frame, frame.area()))?;
 
+    // A `Stream` read via `tokio::select!` rather than the old
+    // `event::poll`/`event::read` pair, which blocked the calling OS thread
+    // (synchronously, no `.await`) for up to 50ms every time there was
+    // nothing to read -- fine on a many-core dev machine where another
+    // tokio worker thread picks up the slack, but a real stall on a
+    // constrained runtime (few cores, or `flavor = "current_thread"`),
+    // where it could delay the 15s connection-liveness ping or a
+    // background connect's own polling. `ticker` keeps the old cadence for
+    // everything that isn't a terminal event -- draining the two channels
+    // below and calling `root.tick()` (spinner, ping) -- so behavior is
+    // unchanged when the terminal is idle, just non-blocking now.
+    let mut events = EventStream::new();
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     while !root.should_quit {
         // Only a key press, a channel message, or a tick that reports a
         // real change is worth a redraw -- otherwise `terminal.draw` would
@@ -255,46 +272,53 @@ async fn run(
         // still.
         let mut dirty = false;
 
-        if event::poll(std::time::Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    dirty = true;
-                    if let Some(action) = root.handle_key_event(key.code, key.modifiers) {
-                        let _ = action_tx.send(action);
+        tokio::select! {
+            event = events.next() => {
+                match event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        dirty = true;
+                        if let Some(action) = root.handle_key_event(key.code, key.modifiers) {
+                            let _ = action_tx.send(action);
+                        }
                     }
-                }
-                // Some terminals report every pointer motion once mouse
-                // capture is on (SGR "any-event" mode), not just clicks and
-                // scrolls -- without this filter, dragging the mouse a long
-                // diagonal across the grid queues a redraw per motion event
-                // `handle_mouse_event` was going to ignore anyway (its match
-                // only reacts to a handful of `MouseEventKind`s), and
-                // `event::read` only drains one event per loop iteration, so
-                // the whole burst has to be drawn away before the actual
-                // click lands. Distance-dependent lag: short move, few
-                // motion events; a click on a distant cell, many. Right and
-                // Middle joined Left here once components started using them
-                // (context menus, paste) -- still not `Up`/`Drag`/`Moved`.
-                Event::Mouse(mouse)
-                    if matches!(
-                        mouse.kind,
-                        MouseEventKind::Down(MouseButton::Left)
-                            | MouseEventKind::Down(MouseButton::Right)
-                            | MouseEventKind::Down(MouseButton::Middle)
-                            | MouseEventKind::ScrollDown
-                            | MouseEventKind::ScrollUp
-                    ) =>
-                {
-                    dirty = true;
-                    if let Some(action) = root.handle_mouse_event(mouse) {
-                        let _ = action_tx.send(action);
+                    // Some terminals report every pointer motion once mouse
+                    // capture is on (SGR "any-event" mode), not just clicks and
+                    // scrolls -- without this filter, dragging the mouse a long
+                    // diagonal across the grid queues a redraw per motion event
+                    // `handle_mouse_event` was going to ignore anyway (its match
+                    // only reacts to a handful of `MouseEventKind`s), and each
+                    // `select!` iteration only drains one event from the stream,
+                    // so the whole burst has to be drawn away before the actual
+                    // click lands. Distance-dependent lag: short move, few
+                    // motion events; a click on a distant cell, many. Right and
+                    // Middle joined Left here once components started using them
+                    // (context menus, paste) -- still not `Up`/`Drag`/`Moved`.
+                    Some(Ok(Event::Mouse(mouse)))
+                        if matches!(
+                            mouse.kind,
+                            MouseEventKind::Down(MouseButton::Left)
+                                | MouseEventKind::Down(MouseButton::Right)
+                                | MouseEventKind::Down(MouseButton::Middle)
+                                | MouseEventKind::ScrollDown
+                                | MouseEventKind::ScrollUp
+                        ) =>
+                    {
+                        dirty = true;
+                        if let Some(action) = root.handle_mouse_event(mouse) {
+                            let _ = action_tx.send(action);
+                        }
                     }
+                    // Resize and the key-release/repeat kinds still need a
+                    // redraw, but carry nothing to act on.
+                    Some(Ok(Event::Resize(_, _))) => dirty = true,
+                    // `None` means the terminal's input stream closed (e.g.
+                    // stdin gone) and `Some(Err(_))` a read error -- neither
+                    // is actionable here; the next loop iteration's channel
+                    // drain and `root.tick()` still run either way.
+                    _ => {}
                 }
-                // Resize and the key-release/repeat kinds still need a
-                // redraw, but carry nothing to act on.
-                Event::Resize(_, _) => dirty = true,
-                _ => {}
             }
+            _ = ticker.tick() => {}
         }
 
         while let Ok(action) = action_rx.try_recv() {

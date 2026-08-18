@@ -104,7 +104,7 @@ pub struct QueryScreenComponent {
     /// The last confirmed buffer search, for `n`/`N` to repeat once the bar
     /// itself has closed.
     last_search: Option<String>,
-    /// `Some` only for a Redis connection -- see `docs/backlog.md`'s "Redis:
+    /// `Some` only for a Redis connection -- see `docs/backlog/mockup-ui-2026-08-15.md`'s "Redis:
     /// key browser". `None` for every other driver, which never shows a
     /// sidebar or leaves `ScreenMode::Console`.
     browse: Option<BrowseSidebarComponent>,
@@ -536,7 +536,7 @@ impl QueryScreenComponent {
     /// mode is already handled as a literal character before this is ever
     /// reached (see the plain-char-in-Insert passthrough), and Visual mode
     /// deliberately doesn't support search-as-a-motion (real vim does;
-    /// out of scope here -- see `docs/backlog.md`).
+    /// out of scope here -- see `docs/roadmap.md`).
     fn open_buffer_search(&mut self) {
         if self.query_editor.mode != EditorMode::Normal {
             return;
@@ -3236,24 +3236,24 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_g_is_a_no_op_without_a_browse_sidebar() {
+    fn f2_is_a_no_op_without_a_browse_sidebar() {
         let (mut screen, _rx) = screen();
 
-        screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::F(2), KeyModifiers::NONE);
 
         assert_eq!(screen.mode, ScreenMode::Console);
         assert_eq!(screen.focus, Focus::Editor);
     }
 
     #[test]
-    fn ctrl_g_toggles_a_redis_screen_between_browse_and_console() {
+    fn f2_toggles_a_redis_screen_between_browse_and_console() {
         let (mut screen, _rx) = redis_screen_with(empty_result(), Ok(redis_schema()));
 
-        screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::F(2), KeyModifiers::NONE);
         assert_eq!(screen.mode, ScreenMode::Console);
         assert_eq!(screen.focus, Focus::Editor);
 
-        screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::F(2), KeyModifiers::NONE);
         assert_eq!(screen.mode, ScreenMode::Browse);
         assert_eq!(screen.focus, Focus::Browse);
     }

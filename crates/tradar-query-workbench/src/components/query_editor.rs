@@ -3,7 +3,7 @@
 //! later pass can render tree-sitter-highlighted spans directly instead of
 //! going through a dependency whose syntax highlighting is hard-wired to
 //! `syntect` with no pluggable backend -- see "Đánh bóng UI tổng thể" in
-//! docs/backlog.md.
+//! docs/backlog/roadmap-sub-project.md.
 //!
 //! Deliberately minimal compared to real vim: no macros, no counts, no
 //! operator+motion combos beyond `dd`/`yy` -- enough for editing a query,
@@ -143,6 +143,17 @@ pub struct QueryEditorComponent {
     visible_height: usize,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
+    /// With vim mode off, where the cursor will sit if the *next* key is
+    /// another plain typed character continuing the current run -- lets
+    /// `checkpoint_before_typing` batch a whole run of typed characters
+    /// into one undo step instead of cloning the entire buffer on every
+    /// single keystroke (what happened before this field existed: typing a
+    /// long query was O(buffer length) *per character*). `None` means the
+    /// next character must start a fresh checkpoint; `checkpoint()` resets
+    /// it to `None` on every call, so any other edit (Enter, Backspace, a
+    /// vim command, an external insert) or cursor movement breaks the run
+    /// and the character after it checkpoints again.
+    typing_run_end: Option<(usize, usize)>,
     /// Start lines (in `self.lines`) of statements currently folded --
     /// see `foldable_ranges`. Keyed by line index rather than by statement
     /// identity, so an edit that shifts lines above a fold can make the
@@ -204,6 +215,7 @@ impl QueryEditorComponent {
             visible_height: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            typing_run_end: None,
             folded: HashSet::new(),
             fold_cache: RefCell::new(None),
             highlight_cache: RefCell::new(None),
@@ -273,6 +285,7 @@ impl QueryEditorComponent {
         // undoing into it would silently resurrect the previous query.
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.typing_run_end = None;
         // Same reasoning: line indices in `folded` mean nothing against a
         // buffer they weren't computed from.
         self.folded.clear();
@@ -568,6 +581,10 @@ impl QueryEditorComponent {
     /// than per keystroke, so an entire typing session collapses into a
     /// single undo step, the same as real vim's `i...Esc`.
     fn checkpoint(&mut self) {
+        // Any explicit checkpoint is a fresh edit boundary -- a run of
+        // batched typed characters (see `checkpoint_before_typing`) doesn't
+        // continue past it.
+        self.typing_run_end = None;
         // Editing a folded statement must not silently bury the new text
         // under its still-collapsed body -- open it first so whatever gets
         // typed next is visible.
@@ -1037,26 +1054,35 @@ impl QueryEditorComponent {
                     self.lines[self.cursor_row].extend(current);
                 }
             }
-            KeyCode::Left => self.cursor_col = self.cursor_col.saturating_sub(1),
+            KeyCode::Left => {
+                self.typing_run_end = None;
+                self.cursor_col = self.cursor_col.saturating_sub(1);
+            }
             KeyCode::Right => {
+                self.typing_run_end = None;
                 let max = self.current_line_len();
                 self.cursor_col = (self.cursor_col + 1).min(max);
             }
             KeyCode::Up => {
+                self.typing_run_end = None;
                 if self.cursor_row > 0 {
                     self.cursor_row -= 1;
                     self.clamp_col();
                 }
             }
             KeyCode::Down => {
+                self.typing_run_end = None;
                 if self.cursor_row + 1 < self.lines.len() {
                     self.cursor_row += 1;
                     self.clamp_col();
                 }
             }
             KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                self.checkpoint_if_non_modal();
+                self.checkpoint_before_typing();
                 self.type_char(c);
+                if !self.vim_enabled {
+                    self.typing_run_end = Some((self.cursor_row, self.cursor_col));
+                }
             }
             _ => {}
         }
@@ -1072,6 +1098,26 @@ impl QueryEditorComponent {
     /// simpler of the two editing modes.
     fn checkpoint_if_non_modal(&mut self) {
         if !self.vim_enabled {
+            self.checkpoint();
+        }
+    }
+
+    /// Like `checkpoint_if_non_modal`, but only for the plain-character
+    /// path: a checkpoint is skipped when the cursor is sitting right where
+    /// the *previous* typed character left it (`typing_run_end`), so a
+    /// whole contiguous run of typed characters collapses into one undo
+    /// step instead of cloning the entire buffer per keystroke -- typing a
+    /// long query used to be O(buffer length) *per character* with vim
+    /// mode off. Still one checkpoint per character with vim mode on
+    /// (`checkpoint()` already ran once on entering Insert, so this is a
+    /// no-op there); `Enter`/`Backspace` keep their own per-keystroke
+    /// checkpoint via `checkpoint_if_non_modal` -- only the typing path
+    /// that's actually hot enough to matter is batched.
+    fn checkpoint_before_typing(&mut self) {
+        if self.vim_enabled {
+            return;
+        }
+        if self.typing_run_end != Some((self.cursor_row, self.cursor_col)) {
             self.checkpoint();
         }
     }
@@ -1595,7 +1641,7 @@ mod tests {
     }
 
     #[test]
-    fn with_vim_mode_off_undo_is_reachable_and_per_keystroke() {
+    fn with_vim_mode_off_undo_batches_a_contiguous_typing_run() {
         let mut editor = QueryEditorComponent::new();
         editor.set_vim_enabled(false);
         type_str(&mut editor, "ab");
@@ -1605,9 +1651,49 @@ mod tests {
 
         assert_eq!(
             editor.text(),
+            "",
+            "vim mode has no Normal-mode transition to checkpoint on, but a \
+             contiguous run of typed characters still batches into one undo \
+             step (checkpoint_before_typing) instead of cloning the buffer \
+             per keystroke -- not one step per character"
+        );
+    }
+
+    #[test]
+    fn with_vim_mode_off_a_cursor_jump_starts_a_new_typing_run() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_vim_enabled(false);
+        type_str(&mut editor, "ab");
+        editor.forward_key(key(KeyCode::Left));
+        type_str(&mut editor, "c");
+        assert_eq!(editor.text(), "acb");
+
+        editor.undo();
+        assert_eq!(
+            editor.text(),
+            "ab",
+            "moving the cursor between typing runs breaks the batch, so the \
+             character typed after the move is its own undo step"
+        );
+        editor.undo();
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn with_vim_mode_off_backspace_starts_a_new_typing_run() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_vim_enabled(false);
+        type_str(&mut editor, "ab");
+        editor.forward_key(key(KeyCode::Backspace));
+        type_str(&mut editor, "c");
+        assert_eq!(editor.text(), "ac");
+
+        editor.undo();
+        assert_eq!(
+            editor.text(),
             "a",
-            "vim mode has no Normal-mode transition to checkpoint on, so each \
-             keystroke is its own undo step instead of a whole typing session"
+            "backspace checkpoints on its own and breaks the run, so typing \
+             after it starts a fresh batch"
         );
     }
 

@@ -56,7 +56,7 @@ pub enum Context {
     /// shadowing the other.
     Editor,
     /// Only while the Redis key-browser sidebar has focus (`QueryScreen`'s
-    /// browse mode -- see `docs/backlog.md`'s "Redis: key browser"). Split
+    /// browse mode -- see `docs/backlog/mockup-ui-2026-08-15.md`'s "Redis: key browser"). Split
     /// out for the same reason as `Navigator`: `enter` means something
     /// different here (fetch and show the key's value) than it does in
     /// `Navigator` (insert a name) or `Results` (edit a cell).
@@ -762,7 +762,7 @@ impl Default for Keymap {
                 ("ctrl-l", Command::OpenSnippets),
                 ("ctrl-y", Command::ExportCurl),
                 ("ctrl-e", Command::Export),
-                ("ctrl-g", Command::ToggleBrowseMode),
+                ("f2", Command::ToggleBrowseMode),
                 ("f6", Command::ToggleSplitOrientation),
                 ("ctrl-up", Command::ZoomIn),
                 ("ctrl-down", Command::ZoomOut),
@@ -776,7 +776,7 @@ impl Default for Keymap {
         bindings.insert(
             Context::Rabbit,
             parse_defaults(&[
-                ("ctrl-g", Command::ToggleRabbitMode),
+                ("f2", Command::ToggleRabbitMode),
                 ("r", Command::RabbitRefresh),
                 ("enter", Command::RabbitOpen),
                 ("p", Command::RabbitPublish),
@@ -803,8 +803,13 @@ impl Default for Keymap {
                 ("backtab", Command::PrevField),
                 ("ctrl-enter", Command::HttpSend),
                 ("f5", Command::HttpSend),
-                ("ctrl-left", Command::HttpPrevMethod),
-                ("ctrl-right", Command::HttpNextMethod),
+                // Not `ctrl-left`/`ctrl-right`: `Context::Global` binds those
+                // to `PrevTab`/`NextTab` and is resolved before any screen
+                // ever sees the key (`RootComponent::handle_key_event`
+                // returns as soon as Global matches), so a Http-context
+                // binding on the same keys would never fire.
+                ("ctrl-p", Command::HttpPrevMethod),
+                ("ctrl-n", Command::HttpNextMethod),
                 ("ctrl-k", Command::HttpSaveRequest),
                 ("ctrl-l", Command::HttpOpenRequests),
                 ("f6", Command::ToggleSplitOrientation),

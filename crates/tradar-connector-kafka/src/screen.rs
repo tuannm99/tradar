@@ -2,7 +2,7 @@
 //! mode -- Topics -- with a live-tailing message table (auto-scrolling
 //! unless paused) plus a compose overlay for publishing. See "Thiết kế
 //! UI: Kafka và RabbitMQ" in docs/architecture.md; Groups mode (consumer
-//! lag) is deferred, see `docs/backlog.md`.
+//! lag) is deferred, see `docs/roadmap.md`.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;

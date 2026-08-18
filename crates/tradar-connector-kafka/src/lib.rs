@@ -7,7 +7,7 @@
 //! this crate is the first real exercise of that path.
 //!
 //! v1 scope is Topics mode only (tail + publish) -- consumer-group lag
-//! ("Groups" mode from the design doc) is deferred, see `docs/backlog.md`.
+//! ("Groups" mode from the design doc) is deferred, see `docs/roadmap.md`.
 //!
 //! Exposes only `connector()`; everything else is this crate's own
 //! business.

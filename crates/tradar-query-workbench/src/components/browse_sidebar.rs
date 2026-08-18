@@ -2,7 +2,7 @@
 //! alongside its `kind` (Redis: `TYPE`). A focused pane like `results.rs`,
 //! not an overlay -- `QueryScreenComponent` resolves keys centrally and
 //! calls these plain methods, the same way it drives `ResultsComponent`.
-//! See "Redis: key browser" in `docs/backlog.md`.
+//! See "Redis: key browser" in `docs/backlog/mockup-ui-2026-08-15.md`.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;

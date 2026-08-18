@@ -272,9 +272,14 @@ impl QueryDriver for MongoDriver {
     /// autocomplete and for browsing the navigator. One round trip per
     /// collection is the cost of that guess; acceptable against a normal
     /// instance's collection count, same trade-off SQLite already makes
-    /// with its own per-table `PRAGMA` round trip. A collection that fails
-    /// to sample (empty, or a transient error) just reports no columns
-    /// rather than failing schema browsing for every other collection.
+    /// with its own per-table `PRAGMA` round trip -- but unlike SQLite's
+    /// (a local file, no network latency to pay N times over), these
+    /// round trips run **concurrently** via `join_all` rather than one
+    /// after another, so connect time is bounded by the slowest single
+    /// sample plus the driver's own connection-pool contention, not by
+    /// N times a network round trip. A collection that fails to sample
+    /// (empty, or a transient error) just reports no columns rather than
+    /// failing schema browsing for every other collection.
     ///
     /// Scoped to whichever database was current *at connect time* (the
     /// URI's default database, or `"test"` if it named none) -- the
@@ -286,27 +291,31 @@ impl QueryDriver for MongoDriver {
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let db = self.database();
         let names = db.list_collection_names().await?;
-        let mut schema = Vec::with_capacity(names.len());
-        for name in names {
-            let sample = db
-                .collection::<Document>(&name)
-                .find_one(Document::new())
-                .await;
-            let columns = match sample {
-                Ok(Some(doc)) => {
-                    let mut columns = Vec::new();
-                    flatten_document("", &doc, &mut columns);
-                    columns
+        let samples = futures_util::future::join_all(names.iter().map(|name| {
+            let collection = db.collection::<Document>(name);
+            async move { collection.find_one(Document::new()).await }
+        }))
+        .await;
+        let schema = names
+            .into_iter()
+            .zip(samples)
+            .map(|(name, sample)| {
+                let columns = match sample {
+                    Ok(Some(doc)) => {
+                        let mut columns = Vec::new();
+                        flatten_document("", &doc, &mut columns);
+                        columns
+                    }
+                    Ok(None) | Err(_) => Vec::new(),
+                };
+                SchemaInfo {
+                    name,
+                    columns,
+                    kind: None,
+                    ttl: None,
                 }
-                Ok(None) | Err(_) => Vec::new(),
-            };
-            schema.push(SchemaInfo {
-                name,
-                columns,
-                kind: None,
-                ttl: None,
-            });
-        }
+            })
+            .collect();
         Ok(schema)
     }
 
@@ -1049,6 +1058,47 @@ mod tests {
             result.is_err(),
             "expected find with a projection argument to be rejected, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_schema_samples_every_collection_concurrently() {
+        // `list_schema` fires one `find_one` per collection via
+        // `join_all` rather than one after another (see its doc comment)
+        // -- with several collections, this checks that concurrent
+        // completion order doesn't scramble which sampled columns end up
+        // matched to which collection name.
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+        driver
+            .execute(r#"db.orders.insertOne({"total": 42})"#)
+            .await
+            .unwrap();
+        driver
+            .execute(r#"db.tags.insertOne({"label": "vip"})"#)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        fn names_of(entry: &SchemaInfo) -> Vec<&str> {
+            entry.columns.iter().map(|c| c.name.as_str()).collect()
+        }
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        assert!(names_of(users).contains(&"name"), "{:?}", names_of(users));
+        let orders = schema.iter().find(|s| s.name == "orders").unwrap();
+        assert!(
+            names_of(orders).contains(&"total"),
+            "{:?}",
+            names_of(orders)
+        );
+        let tags = schema.iter().find(|s| s.name == "tags").unwrap();
+        assert!(names_of(tags).contains(&"label"), "{:?}", names_of(tags));
     }
 
     #[tokio::test]

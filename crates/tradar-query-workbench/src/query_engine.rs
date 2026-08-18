@@ -27,7 +27,7 @@ const MAX_DRAIN_PER_TICK: usize = 64;
 
 /// How often `tick()` fires a background `QueryDriver::ping()`. The TUI
 /// otherwise has no way to notice a connection dropped except a query
-/// failing -- see "Trạng thái connection" in docs/backlog.md. Fifteen
+/// failing -- see "Trạng thái connection" in docs/backlog/features-batch-2026-08-14.md. Fifteen
 /// seconds is often enough to catch a drop within the time it'd take to
 /// notice by hand, and rare enough not to matter against a database with
 /// connection logging or a low idle-connection limit.

@@ -194,7 +194,7 @@ impl QueryDriver for RedisDriver {
 
     /// The browse sidebar's Enter action: run the command that shows
     /// `entry`'s full value, shaped as a `Table` specific to its Redis
-    /// type -- see "Redis: key browser" in `docs/backlog.md`. Delegates to
+    /// type -- see "Redis: key browser" in `docs/backlog/mockup-ui-2026-08-15.md`. Delegates to
     /// `execute()` for the actual round trip (same RESP-to-JSON handling
     /// console mode uses), then reshapes that into rows/columns.
     async fn browse_entry(&self, entry: &SchemaInfo) -> anyhow::Result<QueryResult> {
@@ -220,7 +220,7 @@ impl QueryDriver for RedisDriver {
         Some(format!("{target}> {command}"))
     }
 
-    /// Reuses `BrowseKind` (see "Redis: key browser" in `docs/backlog.md`)
+    /// Reuses `BrowseKind` (see "Redis: key browser" in `docs/backlog/mockup-ui-2026-08-15.md`)
     /// for the Read op -- the browse view's command already *is* "show me
     /// this key's full value". Create/Update share a command per type
     /// (Redis's own `SET`/`HSET`/... already overwrite rather than
@@ -246,7 +246,7 @@ impl QueryDriver for RedisDriver {
 }
 
 /// The five Redis types the browse sidebar has a specialized view for --
-/// see item 4 ("Redis: key browser") in `docs/backlog.md`. Streams and
+/// see item 4 ("Redis: key browser") in `docs/backlog/mockup-ui-2026-08-15.md`. Streams and
 /// other types aren't in scope yet: `parse` returns `None` for them, which
 /// `browse_entry` turns into a clear "not supported" error rather than a
 /// silent fallback to something misleading.

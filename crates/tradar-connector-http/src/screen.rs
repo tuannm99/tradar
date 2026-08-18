@@ -712,13 +712,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_left_and_ctrl_right_cycle_the_method_regardless_of_focus() {
+    fn ctrl_n_and_ctrl_p_cycle_the_method_regardless_of_focus() {
         let mut screen = screen();
 
-        screen.handle_key_event(KeyCode::Right, KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
         assert_eq!(screen.method, HttpMethod::Post);
 
-        screen.handle_key_event(KeyCode::Left, KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::Char('p'), KeyModifiers::CONTROL);
         assert_eq!(screen.method, HttpMethod::Get);
     }
 
