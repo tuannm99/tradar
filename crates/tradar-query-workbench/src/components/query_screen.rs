@@ -143,39 +143,127 @@ fn last_used_dir(recent: &[String], queries_dir: &std::path::Path) -> std::path:
         .unwrap_or_else(|| queries_dir.to_path_buf())
 }
 
-/// `schema`, flattened for the navigator: each table at depth 0 with its
-/// columns at depth 1. Called once, in `QueryScreenComponent::new` -- the
-/// navigator decides what to show; this only says what there is, and a
-/// connection's schema never changes after connect, so there's nothing to
-/// recompute this for later.
+/// `schema`, flattened for the navigator, grouped by `SchemaInfo::schema`
+/// then by `SchemaInfo::object_kind` before each table/collection and its
+/// columns -- either grouping level is skipped when every entry in the
+/// group being flattened leaves it `None`, which is what keeps a driver
+/// that never sets those fields (SQLite, Elasticsearch, Redis, and this
+/// codebase's own tests) at exactly the flat connection → table → column
+/// tree this had before either grouping existed: same depths (0 for the
+/// table, 1 for its columns), same order. Called once, in
+/// `QueryScreenComponent::new` -- the navigator decides what to show; this
+/// only says what there is, and a connection's schema never changes after
+/// connect, so there's nothing to recompute this for later.
 fn flatten_outline(schema: &Result<Vec<SchemaInfo>, String>) -> Vec<OutlineEntry> {
     let Ok(schema) = schema else {
         return Vec::new();
     };
-    let mut entries = Vec::new();
+
+    // Bucketed by first-seen order, not sorted -- a schema list sorted
+    // here would silently disagree with whatever order the driver's own
+    // query already returned in (Postgres/Mongo/Cassandra all already
+    // order their rows themselves).
+    let mut schema_groups: Vec<(Option<&str>, Vec<&SchemaInfo>)> = Vec::new();
     for table in schema {
-        entries.push(OutlineEntry {
-            depth: 0,
-            label: table.name.clone(),
-            detail: String::new(),
-            has_children: !table.columns.is_empty(),
-        });
-        for column in &table.columns {
-            entries.push(OutlineEntry {
-                depth: 1,
-                label: column.name.clone(),
-                // Which columns are the key decides whether the results
-                // grid can be edited, so it's worth seeing here.
-                detail: if column.primary_key {
-                    format!("{} pk", column.type_name)
-                } else {
-                    column.type_name.clone()
-                },
-                has_children: false,
-            });
+        let key = table.schema.as_deref();
+        match schema_groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(table),
+            None => schema_groups.push((key, vec![table])),
         }
     }
+
+    let mut entries = Vec::new();
+    for (schema_name, tables) in schema_groups {
+        let depth = match schema_name {
+            Some(name) => {
+                entries.push(OutlineEntry {
+                    depth: 0,
+                    label: name.to_string(),
+                    detail: String::new(),
+                    has_children: !tables.is_empty(),
+                    is_object: false,
+                });
+                1
+            }
+            None => 0,
+        };
+        push_kind_grouped(&mut entries, depth, &tables);
+    }
     entries
+}
+
+/// One level of `flatten_outline`'s grouping, one deeper: same bucket-by-
+/// first-seen-order idea, this time by `object_kind` ("Tables"/"Views"/
+/// ... under a Postgres schema) rather than `schema`.
+fn push_kind_grouped(entries: &mut Vec<OutlineEntry>, depth: u8, tables: &[&SchemaInfo]) {
+    let mut kind_groups: Vec<(Option<&str>, Vec<&SchemaInfo>)> = Vec::new();
+    for &table in tables {
+        let key = table.object_kind.as_deref();
+        match kind_groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(table),
+            None => kind_groups.push((key, vec![table])),
+        }
+    }
+    for (kind, group) in kind_groups {
+        let depth = match kind {
+            Some(kind) => {
+                entries.push(OutlineEntry {
+                    depth,
+                    label: kind_label(kind),
+                    detail: String::new(),
+                    has_children: !group.is_empty(),
+                    is_object: false,
+                });
+                depth + 1
+            }
+            None => depth,
+        };
+        for table in group {
+            push_table(entries, depth, table);
+        }
+    }
+}
+
+/// A plural display label for one of `SchemaInfo::object_kind`'s lowercase
+/// singular values -- owned here, not by whatever driver sets the field,
+/// so a driver never has to think about navigator presentation (see
+/// `SchemaInfo::object_kind`'s own doc comment). Falls back to the raw
+/// value rather than panicking on a kind this hasn't been taught to
+/// pluralize -- an unrecognized label beats a crash.
+fn kind_label(kind: &str) -> String {
+    match kind {
+        "table" => "Tables",
+        "view" => "Views",
+        "function" => "Functions",
+        "procedure" => "Procedures",
+        other => other,
+    }
+    .to_string()
+}
+
+fn push_table(entries: &mut Vec<OutlineEntry>, depth: u8, table: &SchemaInfo) {
+    entries.push(OutlineEntry {
+        depth,
+        label: table.name.clone(),
+        detail: String::new(),
+        has_children: !table.columns.is_empty(),
+        is_object: true,
+    });
+    for column in &table.columns {
+        entries.push(OutlineEntry {
+            depth: depth + 1,
+            label: column.name.clone(),
+            // Which columns are the key decides whether the results
+            // grid can be edited, so it's worth seeing here.
+            detail: if column.primary_key {
+                format!("{} pk", column.type_name)
+            } else {
+                column.type_name.clone()
+            },
+            has_children: false,
+            is_object: false,
+        });
+    }
 }
 
 impl QueryScreenComponent {
@@ -304,6 +392,7 @@ impl QueryScreenComponent {
             Command::ToggleResultView => self.results.toggle_document_view(),
             Command::EditCell => self.begin_edit_cell(),
             Command::DeleteRow => self.begin_delete_row(),
+            Command::SortColumn => self.results.sort_by_column(self.results.selected_col),
             Command::Search => {
                 self.search = Some(ui::TextInput::new(self.results.filter()));
             }
@@ -1170,8 +1259,12 @@ impl Component for QueryScreenComponent {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Clicking a pane focuses it, which is the main thing a
-                // mouse is for here -- and then selects the row hit.
-                if self.results.click(event.column, event.row) {
+                // mouse is for here -- and then either sorts by the header
+                // cell clicked (checked first, since it's a different row
+                // entirely) or selects the row hit.
+                if self.results.click_header(event.column, event.row)
+                    || self.results.click(event.column, event.row)
+                {
                     self.focus = Focus::Results;
                 } else if let Some(browse) = self.browse.as_mut() {
                     match browse.click(event.column, event.row) {
@@ -1617,6 +1710,8 @@ mod tests {
             }],
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         }];
         let (screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema)));
 
@@ -1626,6 +1721,100 @@ mod tests {
         assert!(outline[0].has_children);
         assert_eq!(outline[1].depth, 1);
         assert_eq!(outline[1].detail, "INTEGER pk");
+    }
+
+    /// A `SchemaInfo` with `schema`/`object_kind` set, for the grouping
+    /// tests below -- everything else defaulted through `SchemaInfo::new`.
+    fn grouped_entry(name: &str, schema: Option<&str>, object_kind: Option<&str>) -> SchemaInfo {
+        SchemaInfo {
+            schema: schema.map(str::to_string),
+            object_kind: object_kind.map(str::to_string),
+            ..SchemaInfo::new(name)
+        }
+    }
+
+    #[test]
+    fn flatten_outline_inserts_a_schema_folder_only_when_schema_is_set() {
+        let schema = vec![
+            grouped_entry("users", Some("public"), None),
+            grouped_entry("summaries", Some("reporting"), None),
+        ];
+
+        let outline = flatten_outline(&Ok(schema));
+
+        assert_eq!(
+            outline
+                .iter()
+                .map(|e| (e.depth, e.label.as_str(), e.is_object))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "public", false),
+                (1, "users", true),
+                (0, "reporting", false),
+                (1, "summaries", true),
+            ],
+            "each schema gets its own folder, no kind folder in between \
+             since object_kind is never set here"
+        );
+        assert!(outline[0].has_children);
+    }
+
+    #[test]
+    fn flatten_outline_inserts_a_kind_folder_under_the_schema_when_object_kind_is_set() {
+        let schema = vec![
+            grouped_entry("users", Some("public"), Some("table")),
+            grouped_entry("user_ids", Some("public"), Some("view")),
+        ];
+
+        let outline = flatten_outline(&Ok(schema));
+
+        assert_eq!(
+            outline
+                .iter()
+                .map(|e| (e.depth, e.label.as_str(), e.is_object))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "public", false),
+                (1, "Tables", false),
+                (2, "users", true),
+                (1, "Views", false),
+                (2, "user_ids", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_outline_columns_nest_one_deeper_than_their_table_at_any_grouping_depth() {
+        let schema = vec![SchemaInfo {
+            columns: vec![crate::query_driver::ColumnInfo::new("id", "INTEGER")],
+            ..grouped_entry("users", Some("public"), Some("table"))
+        }];
+
+        let outline = flatten_outline(&Ok(schema));
+
+        // public(0) -> Tables(1) -> users(2) -> id(3)
+        assert_eq!(outline[2].label, "users");
+        assert_eq!(outline[2].depth, 2);
+        assert!(outline[2].is_object);
+        assert_eq!(outline[3].label, "id");
+        assert_eq!(outline[3].depth, 3);
+        assert!(!outline[3].is_object, "a column is not a whole object");
+    }
+
+    #[test]
+    fn flatten_outline_with_no_schema_or_kind_is_unchanged_from_the_flat_tree() {
+        // Every driver that never sets `schema`/`object_kind` (SQLite,
+        // Elasticsearch, Redis) must see exactly the same tree this had
+        // before either grouping level existed.
+        let outline = flatten_outline(&Ok(schema()));
+
+        assert_eq!(
+            outline
+                .iter()
+                .map(|e| (e.depth, e.is_object))
+                .collect::<Vec<_>>(),
+            vec![(0, true), (0, true)]
+        );
     }
 
     #[test]
@@ -2469,6 +2658,8 @@ mod tests {
             ],
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         }];
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
         submit_and_settle(&mut screen, "SELECT id, name FROM users").await;
@@ -2491,6 +2682,8 @@ mod tests {
             columns: vec![crate::query_driver::ColumnInfo::new("id", "INTEGER")],
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         }];
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
         submit_and_settle(
@@ -3052,6 +3245,8 @@ mod tests {
             ],
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         }];
         screen_with(fake_engine_with_schema(result, Ok(schema)))
     }
@@ -3095,6 +3290,30 @@ mod tests {
             screen.engine.history(),
             &["SELECT id, name FROM users"],
             "a cancelled delete must not have run anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn s_in_results_context_sorts_by_the_selected_column() {
+        let result = QueryResult::Table {
+            columns: vec!["n".to_string()],
+            rows: vec![
+                vec!["30".to_string()],
+                vec!["10".to_string()],
+                vec!["20".to_string()],
+            ],
+            truncated: false,
+        };
+        let (mut screen, _rx) = screen_with(fake_engine(result));
+        submit_and_settle(&mut screen, "SELECT n FROM t").await;
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Char('s'), KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.results.selected_row(),
+            Some(&vec!["10".to_string()]),
+            "ascending sort should put the smallest value first under the cursor"
         );
     }
 
@@ -3155,6 +3374,8 @@ mod tests {
             columns: vec![crate::query_driver::ColumnInfo::new("name", "TEXT")],
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         }];
         let (mut screen, _rx) = screen_with(fake_engine_with_schema(result, Ok(schema)));
         submit_and_settle(&mut screen, "SELECT name FROM users").await;
@@ -3206,6 +3427,8 @@ mod tests {
             columns: Vec::new(),
             kind: Some("hash".to_string()),
             ttl: None,
+            schema: None,
+            object_kind: None,
         }]
     }
 

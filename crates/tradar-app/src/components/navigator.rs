@@ -314,9 +314,11 @@ impl NavigatorComponent {
     }
 
     /// What `c`/`r`/`u`/`d` mean on the current row: a CRUD snippet for
-    /// the table/collection/index/key it names. Only a **depth-0** entry
-    /// qualifies -- a single column (depth 1) or a connection row isn't a
-    /// whole row/document/key to build a statement against.
+    /// the table/collection/index/key it names. Only an entry with
+    /// `is_object` set qualifies -- a single column, a connection row, or
+    /// (once a screen's outline groups by schema/database and/or object
+    /// kind) a folder node isn't a whole row/document/key to build a
+    /// statement against, no matter what depth it happens to sit at.
     pub fn choose_snippet(
         &mut self,
         connections: &[NavConnection],
@@ -326,7 +328,7 @@ impl NavigatorComponent {
             return None;
         };
         let outline_entry = &connections[connection].outline[entry];
-        if outline_entry.depth != 0 {
+        if !outline_entry.is_object {
             return None;
         }
         let tab = connections[connection].tab?;
@@ -484,12 +486,13 @@ mod tests {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
     }
 
-    fn entry(depth: u8, label: &str, has_children: bool) -> OutlineEntry {
+    fn entry(depth: u8, label: &str, has_children: bool, is_object: bool) -> OutlineEntry {
         OutlineEntry {
             depth,
             label: label.to_string(),
             detail: String::new(),
             has_children,
+            is_object,
         }
     }
 
@@ -500,7 +503,7 @@ mod tests {
             NavConnection {
                 name: "local".to_string(),
                 tab: Some(0),
-                outline: vec![entry(0, "users", true), entry(1, "id", false)],
+                outline: vec![entry(0, "users", true, true), entry(1, "id", false, false)],
                 error: None,
                 alive: Some(true),
             },
@@ -608,6 +611,32 @@ mod tests {
         assert!(
             navigator.choose_snippet(&conns, CrudOp::Read).is_none(),
             "a single column isn't a whole row/document/key to build a statement against"
+        );
+    }
+
+    #[test]
+    fn choosing_a_snippet_on_a_grouping_folder_does_nothing_even_at_depth_zero() {
+        // A schema/kind folder (Postgres's "public", or a "Views" group)
+        // sits at depth 0 same as the table it contains -- `is_object`,
+        // not depth, is what has to reject it, or this would regress the
+        // moment a screen's outline started using more than two levels.
+        let conns = vec![NavConnection {
+            name: "local".to_string(),
+            tab: Some(0),
+            outline: vec![
+                entry(0, "public", true, false),
+                entry(1, "users", true, true),
+            ],
+            error: None,
+            alive: Some(true),
+        }];
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        assert!(
+            navigator.choose_snippet(&conns, CrudOp::Read).is_none(),
+            "a grouping folder isn't a whole object to build a statement against"
         );
     }
 

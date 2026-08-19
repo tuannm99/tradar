@@ -60,7 +60,13 @@ pub enum Action {
 /// screen that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutlineEntry {
-    /// Nesting level: 0 for a top-level entry, 1 for its children.
+    /// Nesting level, 0 for a top-level entry and deeper for each level
+    /// under it -- however many a screen's own tree needs. Most screens
+    /// still only ever use 0/1 (a table and its columns); a connector that
+    /// also groups by schema/database and/or object kind (Postgres,
+    /// Cassandra, MongoDB) goes deeper, purely by adding more grouping
+    /// entries in between -- the navigator draws by depth alone and never
+    /// assumes a maximum.
     pub depth: u8,
     pub label: String,
     /// Dimmed text after the label -- a column's type, say. Empty for none.
@@ -69,6 +75,17 @@ pub struct OutlineEntry {
     /// whether to draw an expand marker. An entry with nothing under it
     /// must not look like it opens.
     pub has_children: bool,
+    /// Whether this is a real object to act on -- a table, collection,
+    /// key, whatever `Component::crud_snippet`'s doc comment means by
+    /// "outline entries" -- rather than a grouping node a screen inserted
+    /// purely to organize its tree (a schema/database folder, an
+    /// object-kind folder like "Views"). Only an object-kind entry can
+    /// have a CRUD snippet generated for it; a folder can't, no matter
+    /// what depth it happens to sit at (depth alone stopped being a
+    /// reliable signal for this the moment a screen could insert grouping
+    /// levels above the object itself). A column is neither -- `false`
+    /// like a folder, since a column isn't a whole object to CRUD against.
+    pub is_object: bool,
 }
 
 /// Which CRUD statement to generate a snippet for -- see
@@ -119,10 +136,10 @@ pub trait Component {
     fn insert_text(&mut self, _text: &str) {}
     /// A skeleton statement for `op` against the outline entry named
     /// `name` (a table, collection, index, or key -- whatever `outline`'s
-    /// depth-0 entries are for this screen), in this screen's own query
-    /// language. `None` -- the default -- means this screen has no notion
-    /// of CRUD statements, or doesn't recognize `name`; the navigator then
-    /// does nothing rather than inserting a blank line.
+    /// `is_object` entries are for this screen), in this screen's own
+    /// query language. `None` -- the default -- means this screen has no
+    /// notion of CRUD statements, or doesn't recognize `name`; the
+    /// navigator then does nothing rather than inserting a blank line.
     fn crud_snippet(&self, _name: &str, _op: CrudOp) -> Option<String> {
         None
     }

@@ -23,7 +23,7 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 
 **Schema & DDL**
 
-1. **Navigator thêm cấp schema/database + nhóm theo loại object** (Tables/Views/Functions/Procedures/Triggers/Indexes dưới mỗi schema). **Đảo ngược quyết định "dừng ở 2 cấp"** đã chốt lúc xây navigator ban đầu (`docs/backlog/roadmap-sub-project.md` mục 6 "Bỏ cấp `database` giữa") và giữ nguyên lúc rà mockup lần 2 (`docs/backlog/mockup-ui-2026-08-15.md`, ghi chú "Navigator phẳng hơn mockup") — lý do dừng khi đó vẫn còn nguyên giá trị kỹ thuật: cần thêm method "liệt kê schema/database" + "liệt kê view/function/procedure/trigger" trên `QueryDriver`, phải nghĩ rõ từng connector trả gì khi không có khái niệm đó (Elasticsearch không có schema, Mongo/Redis không có view/function/trigger, Cassandra có keyspace nhưng không có view/procedure). Cần quyết: mỗi connector implement tối thiểu những gì, cấp nào ẩn khi rỗng thay vì hiện trống.
+1. ~~Navigator thêm cấp schema/database + nhóm theo loại object~~ — xong (2026-08-19) cho Postgres/Cassandra/MongoDB, xem `docs/backlog/navigator-schema-level.md`. **Indexes/Triggers cố tình bỏ khỏi scope** (quyết định lúc code, không phải lúc chốt phạm vi ban đầu) — DataGrip/DBeaver thật tự đặt chúng làm con của từng bảng chứ không phải folder ngang hàng Tables/Views ở cấp schema; đúng chỗ của chúng là #2 Table designer bên dưới, khi có UI xem chi tiết một bảng.
 2. **Table designer qua UI** — thêm/sửa/xoá cột, constraint, index, FK; tạo bảng mới; đổi tên bảng. Rủi ro cao nhất trong 5 mục Schema & DDL: sinh DDL đúng cú pháp cho từng dialect (`ALTER TABLE` Postgres khác SQLite khác Cassandra), UI cho một thao tác vốn cần nhiều field (kiểu, null-able, default, cascade...) trong khi app hiện chỉ có `TextInput`/`TextArea` một dòng/nhiều dòng chưa có form nhiều field phức tạp kiểu này (form connection 3 field là ví dụ gần nhất, nhưng đơn giản hơn nhiều). Có thể cân nhắc hướng rẻ hơn: sinh DDL rồi cho user review/sửa tay trước khi chạy (giống cách row-edit làm với UPDATE/DELETE) thay vì UI point-and-click đầy đủ ngay từ v1.
 3. **Schema diff/compare** — so 2 connection hoặc 2 schema, liệt kê khác biệt (cột thiếu/thừa, kiểu khác, index khác). Cần `list_schema` đủ chi tiết ở cả 2 phía (đã có cho Postgres/SQLite qua PK, nhưng chưa có index/constraint/default) trước khi so được gì có ý nghĩa.
 4. **Migration/version-control tích hợp** — chưa rõ hình dạng: file migration kiểu Flyway/Alembic đọc từ thư mục, hay chỉ là "lưu lịch sử DDL đã chạy" đơn giản hơn? Cần hỏi lại phạm vi trước khi nghĩ kiến trúc.
@@ -36,45 +36,32 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 
 **Data grid**
 
-8. **Import CSV/Excel/JSON vào bảng** — hướng ngược lại `export.rs` đã có (`to_csv`/`to_json`). Excel (`.xlsx`) cần thêm dependency mới (không có sẵn trong workspace, CSV/JSON thì không cần). Cần quyết cách map cột file vào cột bảng (theo tên header, theo thứ tự, hay UI cho chọn) và cách xử lý lỗi giữa chừng (dừng ở dòng lỗi đầu tiên, giống `Ctrl+A` chạy nhiều câu — có tiền lệ sẵn để theo).
-9. **Sort theo cột (click header)** — client-side trên `QueryResult` đã tải (giống filter `/` đã có), không phải `ORDER BY` gửi lại DB. Rẻ hơn các mục khác trong nhóm này, đứng cạnh filter/column-types đã có sẵn hạ tầng để mở rộng. **Plan đã chốt (2026-08-19), chưa code** — xem "Plan: #9 Sort theo cột" ngay bên dưới.
+8. ~~Import CSV/Excel/JSON vào bảng qua UI trong TUI grid~~ — **bỏ, đổi hướng sang CLI (2026-08-19)**, xem mục "`tradar` CLI: import/export" ngay bên dưới thay vì làm trong `Data grid` này.
+9. **Sort theo cột (click header)** — xong (2026-08-19), xem `docs/backlog/sort-by-column.md`.
 10. **Multi-filter kết hợp** — hiện chỉ 1 ô filter text đơn khớp bất kỳ cột nào (`/`). Cần nghĩ UI cho nhiều điều kiện cùng lúc (theo cột cụ thể, AND/OR) mà không đụng vỡ ý nghĩa của filter đơn hiện có.
 11. **Group-by trong grid** — client-side, cần nghĩ trước cả UI (group theo cột nào, hiện aggregate gì) lẫn có đáng làm trong một results grid vốn thiết kế cho xem/sửa row-by-row hay không (khác hẳn mục đích của group-by).
 12. **Mở rộng edit-cell/delete-row ngoài single-table-with-PK** — **rủi ro cao nhất trong toàn bộ danh sách**, cân nhắc kỹ trước khi nhận làm: `single_table_source`/`build_sql_edit` cố tình bảo thủ (từ chối join/view/no-PK) đúng vì đoán sai bảng nguồn nghĩa là sinh `UPDATE`/`DELETE` nhắm sai chỗ — hậu quả là mất/sửa nhầm dữ liệu thật, không phải một tính năng thiếu vô hại. Nếu làm, cần một cơ chế xác định nguồn đáng tin hơn heuristic hiện tại (có thể là hỏi DB trực tiếp qua `EXPLAIN`/system catalog thay vì tự parse SQL), và có lẽ vẫn nên giữ nguyên tắc "từ chối rồi nói rõ lý do" cho các trường hợp còn mơ hồ thay vì cố đoán bừa.
 
-**Thứ tự đã chốt (2026-08-19)**, user duyệt đề xuất theo rủi ro/phụ thuộc kỹ thuật, không tự chọn thứ tự khác:
+**Thứ tự đã chốt (2026-08-19)**, user duyệt đề xuất theo rủi ro/phụ thuộc kỹ thuật, không tự chọn thứ tự khác. #8 đổi hướng sang CLI (xem mục riêng bên dưới) nên rút khỏi Tier 1:
 
-- **Tier 1 (làm trước, rẻ/độc lập)**: #9 Sort theo cột → #8 Import CSV/JSON.
-- **Tier 2 (nền tảng)**: #1 Navigator schema/database + nhóm object.
+- **Tier 1 (làm trước, rẻ/độc lập)**: #9 Sort theo cột — xong, `docs/backlog/sort-by-column.md`.
+- **Tier 2 (nền tảng)**: #1 Navigator schema/database + nhóm object — xong, `docs/backlog/navigator-schema-level.md`.
 - **Tier 3 (dùng chung dữ liệu FK vừa thêm ở #1)**: #6 Autocomplete ngữ cảnh sâu → #5 ERD.
 - **Tier 4 (cần chốt phạm vi trước khi code)**: #7 Generate SQL từ UI → #10 Multi-filter kết hợp.
 - **Tier 5 (lớn, tách nhiều bước nhỏ)**: #2 Table designer → #3 Schema diff/compare → #4 Migration/version-control.
 - **Tier 6 (để cuối, #12 cần bàn lại có đáng làm không)**: #11 Group-by trong grid → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK.
 
-## Plan: #9 Sort theo cột
+## `tradar` CLI: import/export (ý tưởng mới, 2026-08-19) — tier thấp, để sau
 
-Chốt qua `AskUserQuestion` (2026-08-19): kích hoạt bằng **phím tắt + click header**; chu kỳ **asc → desc → không sort**; sort **theo kiểu dữ liệu khi biết được**, còn lại so chuỗi. Chưa code — plan dưới đây để bắt tay khi tới lượt (Tier 1).
+User đề xuất thay vì làm import CSV/Excel/JSON qua UI trong TUI grid (#8 cũ ở trên, đã bỏ), đổi thành một chế độ **CLI** của cùng binary `tradar` — kiểu port `mongoimport`/`mongoexport`, `psql`'s `\copy`/`COPY`, `cqlsh`'s `COPY`, hay Elasticsearch bulk API qua `curl`, tuỳ connector.
 
-**Kiến trúc dữ liệu**
-- `ResultsComponent` thêm `sort: Option<(usize, SortDirection)>` (index cột + `SortDirection::{Asc, Desc}`), reset về `None` trong `set_result()` (giống `filter`), **giữ nguyên** trong `set_result_keeping_cursor()` (giống `filter` — đây là refresh cùng shape, không phải kết quả mới).
-- `sort_by_column(index: usize)`: nếu `index` khác cột đang sort → set `Asc`; cùng cột → cycle `Asc → Desc → None`.
+**Cố tình để tier thấp, chưa scope** (quyết định cùng lúc, 2026-08-19): gần như mỗi connector đã có tool OSS hoặc built-in riêng của nhà cung cấp làm đúng việc này rồi (`mongoimport`/`mongoexport`, `psql \copy`/`pg_dump`, `cqlsh COPY`, `elasticdump`...) — giá trị thật của việc `tradar` tự làm lại là gì (không phải gọi lại đúng những tool đó cho tiện, mà là port/thay thế) chỉ rõ ràng khi thật sự cần, không phải bây giờ. Để lại đây làm ghi chú, quay lại chốt phạm vi khi có lý do cụ thể (một connector nào thiếu tool tốt, hoặc user cần một chỗ duy nhất không phải nhớ N tool khác nhau) thay vì chốt trước cho một nhu cầu chưa xác nhận.
 
-**Điểm cắm — phải sửa đúng 2 chỗ đang trùng logic**
-Code hiện tại có **hai nơi tính filtered-indices độc lập**: `ResultsComponent::visible_items()` (dùng cho selection/edit/yank) và `draw_table_body()` tự gọi lại `filter_table_rows()` bên trong nó (dùng để vẽ). Cả hai đều phải cộng thêm bước sort để không lệch nhau — cách sạch nhất là gộp thành 1 hàm dùng chung `visible_and_sorted_rows(rows, filter, sort, column_types) -> Vec<usize>`, gọi từ cả `visible_items()` lẫn `draw_table_body()`, thay vì thêm sort riêng ở từng chỗ.
+Khi quay lại, những điểm cần làm rõ trước khi lên plan (chưa trả lời):
 
-**So sánh giá trị khi sort**
-- Có `column_types[index]` biết được (đã có sẵn từ mục "Bảng kết quả không hiện kiểu cột" — `docs/backlog/mockup-ui-2026-08-15.md`) → parse số (`f64`) rồi so số nếu là kiểu số; parse lỗi thì rơi về so chuỗi cho đúng hàng đó (không crash, không rớt cả cột về chuỗi vì một giá trị lỗi).
-- Không biết type (Documents-table-view luôn vậy, `column_types` rỗng theo thiết kế) → so chuỗi.
-- `None`/rỗng luôn xếp cuối bất kể `Asc`/`Desc` (tránh giá trị thiếu nhảy lên đầu khi sort giảm dần).
+- Subcommand của `tradar` hiện có (`clap` đã nằm sẵn trong `tradar-app/Cargo.toml` nhưng chưa dùng dòng nào — đây sẽ là lần dùng đầu tiên), hay một binary riêng? Chạy `tradar` không kèm subcommand vẫn phải mở TUI như hiện tại, không được đổi hành vi mặc định.
+- Tái dùng connection đã lưu trong `~/.config/tradar/connections.toml` (qua tên) thay vì phải gõ lại connection string, giống cách TUI đang làm — cần connector nào cũng đi qua `Connector`/`QueryDriver` sẵn có, không viết logic kết nối riêng cho CLI.
+- Mỗi connector có "ngôn ngữ" import/export khác hẳn nhau (Postgres/SQLite: `COPY`/`INSERT` hàng loạt; Mongo: `bson`/`json` theo document, không có schema cột cố định; Elasticsearch: bulk API theo dòng `_index`/`_source`; Cassandra: `COPY` của `cqlsh`; Redis không có khái niệm "bảng" nên có lẽ không áp dụng) — vẫn là đúng vấn đề mapping cột/field mà #8 gặp phải, chỉ chuyển từ UI form sang CLI flag, không tự nhiên biến mất.
+- File lớn: đọc/ghi streaming thay vì load hết vào RAM (khác cách `export.rs` hiện làm, vốn nhận `QueryResult` đã có sẵn trong bộ nhớ) — ảnh hưởng tới `QueryDriver` có cần thêm method streaming hay tái dùng nguyên trạng.
+- Có đáng làm cả `export` CLI không, hay chỉ `import` (TUI đã có `Ctrl+E` export CSV/JSON cho kết quả đang xem, dù chỉ theo từng query/kết quả một, không phải "dump nguyên bảng" như `mongoexport`/`pg_dump`).
 
-**Bất biến phải giữ**: gutter số thứ tự **vẫn đọc theo vị trí gốc trong result**, không đánh số lại theo vị trí trên màn hình — miễn phí vì sort chỉ tráo thứ tự trong `Vec<usize>`, không đổi nội dung `rows[]`. Edit-cell/delete-row không bị ảnh hưởng (đi qua đúng index gốc để build `UPDATE`/`DELETE`).
-
-**Kích hoạt**
-- Phím: `Command::SortColumn` mới, bind `s` trong `Context::Results` (còn trống — đã kiểm tra không đụng `y/h/l/enter/d/space/t/r/e/c`), tác động lên `selected_col` hiện tại.
-- Chuột: thêm `ResultsComponent::click_header(column, row) -> bool` — hit-test hàng `rows_area.y - 1` (đúng vị trí header, theo comment sẵn có "rows_area excludes... the header row") bằng `column_spans` đã ghi lúc `draw()`; chỉ có tác dụng khi đang ở `Table` hoặc `Documents` table-view (không có header ở JSON view). `QueryScreenComponent::handle_mouse_event` gọi hàm này trước/cạnh `results.click(...)` hiện có.
-
-**Hiển thị**: thêm mũi tên `▲`/`▼` sau tên/icon cột đang sort trong header cell (cùng nhóm ký tự đơn-width đã dùng cho fold gutter `▸`/`▾`, không phải ký tự mới rủi ro lệch cột). Tiêu đề panel Results nối thêm đoạn `— sort: <col> ▲` cạnh đoạn `filter:` đã có khi đang sort.
-
-**Scope rõ**: chỉ `QueryResult::Table` và `Documents` ở table-view (`t`) — không áp dụng JSON view, không áp dụng `Affected`.
-
-**Test dự kiến**: cycle Asc→Desc→None, sort số vs chuỗi, giá trị thiếu xếp cuối, gutter giữ đúng vị trí gốc khi sort, `set_result` xoá sort / `set_result_keeping_cursor` giữ sort, click header kích hoạt đúng cột, phím `s` qua `dispatch_command`.

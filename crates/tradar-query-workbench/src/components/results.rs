@@ -188,6 +188,72 @@ fn filter_table_rows(rows: &[Vec<String>], filter: &str) -> Vec<usize> {
         .collect()
 }
 
+/// Ascending or descending -- see `ResultsComponent::sort_by_column`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+/// Orders two *non-empty* cell values from the same column, ascending.
+/// Missing values are handled by the caller, not here (see
+/// `visible_and_sorted_rows`) -- they sort last regardless of direction, so
+/// they can't go through the same `.reverse()` a descending sort applies to
+/// this ordering, or a descending sort would put blanks first. Parsing
+/// only kicks in for a column already known to be numeric; a value that
+/// still fails to parse (a stray non-numeric entry in an otherwise numeric
+/// column) falls back to a string compare for that one pair rather than
+/// panicking or silently treating the whole column as text.
+fn compare_cell(a: &str, b: &str, numeric: bool) -> std::cmp::Ordering {
+    if numeric && let (Ok(x), Ok(y)) = (a.parse::<f64>(), b.parse::<f64>()) {
+        x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+    } else {
+        a.cmp(b)
+    }
+}
+
+/// `filter_table_rows`, then sorted if `sort` names a column -- the one
+/// place both `ResultsComponent::visible_items` (selection/edit/yank) and
+/// `draw_table_body` (drawing) compute which rows show and in what order,
+/// so they can't disagree. Sorting only ever reorders these indices, never
+/// the underlying `rows`, which is what keeps the row-number gutter honest
+/// (it numbers by position in the original result) and `UPDATE`/`DELETE`
+/// targeting correct (built from the original index either way).
+fn visible_and_sorted_rows(
+    rows: &[Vec<String>],
+    filter: &str,
+    sort: Option<(usize, SortDirection)>,
+    column_types: &[Option<String>],
+) -> Vec<usize> {
+    let mut indices = filter_table_rows(rows, filter);
+    if let Some((column, direction)) = sort {
+        let numeric = column_types
+            .get(column)
+            .and_then(|t| t.as_ref())
+            .is_some_and(|type_name| type_icon(type_name) == Some("#"));
+        indices.sort_by(|&i, &j| {
+            let a = rows[i].get(column).map_or("", String::as_str);
+            let b = rows[j].get(column).map_or("", String::as_str);
+            match (a.is_empty(), b.is_empty()) {
+                // A missing value sorts last no matter the direction --
+                // handled here, outside the `.reverse()` below, so a
+                // descending sort can't turn "last" into "first".
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => {
+                    let ordering = compare_cell(a, b, numeric);
+                    match direction {
+                        SortDirection::Asc => ordering,
+                        SortDirection::Desc => ordering.reverse(),
+                    }
+                }
+            }
+        });
+    }
+    indices
+}
+
 /// The columns from `offset` on that fit in `total` once the row-number
 /// gutter has taken its share. Always at least one, even when it doesn't
 /// fit: a column too wide for the terminal still has to be reachable.
@@ -218,6 +284,11 @@ pub struct ResultsComponent {
     /// everything else the grid does (yank, edit, delete all act on what's
     /// under the cursor either way).
     filter: String,
+    /// Column to sort by and its direction, or `None` for the result's own
+    /// order. Reset in `set_result` (a new result may not even have this
+    /// many columns), kept across `set_result_keeping_cursor` (a refresh of
+    /// the same shape) -- same lifetime as `filter`. See `sort_by_column`.
+    sort: Option<(usize, SortDirection)>,
     /// First visible column, for tables too wide to fit. Derived rather
     /// than driven: `draw` scrolls it just far enough to keep
     /// `selected_col` on screen, the way a spreadsheet follows its cursor.
@@ -276,6 +347,7 @@ impl ResultsComponent {
             selected: 0,
             selected_col: 0,
             filter: String::new(),
+            sort: None,
             col_offset: 0,
             running: None,
             table_state: TableState::default(),
@@ -317,22 +389,43 @@ impl ResultsComponent {
         // A filter from the last result would silently hide rows of this
         // one, and you'd be reading a subset without knowing it.
         self.filter.clear();
+        // Same reasoning -- the sorted column may not exist, or mean the
+        // same thing, in a different result.
+        self.sort = None;
     }
 
-    /// Same as `set_result`, but leaves the cell cursor and the filter
-    /// where they were -- used when a result is *re-read* rather than
-    /// replaced (the refresh after an edit), so the row you just changed is
-    /// still under the cursor instead of the view jumping back to the top.
+    /// Same as `set_result`, but leaves the cell cursor, the filter, and
+    /// the sort where they were -- used when a result is *re-read* rather
+    /// than replaced (the refresh after an edit), so the row you just
+    /// changed is still under the cursor instead of the view jumping back
+    /// to the top.
     pub fn set_result_keeping_cursor(&mut self, result: QueryResult) {
-        let (row, column, filter) = (
+        let (row, column, filter, sort) = (
             self.selected,
             self.selected_col,
             std::mem::take(&mut self.filter),
+            self.sort,
         );
         self.set_result(result);
         self.filter = filter;
+        self.sort = sort;
         self.selected = row.min(self.item_count().saturating_sub(1));
         self.selected_col = column.min(self.column_count().saturating_sub(1));
+    }
+
+    /// Cycles the sort on `index`: unsorted → ascending → descending →
+    /// unsorted, or straight to ascending when switching to a different
+    /// column. Client-side over whatever's already loaded (`filter` does
+    /// the same), not a query sent back to the database -- see
+    /// `visible_and_sorted_rows`.
+    pub fn sort_by_column(&mut self, index: usize) {
+        self.sort = match self.sort {
+            Some((current, SortDirection::Asc)) if current == index => {
+                Some((index, SortDirection::Desc))
+            }
+            Some((current, SortDirection::Desc)) if current == index => None,
+            _ => Some((index, SortDirection::Asc)),
+        };
     }
 
     /// Narrows the grid to rows containing `filter`, case-insensitively,
@@ -354,11 +447,17 @@ impl ResultsComponent {
     /// still lands on the row the user is pointing at.
     fn visible_items(&self) -> Vec<usize> {
         match &self.last_result {
-            Some(QueryResult::Table { rows, .. }) => filter_table_rows(rows, &self.filter),
+            Some(QueryResult::Table { rows, .. }) => {
+                visible_and_sorted_rows(rows, &self.filter, self.sort, &self.column_types)
+            }
+            // No SQL schema applies to a flattened document view (see
+            // `draw`'s comment on the same thing), so `column_types` is
+            // always empty here -- a sorted column falls back to a string
+            // compare, same as any column of unknown type.
             Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => self
                 .doc_table
                 .as_ref()
-                .map(|(_, rows)| filter_table_rows(rows, &self.filter))
+                .map(|(_, rows)| visible_and_sorted_rows(rows, &self.filter, self.sort, &[]))
                 .unwrap_or_default(),
             Some(QueryResult::Documents(docs)) => {
                 let needle = self.filter.to_lowercase();
@@ -554,6 +653,28 @@ impl ResultsComponent {
         true
     }
 
+    /// Sorts by the clicked header column. Returns whether the click
+    /// landed on the header row at all -- `rows_area` starts one row below
+    /// it (see that field's doc comment), so the header itself is
+    /// `rows_area.y - 1`. Hit-tests against `column_spans` from the last
+    /// draw, same as `click` does for a body cell; empty (nothing drawn
+    /// yet, or a `Documents` result in JSON view, which has no header at
+    /// all) always misses.
+    pub fn click_header(&mut self, column: u16, row: u16) -> bool {
+        if self.column_spans.is_empty() || row != self.rows_area.y.saturating_sub(1) {
+            return false;
+        }
+        let Some((index, ..)) = self
+            .column_spans
+            .iter()
+            .find(|(_, x, width)| column >= *x && column < x.saturating_add(*width))
+        else {
+            return false;
+        };
+        self.sort_by_column(*index);
+        true
+    }
+
     /// Plain-text form of the currently selected row/document, ready to
     /// yank to the clipboard. `None` when there's nothing to select (no
     /// result yet, or the last response was an error). Table rows are
@@ -664,6 +785,20 @@ impl ResultsComponent {
             (None, Some(QueryResult::Affected { .. })) => "Results".to_string(),
             (None, None) => "Results".to_string(),
         };
+        // `columns()` is empty for anything without a header to sort by
+        // (JSON-view Documents, Affected, an error, no result) -- guards
+        // this from claiming a sort that isn't actually shown anywhere.
+        let title = match self.sort {
+            Some((index, direction)) if !self.columns().is_empty() => {
+                let column = self.columns().get(index).map_or("?", String::as_str);
+                let arrow = match direction {
+                    SortDirection::Asc => '▲',
+                    SortDirection::Desc => '▼',
+                };
+                format!("{title} — sort: {column} {arrow}")
+            }
+            _ => title,
+        };
         let block = ui::panel(&title, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -700,6 +835,7 @@ impl ResultsComponent {
                     rows,
                     &self.column_types,
                     &self.filter,
+                    self.sort,
                     self.selected,
                     self.preview_open,
                     &mut self.selected_col,
@@ -725,6 +861,7 @@ impl ResultsComponent {
                     rows,
                     &[],
                     &self.filter,
+                    self.sort,
                     self.selected,
                     self.preview_open,
                     &mut self.selected_col,
@@ -797,6 +934,7 @@ fn draw_table_body(
     rows: &[Vec<String>],
     column_types: &[Option<String>],
     filter: &str,
+    sort: Option<(usize, SortDirection)>,
     selected: usize,
     preview_open: bool,
     selected_col: &mut usize,
@@ -818,7 +956,7 @@ fn draw_table_body(
     // Included in the width calculation below (not just the header cell
     // text) so the icon isn't truncated to fit a width sized for the name
     // alone.
-    let header_labels: Vec<String> = columns
+    let mut header_labels: Vec<String> = columns
         .iter()
         .enumerate()
         .map(
@@ -831,13 +969,26 @@ fn draw_table_body(
             },
         )
         .collect();
+    // A single-width glyph, same idiom as the fold gutter's `▸`/`▾` --
+    // included before `column_widths` runs so the arrow itself is never
+    // what gets truncated.
+    if let Some((index, direction)) = sort
+        && let Some(label) = header_labels.get_mut(index)
+    {
+        let arrow = match direction {
+            SortDirection::Asc => '▲',
+            SortDirection::Desc => '▼',
+        };
+        label.push(' ');
+        label.push(arrow);
+    }
     let widths = column_widths(&header_labels, rows);
 
     // A row-number gutter, wide enough for the highest number there is:
     // on a screen full of rows, "which one am I on" is otherwise
     // something you have to count. Computed once and reused below for
     // both the preview (which cell is selected) and the table body.
-    let visible_rows = filter_table_rows(rows, filter);
+    let visible_rows = visible_and_sorted_rows(rows, filter, sort, column_types);
     let gutter = (rows.len().to_string().chars().count() as u16).max(1);
 
     // Computed with the cell cursor as it stood before this frame's
@@ -1920,6 +2071,214 @@ mod tests {
         let text = draw_component(&mut results, 60, 16);
 
         assert!(!text.contains("full value"), "buffer was: {text}");
+    }
+
+    /// Three numbers stored as text, deliberately out of both numeric and
+    /// lexicographic order ("100" would sort before "20" as a string, so a
+    /// test that only ever used already-sorted-looking values couldn't
+    /// tell a numeric sort from a string one).
+    fn numbers() -> QueryResult {
+        QueryResult::Table {
+            columns: vec!["n".to_string()],
+            rows: vec![
+                vec!["100".to_string()],
+                vec!["9".to_string()],
+                vec!["20".to_string()],
+            ],
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn sort_by_column_cycles_asc_desc_then_off() {
+        let mut results = ResultsComponent::new();
+        results.set_result(numbers());
+
+        results.sort_by_column(0);
+        assert_eq!(results.sort, Some((0, SortDirection::Asc)));
+
+        results.sort_by_column(0);
+        assert_eq!(results.sort, Some((0, SortDirection::Desc)));
+
+        results.sort_by_column(0);
+        assert_eq!(results.sort, None, "a third press turns sorting off");
+    }
+
+    #[test]
+    fn sort_by_column_on_a_different_column_restarts_at_ascending() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+
+        results.sort_by_column(0);
+        results.sort_by_column(0);
+        assert_eq!(results.sort, Some((0, SortDirection::Desc)));
+
+        results.sort_by_column(1);
+        assert_eq!(
+            results.sort,
+            Some((1, SortDirection::Asc)),
+            "switching columns must not carry over the old direction"
+        );
+    }
+
+    #[test]
+    fn ascending_sort_compares_a_known_numeric_column_by_value_not_text() {
+        let mut results = ResultsComponent::new();
+        results.set_result(numbers());
+        results.set_column_types(vec![Some("INTEGER".to_string())]);
+
+        results.sort_by_column(0);
+
+        assert_eq!(
+            results.selected_row(),
+            Some(&vec!["9".to_string()]),
+            "numerically 9 < 20 < 100, even though \"100\" < \"20\" < \"9\" as text"
+        );
+        results.move_to_bottom();
+        assert_eq!(results.selected_row(), Some(&vec!["100".to_string()]));
+    }
+
+    #[test]
+    fn descending_sort_reverses_a_numeric_column() {
+        let mut results = ResultsComponent::new();
+        results.set_result(numbers());
+        results.set_column_types(vec![Some("INTEGER".to_string())]);
+
+        results.sort_by_column(0);
+        results.sort_by_column(0);
+
+        assert_eq!(results.selected_row(), Some(&vec!["100".to_string()]));
+    }
+
+    #[test]
+    fn a_column_with_no_known_type_sorts_as_text() {
+        let mut results = ResultsComponent::new();
+        results.set_result(numbers());
+        // No `set_column_types` call -- unknown type falls back to string
+        // compare, so "100" sorts before "20" and "9" (lexicographic).
+
+        results.sort_by_column(0);
+
+        assert_eq!(results.selected_row(), Some(&vec!["100".to_string()]));
+    }
+
+    #[test]
+    fn missing_values_sort_last_in_either_direction() {
+        let result = QueryResult::Table {
+            columns: vec!["n".to_string()],
+            rows: vec![
+                vec!["5".to_string()],
+                vec![String::new()],
+                vec!["1".to_string()],
+            ],
+            truncated: false,
+        };
+        let mut results = ResultsComponent::new();
+        results.set_result(result.clone());
+        results.set_column_types(vec![Some("INTEGER".to_string())]);
+
+        results.sort_by_column(0);
+        results.move_to_bottom();
+        assert_eq!(
+            results.selected_row(),
+            Some(&vec![String::new()]),
+            "ascending: blank still ends up last"
+        );
+
+        results.set_result(result);
+        results.set_column_types(vec![Some("INTEGER".to_string())]);
+        results.sort_by_column(0);
+        results.sort_by_column(0);
+        results.move_to_bottom();
+        assert_eq!(
+            results.selected_row(),
+            Some(&vec![String::new()]),
+            "descending: blank must not jump to the front"
+        );
+    }
+
+    #[test]
+    fn sorting_does_not_renumber_the_row_gutter() {
+        let mut results = ResultsComponent::new();
+        results.set_result(numbers());
+        results.set_column_types(vec![Some("INTEGER".to_string())]);
+        results.sort_by_column(0);
+
+        let backend = TestBackend::new(30, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| results.draw(frame, Rect::new(0, 0, 30, 8), false))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Ascending sort puts "9" (originally the second row) on screen
+        // first -- but the gutter must still read "2", its position in the
+        // unsorted result, not "1" for where it landed on screen. Row 0 is
+        // the border/title, row 1 the header, row 2 the first data row
+        // (same layout `draw_selection_highlight_tracks_selected` relies
+        // on); column 1 is the gutter, right after the left border.
+        let gutter_symbol = buffer.cell((1, 2)).unwrap().symbol();
+        assert_eq!(
+            gutter_symbol,
+            "2",
+            "buffer row was: {}",
+            row_text(&buffer, 2)
+        );
+    }
+
+    #[test]
+    fn set_result_clears_the_sort_but_keeping_cursor_preserves_it() {
+        let mut results = ResultsComponent::new();
+        results.set_result(numbers());
+        results.sort_by_column(0);
+        assert!(results.sort.is_some());
+
+        results.set_result(numbers());
+        assert_eq!(
+            results.sort, None,
+            "a brand new result must not stay sorted"
+        );
+
+        results.sort_by_column(0);
+        results.set_result_keeping_cursor(numbers());
+        assert_eq!(
+            results.sort,
+            Some((0, SortDirection::Asc)),
+            "a refresh of the same shape keeps the sort, like it keeps the filter"
+        );
+    }
+
+    #[test]
+    fn clicking_the_header_activates_and_cycles_the_sort_on_that_column() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        draw_component(&mut results, 40, 8);
+
+        let (_, x, _) = results
+            .column_spans
+            .iter()
+            .find(|(index, ..)| *index == 1)
+            .copied()
+            .expect("column 1 (\"name\") was drawn");
+        let header_row = results.rows_area.y - 1;
+
+        let hit = results.click_header(x, header_row);
+
+        assert!(hit, "the click landed on the header row");
+        assert_eq!(results.sort, Some((1, SortDirection::Asc)));
+    }
+
+    #[test]
+    fn clicking_a_body_row_does_not_activate_a_sort() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        draw_component(&mut results, 40, 8);
+
+        let (_, x, _) = results.column_spans[0];
+        let hit = results.click_header(x, results.rows_area.y);
+
+        assert!(!hit, "the body's first row is not the header");
+        assert_eq!(results.sort, None);
     }
 
     #[test]

@@ -249,14 +249,19 @@ impl QueryDriver for PostgresDriver {
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
-        // Tables and their columns in one round trip, ordered so the
+        // Tables/views and their columns in one round trip, ordered so the
         // grouping below can just walk the rows: information_schema joins
-        // are cheaper than a query per table.
+        // are cheaper than a query per table. Grouped by (schema, name),
+        // not just name -- two different schemas can each have their own
+        // "users", and rows for both would otherwise sort next to each
+        // other (same `ORDER BY ... table_name`) and get merged into one
+        // entry with columns from both.
         // The primary-key columns ride along in the same round trip: the
         // results grid needs them to address a row it wants to change, and
         // asking for them separately would mean a second query per table.
-        let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
-            "SELECT t.table_name, c.column_name, c.data_type, (k.column_name IS NOT NULL) \
+        let rows: Vec<(String, String, String, String, String, bool)> = sqlx::query_as(
+            "SELECT t.table_schema, t.table_name, t.table_type, c.column_name, c.data_type, \
+                    (k.column_name IS NOT NULL) \
              FROM information_schema.tables t \
              JOIN information_schema.columns c \
                ON c.table_schema = t.table_schema AND c.table_name = t.table_name \
@@ -270,16 +275,30 @@ impl QueryDriver for PostgresDriver {
              ) k ON k.table_schema = c.table_schema \
                AND k.table_name = c.table_name \
                AND k.column_name = c.column_name \
-             WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' \
-             ORDER BY t.table_name, c.ordinal_position",
+             WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY t.table_schema, t.table_name, c.ordinal_position",
         )
         .fetch_all(pool)
         .await?;
 
         let mut schema: Vec<SchemaInfo> = Vec::new();
-        for (table, column, type_name, primary_key) in rows {
-            if schema.last().map(|s| s.name.as_str()) != Some(table.as_str()) {
-                schema.push(SchemaInfo::new(table));
+        for (table_schema, table, table_type, column, type_name, primary_key) in rows {
+            let same_as_last = schema.last().is_some_and(|s| {
+                s.schema.as_deref() == Some(table_schema.as_str()) && s.name == table
+            });
+            if !same_as_last {
+                schema.push(SchemaInfo {
+                    schema: Some(table_schema),
+                    object_kind: Some(
+                        if table_type == "VIEW" {
+                            "view"
+                        } else {
+                            "table"
+                        }
+                        .to_string(),
+                    ),
+                    ..SchemaInfo::new(table)
+                });
             }
             let entry = schema.last_mut().expect("just pushed");
             entry.columns.push(ColumnInfo {
@@ -288,6 +307,37 @@ impl QueryDriver for PostgresDriver {
                 primary_key,
             });
         }
+
+        // Functions/procedures have no columns of their own -- a second,
+        // unrelated round trip rather than trying to force them into the
+        // tables/columns join above.
+        let routines: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT routine_schema, routine_name, routine_type \
+             FROM information_schema.routines \
+             WHERE routine_schema NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY routine_schema, routine_name",
+        )
+        .fetch_all(pool)
+        .await?;
+        for (routine_schema, name, routine_type) in routines {
+            schema.push(SchemaInfo {
+                schema: Some(routine_schema),
+                object_kind: Some(
+                    if routine_type == "PROCEDURE" {
+                        "procedure"
+                    } else {
+                        "function"
+                    }
+                    .to_string(),
+                ),
+                ..SchemaInfo::new(name)
+            });
+        }
+
+        // Only the rare same-name-in-two-schemas entry gets qualified --
+        // see the function's own doc comment for why a bare name has to
+        // stay bare whenever it's already unambiguous.
+        query_driver::qualify_colliding_names(&mut schema);
         Ok(schema)
     }
 
@@ -460,6 +510,119 @@ mod tests {
 
         assert_eq!(schema.len(), 1);
         assert_eq!(schema[0].name, "users");
+    }
+
+    #[tokio::test]
+    async fn list_schema_groups_multiple_schemas_and_hides_system_ones() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        let pool = driver.pool.as_ref().unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE SCHEMA reporting")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE reporting.summaries (id INTEGER PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(users.schema.as_deref(), Some("public"));
+        let summaries = schema.iter().find(|s| s.name == "summaries").unwrap();
+        assert_eq!(summaries.schema.as_deref(), Some("reporting"));
+        assert!(
+            schema.iter().all(|s| !matches!(
+                s.schema.as_deref(),
+                Some("pg_catalog" | "information_schema")
+            )),
+            "system schemas must not show up in the navigator: {:?}",
+            schema.iter().map(|s| &s.schema).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_schema_reports_views_functions_and_procedures_by_kind() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        let pool = driver.pool.as_ref().unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE VIEW user_ids AS SELECT id FROM users")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE FUNCTION greet() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE PROCEDURE do_nothing() LANGUAGE sql AS $$ SELECT 1 $$")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let table = schema.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(table.object_kind.as_deref(), Some("table"));
+        let view = schema.iter().find(|s| s.name == "user_ids").unwrap();
+        assert_eq!(view.object_kind.as_deref(), Some("view"));
+        let function = schema.iter().find(|s| s.name == "greet").unwrap();
+        assert_eq!(function.object_kind.as_deref(), Some("function"));
+        let procedure = schema.iter().find(|s| s.name == "do_nothing").unwrap();
+        assert_eq!(procedure.object_kind.as_deref(), Some("procedure"));
+    }
+
+    #[tokio::test]
+    async fn list_schema_qualifies_only_a_table_name_that_collides_across_schemas() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        let pool = driver.pool.as_ref().unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE SCHEMA reporting")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE reporting.users (id INTEGER PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE orders (id INTEGER PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        assert!(
+            schema.iter().any(|s| s.name == "public.users"),
+            "schema was: {:?}",
+            schema.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(schema.iter().any(|s| s.name == "reporting.users"));
+        assert!(
+            schema.iter().any(|s| s.name == "orders"),
+            "a non-colliding name must stay bare"
+        );
     }
 
     #[tokio::test]

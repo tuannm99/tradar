@@ -28,6 +28,24 @@ pub struct SchemaInfo {
     /// (`TTL` returns `-1`) -- the browse sidebar treats both the same way,
     /// as nothing to show.
     pub ttl: Option<i64>,
+    /// The schema/database/keyspace this entry belongs to, for a backend
+    /// that groups its tables that way (Postgres schema, Cassandra
+    /// keyspace, MongoDB database) -- `None` for one that doesn't
+    /// (SQLite, Elasticsearch, Redis). `flatten_outline` in
+    /// `tradar-query-workbench`'s `query_screen.rs` groups entries by this
+    /// and inserts a level in the navigator only when it's `Some`
+    /// somewhere in the list, so a driver that never sets it keeps the
+    /// flat connection → table → column tree unchanged.
+    pub schema: Option<String>,
+    /// This entry's kind, for a backend that has more than one kind of
+    /// object to browse (Postgres: `"table"`/`"view"`/`"function"`/
+    /// `"procedure"`) -- `None` when every entry from this backend is the
+    /// same kind, which is every backend but Postgres today. Lowercase,
+    /// singular: `flatten_outline` owns turning it into a display label
+    /// ("Tables", "Views", ...), so a driver never has to think about
+    /// navigator presentation. Same grouping idea as `schema`, one level
+    /// deeper -- a driver that never sets it gets no extra folder either.
+    pub object_kind: Option<String>,
 }
 
 impl SchemaInfo {
@@ -39,6 +57,8 @@ impl SchemaInfo {
             columns: Vec::new(),
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         }
     }
 }
@@ -437,6 +457,37 @@ pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp) -> String {
             )
         }
         CrudOp::Delete => format!("DELETE FROM {table} WHERE {};", where_clause(&primary_key)),
+    }
+}
+
+/// Qualifies `entry.name` with its `entry.schema` prefix (`"schema.table"`)
+/// only for entries whose bare name collides with another entry from a
+/// *different* schema/database in the same list -- every entry not
+/// involved in a collision keeps its plain name unchanged. Called by a
+/// driver that groups `list_schema` by schema/database (Postgres, MongoDB)
+/// after building the full list, once, across every kind combined.
+///
+/// This matters because `SchemaInfo.name` doubles as the identifier
+/// `build_crud_snippet`/`column_types` match a query's own `FROM` clause
+/// against: a bare `FROM users` resolves through the connection's own
+/// default schema search, so keeping the common case's name bare (a
+/// single schema, or a name that happens to be unique across several) is
+/// what keeps that matching working exactly as it did before a
+/// schema/database level existed at all. Qualifying only the rare
+/// colliding case is what keeps a lookup from silently picking the wrong
+/// one of two same-named tables in different schemas.
+pub fn qualify_colliding_names(entries: &mut [SchemaInfo]) {
+    // Owned keys, not borrowed from `entries` -- a borrow would still be
+    // held by the time the loop below needs `entries` mutably.
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for entry in entries.iter() {
+        *counts.entry(entry.name.clone()).or_insert(0) += 1;
+    }
+    for entry in entries.iter_mut() {
+        let colliding = counts.get(entry.name.as_str()).copied().unwrap_or(0) > 1;
+        if colliding && let Some(schema) = &entry.schema {
+            entry.name = format!("{schema}.{}", entry.name);
+        }
     }
 }
 
@@ -868,6 +919,8 @@ mod tests {
             ],
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         }
     }
 
@@ -930,6 +983,8 @@ mod tests {
                 .collect(),
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         };
 
         for op in [CrudOp::Create, CrudOp::Update] {
@@ -950,6 +1005,8 @@ mod tests {
             columns: vec![ColumnInfo::new("message", "TEXT")],
             kind: None,
             ttl: None,
+            schema: None,
+            object_kind: None,
         };
 
         assert_eq!(

@@ -1638,6 +1638,7 @@ mod tests {
                 label: "users".to_string(),
                 detail: String::new(),
                 has_children: false,
+                is_object: true,
             }]
         }
         fn insert_text(&mut self, text: &str) {

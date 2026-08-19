@@ -247,12 +247,16 @@ mod tests {
                 ],
                 kind: None,
                 ttl: None,
+                schema: None,
+                object_kind: None,
             },
             SchemaInfo {
                 name: "orders".to_string(),
                 columns: vec![ColumnInfo::new("id", "INTEGER")],
                 kind: None,
                 ttl: None,
+                schema: None,
+                object_kind: None,
             },
         ]
     }

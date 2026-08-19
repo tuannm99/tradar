@@ -233,6 +233,11 @@ pub enum Command {
     EditCell,
     /// Delete the selected row, the same way.
     DeleteRow,
+    /// Cycle the results grid's sort on the selected column: ascending,
+    /// descending, then back to unsorted. Client-side over the already
+    /// loaded `QueryResult`, not an `ORDER BY` sent back to the database --
+    /// see `ResultsComponent::sort_by_column`.
+    SortColumn,
     /// Narrow the results grid to rows matching what you type.
     Search,
     /// Show/hide the selected cell's full value in a panel below the grid
@@ -380,6 +385,7 @@ impl Command {
             Self::NextColumn => "next-column",
             Self::EditCell => "edit-cell",
             Self::DeleteRow => "delete-row",
+            Self::SortColumn => "sort-column",
             Self::Search => "search",
             Self::TogglePreview => "toggle-preview",
             Self::RetryQuery => "retry-query",
@@ -437,7 +443,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 84] = [
+    const ALL: [Self; 85] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -472,6 +478,7 @@ impl Command {
         Self::NextColumn,
         Self::EditCell,
         Self::DeleteRow,
+        Self::SortColumn,
         Self::Search,
         Self::TogglePreview,
         Self::RetryQuery,
@@ -561,6 +568,7 @@ impl Command {
             Self::NextColumn => "Move to the next column",
             Self::EditCell => "Edit the selected cell",
             Self::DeleteRow => "Delete the selected row",
+            Self::SortColumn => "Sort by the selected column (asc/desc/off)",
             Self::Search => "Filter the list",
             Self::TogglePreview => "Show/hide the selected cell's full value",
             Self::RetryQuery => "Retry the failed query",
@@ -858,6 +866,7 @@ impl Default for Keymap {
                 ("right", Command::NextColumn),
                 ("enter", Command::EditCell),
                 ("d", Command::DeleteRow),
+                ("s", Command::SortColumn),
                 ("/", Command::Search),
                 ("space", Command::TogglePreview),
                 ("t", Command::ToggleResultView),

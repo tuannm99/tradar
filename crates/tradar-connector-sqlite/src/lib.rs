@@ -195,6 +195,12 @@ impl QueryDriver for SqliteDriver {
                     .collect(),
                 kind: None,
                 ttl: None,
+                // SQLite has no real multi-schema/database concept in the
+                // normal case (a single file; multi-db needs `ATTACH
+                // DATABASE`, which this connector never does), and no more
+                // than one object kind is reported here.
+                schema: None,
+                object_kind: None,
             });
         }
         Ok(schema)

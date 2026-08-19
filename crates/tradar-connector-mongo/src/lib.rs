@@ -16,7 +16,7 @@ use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
-    ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
+    ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement, qualify_colliding_names,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
 
@@ -279,27 +279,62 @@ impl QueryDriver for MongoDriver {
     /// sample plus the driver's own connection-pool contention, not by
     /// N times a network round trip. A collection that fails to sample
     /// (empty, or a transient error) just reports no columns rather than
-    /// failing schema browsing for every other collection.
+    /// failing schema browsing for every other collection -- same idea one
+    /// level up for a database that fails to list its own collections: it
+    /// just contributes none, rather than failing every other database's
+    /// worth of navigator entries.
     ///
-    /// Scoped to whichever database was current *at connect time* (the
-    /// URI's default database, or `"test"` if it named none) -- the
-    /// navigator tree is fetched once up front (see `MongoConnector::connect`)
-    /// and has no live-refresh hook, so a `use <db>` run later from the query
-    /// editor switches what `db.<collection>...` queries target without
-    /// updating this tree. `show dbs` is the way to see what other
-    /// databases exist from inside the editor in the meantime.
+    /// Covers **every** database on the server (`admin`/`local`/`config`
+    /// excluded, same reasoning as Postgres skipping `pg_catalog` or
+    /// Cassandra skipping its `system*` keyspaces), each grouped under its
+    /// own `SchemaInfo::schema` for the navigator's database level --
+    /// listing databases and, for each, its collections are both
+    /// concurrent round trips (`join_all`, same idiom as the per-collection
+    /// sampling below), not the connect-time default database alone the
+    /// way this used to work. Still a one-time snapshot fetched at connect
+    /// (see `MongoConnector::connect`) with no live-refresh hook, so a
+    /// database created afterward doesn't appear until reconnecting -- same
+    /// limitation as always, now covering every database instead of one. A
+    /// `use <db>` from the editor still only changes what `db.<collection>`
+    /// queries target, independent of what the navigator already shows.
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
-        let db = self.database();
-        let names = db.list_collection_names().await?;
-        let samples = futures_util::future::join_all(names.iter().map(|name| {
-            let collection = db.collection::<Document>(name);
+        let client = self
+            .client
+            .as_ref()
+            .expect("connect() must be called first");
+        let db_names: Vec<String> = client
+            .list_databases()
+            .await?
+            .into_iter()
+            .map(|spec| spec.name)
+            .filter(|name| !matches!(name.as_str(), "admin" | "local" | "config"))
+            .collect();
+
+        let collection_lists = futures_util::future::join_all(db_names.iter().map(|db_name| {
+            let db = client.database(db_name);
+            async move { db.list_collection_names().await }
+        }))
+        .await;
+        let targets: Vec<(String, String)> = db_names
+            .into_iter()
+            .zip(collection_lists)
+            .flat_map(|(db_name, names)| {
+                names
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |name| (db_name.clone(), name))
+            })
+            .collect();
+
+        let samples = futures_util::future::join_all(targets.iter().map(|(db_name, name)| {
+            let collection = client.database(db_name).collection::<Document>(name);
             async move { collection.find_one(Document::new()).await }
         }))
         .await;
-        let schema = names
+        let mut schema: Vec<SchemaInfo> = targets
             .into_iter()
             .zip(samples)
-            .map(|(name, sample)| {
+            .map(|((db_name, name), sample)| {
                 let columns = match sample {
                     Ok(Some(doc)) => {
                         let mut columns = Vec::new();
@@ -313,9 +348,19 @@ impl QueryDriver for MongoDriver {
                     columns,
                     kind: None,
                     ttl: None,
+                    schema: Some(db_name),
+                    // Every Mongo collection is the same kind -- no
+                    // views/functions the way Postgres has, so no extra
+                    // folder layer under the database (see the roadmap's
+                    // note on this connector for the same premise).
+                    object_kind: None,
                 }
             })
             .collect();
+
+        // Only the rare same-name-in-two-databases collection gets
+        // qualified -- see the function's own doc comment.
+        qualify_colliding_names(&mut schema);
         Ok(schema)
     }
 
@@ -1177,6 +1222,71 @@ mod tests {
 
         let empty = schema.iter().find(|s| s.name == "empty").unwrap();
         assert!(empty.columns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_schema_covers_every_database_grouped_by_it() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/first"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+        driver.execute("use second").await.unwrap();
+        driver
+            .execute(r#"db.orders.insertOne({"total": 42})"#)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        assert_eq!(users.schema.as_deref(), Some("first"));
+        let orders = schema.iter().find(|s| s.name == "orders").unwrap();
+        assert_eq!(orders.schema.as_deref(), Some("second"));
+        assert!(
+            schema
+                .iter()
+                .all(|s| !matches!(s.schema.as_deref(), Some("admin" | "local" | "config"))),
+            "system databases must not show up in the navigator: {:?}",
+            schema.iter().map(|s| &s.schema).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_schema_qualifies_only_a_collection_name_that_collides_across_databases() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/first"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+        driver.execute("use second").await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Bob"})"#)
+            .await
+            .unwrap();
+        driver
+            .execute(r#"db.orders.insertOne({"total": 42})"#)
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        assert!(
+            schema.iter().any(|s| s.name == "first.users"),
+            "schema was: {:?}",
+            schema.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(schema.iter().any(|s| s.name == "second.users"));
+        assert!(
+            schema.iter().any(|s| s.name == "orders"),
+            "a non-colliding name must stay bare"
+        );
     }
 
     #[tokio::test]

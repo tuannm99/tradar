@@ -158,6 +158,8 @@ mod tests {
             columns: Vec::new(),
             kind: Some(kind.to_string()),
             ttl: None,
+            schema: None,
+            object_kind: None,
         }
     }
 
@@ -278,6 +280,8 @@ mod tests {
             columns: Vec::new(),
             kind: Some("string".to_string()),
             ttl: Some(3421),
+            schema: None,
+            object_kind: None,
         }]));
 
         let backend = ratatui::backend::TestBackend::new(40, 6);

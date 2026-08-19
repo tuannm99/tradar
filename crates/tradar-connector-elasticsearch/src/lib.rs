@@ -228,6 +228,10 @@ impl QueryDriver for ElasticsearchDriver {
                     columns: index_fields(&mappings, name),
                     kind: None,
                     ttl: None,
+                    // Elasticsearch has neither a schema level (indices
+                    // are top-level) nor more than one object kind.
+                    schema: None,
+                    object_kind: None,
                 })
             })
             .collect())

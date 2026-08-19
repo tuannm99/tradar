@@ -166,6 +166,12 @@ impl QueryDriver for RedisDriver {
                 // -1 = no expiry set, -2 = key gone between SCAN and here
                 // (a race, not an error) -- neither is a duration to show.
                 ttl: (ttl >= 0).then_some(ttl),
+                // Redis has neither a schema/database level (`SELECT 0-15`
+                // is out of scope, see docs/roadmap.md) nor more than one
+                // object kind -- `flatten_outline` skips both grouping
+                // levels whenever every entry leaves these `None`.
+                schema: None,
+                object_kind: None,
             });
         }
         Ok(schema)
@@ -487,6 +493,8 @@ mod tests {
             columns: Vec::new(),
             kind: Some("hash".to_string()),
             ttl: None,
+            schema: None,
+            object_kind: None,
         };
 
         assert_eq!(
@@ -515,6 +523,8 @@ mod tests {
             columns: Vec::new(),
             kind: Some("hash".to_string()),
             ttl: None,
+            schema: None,
+            object_kind: None,
         };
 
         assert_eq!(
@@ -531,6 +541,8 @@ mod tests {
             columns: Vec::new(),
             kind: Some("stream".to_string()),
             ttl: None,
+            schema: None,
+            object_kind: None,
         };
 
         assert_eq!(driver.browse_command(&entry), None);
@@ -544,6 +556,8 @@ mod tests {
             columns: Vec::new(),
             kind: Some("stream".to_string()),
             ttl: None,
+            schema: None,
+            object_kind: None,
         };
 
         assert_eq!(
@@ -683,6 +697,8 @@ mod tests {
                 columns: Vec::new(),
                 kind: Some("string".to_string()),
                 ttl: None,
+                schema: None,
+                object_kind: None,
             })
             .await
             .unwrap();
@@ -711,6 +727,8 @@ mod tests {
                 columns: Vec::new(),
                 kind: Some("hash".to_string()),
                 ttl: None,
+                schema: None,
+                object_kind: None,
             })
             .await
             .unwrap();
@@ -744,6 +762,8 @@ mod tests {
                 columns: Vec::new(),
                 kind: Some("list".to_string()),
                 ttl: None,
+                schema: None,
+                object_kind: None,
             })
             .await
             .unwrap();
@@ -776,6 +796,8 @@ mod tests {
                 columns: Vec::new(),
                 kind: Some("set".to_string()),
                 ttl: None,
+                schema: None,
+                object_kind: None,
             })
             .await
             .unwrap();
@@ -812,6 +834,8 @@ mod tests {
                 columns: Vec::new(),
                 kind: Some("zset".to_string()),
                 ttl: None,
+                schema: None,
+                object_kind: None,
             })
             .await
             .unwrap();
@@ -843,6 +867,8 @@ mod tests {
                 columns: Vec::new(),
                 kind: Some("stream".to_string()),
                 ttl: None,
+                schema: None,
+                object_kind: None,
             })
             .await;
 

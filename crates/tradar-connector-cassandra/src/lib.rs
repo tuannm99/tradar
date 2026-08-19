@@ -192,6 +192,15 @@ impl QueryDriver for CassandraDriver {
                     .collect(),
                 kind: None,
                 ttl: None,
+                // A keyspace-per-connection level in the navigator, same
+                // as Postgres's schema level -- Cassandra has no other
+                // object kind besides tables to further group by (no
+                // views/functions/procedures the way Postgres does), so
+                // `object_kind` stays `None`: `flatten_outline` skips
+                // straight from the keyspace folder to the table, no
+                // redundant single-kind "Tables" folder in between.
+                schema: Some(keyspace),
+                object_kind: None,
             });
         }
         Ok(schema)
