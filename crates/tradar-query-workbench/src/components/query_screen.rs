@@ -64,6 +64,9 @@ pub struct QueryScreenComponent {
     snippet_prompt: Option<ui::TextInput>,
     /// The snippet library overlay, open after `Ctrl+L`.
     snippet_picker: Option<SnippetPickerComponent>,
+    /// The ERD overlay -- a table picker that becomes the rendered
+    /// diagram once a table's chosen. `None` until `Command::ShowErd`.
+    erd: Option<crate::components::erd::ErdComponent>,
     /// Where the editor was last drawn, so a click there can focus it.
     editor_area: Rect,
     /// Everything completable for this connection, built once on connect.
@@ -318,6 +321,7 @@ impl QueryScreenComponent {
             history_picker: None,
             snippet_prompt: None,
             snippet_picker: None,
+            erd: None,
             editor_area: Rect::ZERO,
             completions,
             outline,
@@ -379,6 +383,7 @@ impl QueryScreenComponent {
             Command::History => self.open_history(),
             Command::SaveSnippet => self.open_snippet_prompt(),
             Command::OpenSnippets => self.open_snippet_picker(),
+            Command::ShowErd => self.open_erd(),
             Command::ExportCurl => self.export_curl(),
             Command::Export => self.open_export_prompt(),
             Command::Yank => {
@@ -589,6 +594,30 @@ impl QueryScreenComponent {
             .map(|s| s.for_driver(&driver))
             .unwrap_or_default();
         self.snippet_picker = Some(SnippetPickerComponent::new(driver, entries));
+    }
+
+    /// Opens the ERD table picker for this connection's schema -- a no-op
+    /// with nothing to show if the schema failed to load or has no tables
+    /// (Redis, an empty database, a connector that hasn't loaded yet).
+    fn open_erd(&mut self) {
+        let Ok(schema) = self.engine.schema() else {
+            return;
+        };
+        if schema.is_empty() {
+            return;
+        }
+        let names = schema.iter().map(|s| s.name.clone()).collect();
+        self.erd = Some(crate::components::erd::ErdComponent::new(names));
+    }
+
+    /// What an ERD overlay outcome means -- mirrors
+    /// `handle_history_outcome`: `Closed` covers both "cancelled the
+    /// picker" and "closed the diagram", since the overlay itself already
+    /// tracks which state it was in.
+    fn handle_erd_outcome(&mut self, outcome: Option<crate::components::erd::ErdOutcome>) {
+        if outcome.is_some() {
+            self.erd = None;
+        }
     }
 
     /// Fetches the sidebar's highlighted key into the results pane -- a
@@ -888,9 +917,11 @@ impl QueryScreenComponent {
             self.completion = None;
             return;
         }
+        let context =
+            crate::query_driver::completion_context(&self.query_editor.text_before_cursor());
         let matches = self
             .completions
-            .matches(&self.query_editor.word_before_cursor());
+            .matches_in_context(&self.query_editor.word_before_cursor(), &context);
         match (&mut self.completion, matches.is_empty()) {
             (_, true) => self.completion = None,
             (Some(popup), false) => popup.set_items(matches),
@@ -1119,6 +1150,13 @@ impl Component for QueryScreenComponent {
         if let Some(snippet_picker) = self.snippet_picker.as_mut() {
             let outcome = snippet_picker.handle_key_event(code, modifiers);
             self.handle_snippet_picker_outcome(outcome);
+            return None;
+        }
+
+        if let Some(erd) = self.erd.as_mut() {
+            let schema = self.engine.schema().as_deref().unwrap_or(&[]);
+            let outcome = erd.handle_key_event(code, modifiers, schema);
+            self.handle_erd_outcome(outcome);
             return None;
         }
 
@@ -1552,6 +1590,12 @@ impl Component for QueryScreenComponent {
             row_edit.draw(frame, popup);
         }
 
+        if let Some(erd) = &mut self.erd {
+            let popup = ui::centered_rect(92, 92, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            erd.draw(frame, popup);
+        }
+
         if let Some(menu) = &self.context_menu {
             menu.draw(frame, area);
         }
@@ -1707,6 +1751,7 @@ mod tests {
                 name: "id".to_string(),
                 type_name: "INTEGER".to_string(),
                 primary_key: true,
+                foreign_key: None,
             }],
             kind: None,
             ttl: None,
@@ -2653,6 +2698,7 @@ mod tests {
                     name: "id".to_string(),
                     type_name: "INTEGER".to_string(),
                     primary_key: true,
+                    foreign_key: None,
                 },
                 crate::query_driver::ColumnInfo::new("name", "TEXT"),
             ],
@@ -3240,6 +3286,7 @@ mod tests {
                     name: "id".to_string(),
                     type_name: "INTEGER".to_string(),
                     primary_key: true,
+                    foreign_key: None,
                 },
                 crate::query_driver::ColumnInfo::new("name", "TEXT"),
             ],

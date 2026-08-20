@@ -1,5 +1,6 @@
 pub mod browse_sidebar;
 pub mod completion;
+pub mod erd;
 pub mod file_picker;
 pub mod file_prompt;
 pub mod history_picker;

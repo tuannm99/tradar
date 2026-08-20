@@ -21,5 +21,6 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`keymap-and-performance-2026-08-18.md`](keymap-and-performance-2026-08-18.md) — rà toàn bộ keymap (fix bug Ctrl+Left/Right HTTP chết, đổi Ctrl+G → F2) + hiệu năng (checkpoint batching, event loop không-blocking, Mongo schema song song).
 - [`sort-by-column.md`](sort-by-column.md) — sort theo cột trong bảng kết quả (phím `s` + click header), client-side, cycle asc/desc/off, giá trị thiếu luôn xếp cuối.
 - [`navigator-schema-level.md`](navigator-schema-level.md) — navigator thêm cấp schema/keyspace/database (Postgres/Cassandra/MongoDB) + nhóm theo loại object (Postgres: Tables/Views/Functions/Procedures), `OutlineEntry::is_object` thay `depth == 0` cho CRUD snippet.
+- [`fk-autocomplete-and-erd.md`](fk-autocomplete-and-erd.md) — dữ liệu FK mới (`ColumnInfo.foreign_key`, Postgres/SQLite), autocomplete ngữ cảnh sâu (`.` sau alias, JOIN gợi ý bảng liên quan), ERD box-drawing (`F4`) cho lân cận 1 bảng.
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.

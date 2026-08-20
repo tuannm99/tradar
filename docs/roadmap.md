@@ -27,11 +27,11 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 2. **Table designer qua UI** — thêm/sửa/xoá cột, constraint, index, FK; tạo bảng mới; đổi tên bảng. Rủi ro cao nhất trong 5 mục Schema & DDL: sinh DDL đúng cú pháp cho từng dialect (`ALTER TABLE` Postgres khác SQLite khác Cassandra), UI cho một thao tác vốn cần nhiều field (kiểu, null-able, default, cascade...) trong khi app hiện chỉ có `TextInput`/`TextArea` một dòng/nhiều dòng chưa có form nhiều field phức tạp kiểu này (form connection 3 field là ví dụ gần nhất, nhưng đơn giản hơn nhiều). Có thể cân nhắc hướng rẻ hơn: sinh DDL rồi cho user review/sửa tay trước khi chạy (giống cách row-edit làm với UPDATE/DELETE) thay vì UI point-and-click đầy đủ ngay từ v1.
 3. **Schema diff/compare** — so 2 connection hoặc 2 schema, liệt kê khác biệt (cột thiếu/thừa, kiểu khác, index khác). Cần `list_schema` đủ chi tiết ở cả 2 phía (đã có cho Postgres/SQLite qua PK, nhưng chưa có index/constraint/default) trước khi so được gì có ý nghĩa.
 4. **Migration/version-control tích hợp** — chưa rõ hình dạng: file migration kiểu Flyway/Alembic đọc từ thư mục, hay chỉ là "lưu lịch sử DDL đã chạy" đơn giản hơn? Cần hỏi lại phạm vi trước khi nghĩ kiến trúc.
-5. **ERD (sơ đồ quan hệ bảng)** — TUI nên đây là box-drawing/ASCII render trong terminal, không phải đồ hoạ thật như DataGrip; cần nghĩ shape trước (danh sách bảng + FK vẽ bằng ký tự, hay chỉ liệt kê quan hệ dạng text). Phụ thuộc dữ liệu FK đã có sẵn ở PK/index nếu #2-3 làm trước.
+5. ~~ERD (sơ đồ quan hệ bảng)~~ — xong (2026-08-20), xem `docs/backlog/fk-autocomplete-and-erd.md`. Box-drawing thật (đường nối `─│┌┐└┘├┤┬┴┼`), phím `F4`, phạm vi lân cận 1 bảng (không phải toàn schema). Dùng chung dữ liệu FK mới với #6.
 
 **Query & editor**
 
-6. **Autocomplete theo ngữ cảnh sâu** (gợi ý theo join/FK — gõ sau `JOIN` gợi ý bảng có FK liên quan, gõ sau `.` trên alias gợi ý đúng cột của bảng đó). Nguồn dữ liệu cần thêm: FK giữa các bảng (chưa có trong `SchemaInfo`/`ColumnInfo` hiện tại, chỉ có `primary_key: bool` chứ không có "cột này FK tới bảng/cột nào") — có thể dùng chung dữ liệu với ERD (#5) và table designer (#2) nếu làm theo đúng thứ tự phụ thuộc.
+6. ~~Autocomplete theo ngữ cảnh sâu~~ — xong (2026-08-20), xem `docs/backlog/fk-autocomplete-and-erd.md`. `.` sau alias gợi ý đúng cột của bảng đó, gõ sau `JOIN` xếp bảng có FK liên quan lên đầu. Dữ liệu FK mới (`ColumnInfo.foreign_key`) chỉ có cho Postgres/SQLite (Cassandra không có khái niệm FK trong CQL).
 7. **"Generate SQL" từ UI** — tạo câu SELECT/INSERT/UPDATE tự động từ việc chọn bảng/cột qua giao diện, không gõ tay. Cần làm rõ khác gì với CRUD snippet đã có (navigator `c`/`r`/`u`/`d` sinh khung Create/Read/Update/Delete với placeholder `<tên_cột>`) — nếu ý là "point-and-click chọn cột thay vì gõ tay điền placeholder", đây là mở rộng của CRUD snippet chứ không phải tính năng mới từ đầu; nếu ý là "query builder trực quan" (chọn bảng, kéo điều kiện WHERE, chọn JOIN) thì là một sub-project lớn riêng, gần với #2 về độ phức tạp UI.
 
 **Data grid**
@@ -46,8 +46,8 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 
 - **Tier 1 (làm trước, rẻ/độc lập)**: #9 Sort theo cột — xong, `docs/backlog/sort-by-column.md`.
 - **Tier 2 (nền tảng)**: #1 Navigator schema/database + nhóm object — xong, `docs/backlog/navigator-schema-level.md`.
-- **Tier 3 (dùng chung dữ liệu FK vừa thêm ở #1)**: #6 Autocomplete ngữ cảnh sâu → #5 ERD.
-- **Tier 4 (cần chốt phạm vi trước khi code)**: #7 Generate SQL từ UI → #10 Multi-filter kết hợp.
+- **Tier 3 (dùng chung dữ liệu FK vừa thêm ở #1)**: #6 Autocomplete ngữ cảnh sâu — xong, #5 ERD — xong, cả hai `docs/backlog/fk-autocomplete-and-erd.md`.
+- **Tier 4 (cần chốt phạm vi trước khi code, làm tiếp theo)**: #7 Generate SQL từ UI → #10 Multi-filter kết hợp.
 - **Tier 5 (lớn, tách nhiều bước nhỏ)**: #2 Table designer → #3 Schema diff/compare → #4 Migration/version-control.
 - **Tier 6 (để cuối, #12 cần bàn lại có đáng làm không)**: #11 Group-by trong grid → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK.
 

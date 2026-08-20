@@ -415,6 +415,15 @@ impl QueryEditorComponent {
         self.clamp_col();
     }
 
+    /// `text()` truncated to the cursor -- what context-aware completion
+    /// parses to find which FROM/JOIN clause the cursor is inside, or
+    /// which alias immediately precedes a `.`.
+    pub fn text_before_cursor(&self) -> String {
+        let text = self.text();
+        let offset = self.cursor_offset().min(text.len());
+        text[..offset].to_string()
+    }
+
     /// The cursor's position as a byte offset into `text()` -- what
     /// "which statement am I in?" needs, since statements are reported as
     /// offsets into the whole buffer.

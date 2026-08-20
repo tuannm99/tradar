@@ -216,6 +216,9 @@ pub enum Command {
     DeleteSnippet,
     /// Rename the highlighted snippet, in the library overlay.
     RenameSnippet,
+    /// Open the ERD overlay: pick a table, then see it and its immediate
+    /// FK neighbors as a box-drawing diagram.
+    ShowErd,
     ExportCurl,
     /// Export the current result to a CSV or JSON file -- format picked by
     /// the extension typed in the prompt, same idea as `SaveFile` picking a
@@ -376,6 +379,7 @@ impl Command {
             Self::OpenSnippets => "open-snippets",
             Self::DeleteSnippet => "delete-snippet",
             Self::RenameSnippet => "rename-snippet",
+            Self::ShowErd => "show-erd",
             Self::ExportCurl => "export-curl",
             Self::Export => "export",
             Self::Yank => "yank",
@@ -443,7 +447,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 85] = [
+    const ALL: [Self; 86] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -469,6 +473,7 @@ impl Command {
         Self::OpenSnippets,
         Self::DeleteSnippet,
         Self::RenameSnippet,
+        Self::ShowErd,
         Self::ExportCurl,
         Self::Export,
         Self::Yank,
@@ -559,6 +564,7 @@ impl Command {
             Self::OpenSnippets => "Open the snippet library",
             Self::DeleteSnippet => "Delete the selected snippet",
             Self::RenameSnippet => "Rename the selected snippet",
+            Self::ShowErd => "Show a table's ERD (foreign-key neighborhood)",
             Self::ExportCurl => "Export the request as curl (Elasticsearch)",
             Self::Export => "Export the result to CSV/JSON",
             Self::Yank => "Copy the selected row/document",
@@ -768,6 +774,7 @@ impl Default for Keymap {
                 ("ctrl-r", Command::History),
                 ("ctrl-k", Command::SaveSnippet),
                 ("ctrl-l", Command::OpenSnippets),
+                ("f4", Command::ShowErd),
                 ("ctrl-y", Command::ExportCurl),
                 ("ctrl-e", Command::Export),
                 ("f2", Command::ToggleBrowseMode),

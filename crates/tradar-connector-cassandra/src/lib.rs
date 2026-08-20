@@ -188,6 +188,9 @@ impl QueryDriver for CassandraDriver {
                         // address one row" is the same concept
                         // `ColumnInfo::primary_key` already means here.
                         primary_key: kind == "partition_key" || kind == "clustering",
+                        // CQL has no referential-integrity concept -- no FK
+                        // to report, ever, for this driver.
+                        foreign_key: None,
                     })
                     .collect(),
                 kind: None,

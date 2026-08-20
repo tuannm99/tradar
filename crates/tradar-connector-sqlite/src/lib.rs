@@ -183,14 +183,34 @@ impl QueryDriver for SqliteDriver {
                     .bind(&name)
                     .fetch_all(pool)
                     .await?;
+            // A second `PRAGMA` for foreign keys -- `to` is the referenced
+            // column, `NULL` when the FK targets the referenced table's
+            // primary key implicitly rather than naming a column, which
+            // this connector doesn't try to resolve further.
+            let fks: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT \"from\", \"table\", \"to\" FROM pragma_foreign_key_list($1)",
+            )
+            .bind(&name)
+            .fetch_all(pool)
+            .await?;
             schema.push(SchemaInfo {
                 name,
                 columns: columns
                     .into_iter()
-                    .map(|(_, name, type_name, pk)| ColumnInfo {
-                        name,
-                        type_name,
-                        primary_key: pk != 0,
+                    .map(|(_, name, type_name, pk)| {
+                        let foreign_key = fks
+                            .iter()
+                            .find(|(from, _, to)| *from == name && to.is_some())
+                            .map(|(_, table, to)| query_driver::ForeignKeyRef {
+                                table: table.clone(),
+                                column: to.clone().expect("filtered to Some above"),
+                            });
+                        ColumnInfo {
+                            name,
+                            type_name,
+                            primary_key: pk != 0,
+                            foreign_key,
+                        }
                     })
                     .collect(),
                 kind: None,
@@ -404,6 +424,43 @@ mod tests {
             key,
             vec!["id"],
             "without this the results grid can't build a WHERE clause"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_schema_reports_a_foreign_key_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .execute(driver.pool.as_ref().unwrap())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER, \
+             FOREIGN KEY (user_id) REFERENCES users (id))",
+        )
+        .execute(driver.pool.as_ref().unwrap())
+        .await
+        .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let orders = schema.iter().find(|s| s.name == "orders").unwrap();
+        let user_id = orders.columns.iter().find(|c| c.name == "user_id").unwrap();
+        let fk = user_id
+            .foreign_key
+            .as_ref()
+            .expect("user_id references users(id)");
+        assert_eq!(fk.table, "users");
+        assert_eq!(fk.column, "id");
+
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        let id = users.columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(
+            id.foreign_key.is_none(),
+            "users.id is a primary key, not itself a foreign key"
         );
     }
 

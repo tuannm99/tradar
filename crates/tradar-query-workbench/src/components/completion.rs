@@ -17,7 +17,7 @@ use ratatui::widgets::{Clear, List, ListItem, ListState};
 use tradar_core::theme::theme;
 use tradar_core::ui;
 
-use crate::query_driver::SchemaInfo;
+use crate::query_driver::{self, SchemaInfo};
 
 /// Longest list shown at once. A popup taller than this is unreadable and
 /// covers the query you're writing.
@@ -70,7 +70,14 @@ impl Candidate {
 #[derive(Debug, Default, Clone)]
 pub struct CompletionSource {
     candidates: Vec<Candidate>,
+    /// Kept alongside `candidates` (which flattens/dedupes across tables)
+    /// for `matches_in_context`, which needs to know *which* table a
+    /// column belongs to and which columns carry an FK -- neither survives
+    /// the flattening above.
+    schema: Vec<SchemaInfo>,
 }
+
+use query_driver::same_table;
 
 impl CompletionSource {
     pub fn new(keywords: &[&str], schema: &[SchemaInfo]) -> Self {
@@ -91,7 +98,92 @@ impl CompletionSource {
                 }
             }
         }
-        Self { candidates }
+        Self {
+            candidates,
+            schema: schema.to_vec(),
+        }
+    }
+
+    /// `matches`, but adjusted for the SQL context the cursor is sitting
+    /// in -- `alias.` completes to that table's own columns instead of the
+    /// flattened global list, and a table name typed right after `JOIN`
+    /// ranks a table with an FK to one already in the query first. Falls
+    /// back to `matches` for `CompletionContext::None`, and for a
+    /// `TableColumns`/`JoinTarget` whose table doesn't resolve against the
+    /// connected schema (nothing more specific to offer than the flat
+    /// list).
+    pub fn matches_in_context(
+        &self,
+        prefix: &str,
+        context: &query_driver::CompletionContext,
+    ) -> Vec<Candidate> {
+        let needle = prefix.to_ascii_lowercase();
+        match context {
+            query_driver::CompletionContext::TableColumns { table } => {
+                let Some(entry) = self.schema.iter().find(|e| same_table(table, &e.name)) else {
+                    return self.matches(prefix);
+                };
+                let mut matches: Vec<Candidate> = entry
+                    .columns
+                    .iter()
+                    .filter(|c| {
+                        let lower = c.name.to_ascii_lowercase();
+                        lower.starts_with(&needle) && lower != needle
+                    })
+                    .map(|c| Candidate::new(c.name.clone(), CandidateKind::Column))
+                    .collect();
+                matches.sort_by(|a, b| a.text_lower.cmp(&b.text_lower));
+                matches
+            }
+            query_driver::CompletionContext::JoinTarget { known_tables } => {
+                // A table is "related" if it has an FK to a known table,
+                // or a known table has an FK to it -- either direction is
+                // a real join condition, and there's no reason to only
+                // offer one side of it.
+                let related = |entry: &SchemaInfo| -> bool {
+                    entry.columns.iter().any(|c| {
+                        c.foreign_key
+                            .as_ref()
+                            .is_some_and(|fk| known_tables.iter().any(|t| same_table(t, &fk.table)))
+                    }) || known_tables.iter().any(|t| {
+                        self.schema
+                            .iter()
+                            .find(|e| same_table(t, &e.name))
+                            .is_some_and(|kt| {
+                                kt.columns.iter().any(|c| {
+                                    c.foreign_key
+                                        .as_ref()
+                                        .is_some_and(|fk| same_table(&fk.table, &entry.name))
+                                })
+                            })
+                    })
+                };
+                let mut matches: Vec<(bool, Candidate)> = self
+                    .schema
+                    .iter()
+                    .filter(|e| {
+                        let lower = e.name.to_ascii_lowercase();
+                        lower.starts_with(&needle) && lower != needle
+                    })
+                    // A table already in the FROM/JOIN list isn't worth
+                    // suggesting again -- a deliberate self-join still
+                    // works, just by typing the full name rather than
+                    // picking it from the popup.
+                    .filter(|e| !known_tables.iter().any(|t| same_table(t, &e.name)))
+                    .map(|e| {
+                        (
+                            related(e),
+                            Candidate::new(e.name.clone(), CandidateKind::Table),
+                        )
+                    })
+                    .collect();
+                matches.sort_by(|(a_related, a), (b_related, b)| {
+                    (!a_related, &a.text_lower).cmp(&(!b_related, &b.text_lower))
+                });
+                matches.into_iter().map(|(_, c)| c).collect()
+            }
+            query_driver::CompletionContext::None => self.matches(prefix),
+        }
     }
 
     /// Matches for `prefix`, best first. Case-insensitive, because SQL is
@@ -345,5 +437,154 @@ mod tests {
 
         popup.next();
         assert_eq!(popup.selected_text(), Some("users"), "and back round");
+    }
+
+    /// `orders.user_id` references `users.id`; `products` has no relation
+    /// to either -- enough to tell "ranked first" from "not offered at
+    /// all" and from "everything else, alphabetically".
+    fn schema_with_fk() -> Vec<SchemaInfo> {
+        vec![
+            SchemaInfo {
+                name: "users".to_string(),
+                columns: vec![
+                    ColumnInfo::new("id", "INTEGER"),
+                    ColumnInfo::new("name", "TEXT"),
+                ],
+                kind: None,
+                ttl: None,
+                schema: None,
+                object_kind: None,
+            },
+            SchemaInfo {
+                name: "orders".to_string(),
+                columns: vec![
+                    ColumnInfo::new("id", "INTEGER"),
+                    ColumnInfo {
+                        name: "user_id".to_string(),
+                        type_name: "INTEGER".to_string(),
+                        primary_key: false,
+                        foreign_key: Some(query_driver::ForeignKeyRef {
+                            table: "users".to_string(),
+                            column: "id".to_string(),
+                        }),
+                    },
+                ],
+                kind: None,
+                ttl: None,
+                schema: None,
+                object_kind: None,
+            },
+            SchemaInfo {
+                name: "products".to_string(),
+                columns: vec![ColumnInfo::new("id", "INTEGER")],
+                kind: None,
+                ttl: None,
+                schema: None,
+                object_kind: None,
+            },
+        ]
+    }
+
+    fn source_with_fk() -> CompletionSource {
+        CompletionSource::new(&["SELECT", "JOIN"], &schema_with_fk())
+    }
+
+    #[test]
+    fn table_columns_context_offers_only_that_table_s_columns() {
+        let matches = source_with_fk().matches_in_context(
+            "",
+            &query_driver::CompletionContext::TableColumns {
+                table: "orders".to_string(),
+            },
+        );
+
+        let names: Vec<&str> = matches.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["id", "user_id"],
+            "only orders' own columns, not users' or products'"
+        );
+        assert!(matches.iter().all(|c| c.kind == CandidateKind::Column));
+    }
+
+    #[test]
+    fn table_columns_context_still_filters_by_the_typed_prefix() {
+        let matches = source_with_fk().matches_in_context(
+            "u",
+            &query_driver::CompletionContext::TableColumns {
+                table: "orders".to_string(),
+            },
+        );
+
+        let names: Vec<&str> = matches.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(names, vec!["user_id"]);
+    }
+
+    #[test]
+    fn table_columns_context_falls_back_to_the_flat_list_for_an_unknown_table() {
+        let matches = source_with_fk().matches_in_context(
+            "u",
+            &query_driver::CompletionContext::TableColumns {
+                table: "no_such_table".to_string(),
+            },
+        );
+
+        assert!(
+            !matches.is_empty(),
+            "an unresolved table falls back to matches(), not to nothing"
+        );
+    }
+
+    #[test]
+    fn join_target_context_ranks_the_fk_related_table_first() {
+        let matches = source_with_fk().matches_in_context(
+            "",
+            &query_driver::CompletionContext::JoinTarget {
+                known_tables: vec!["orders".to_string()],
+            },
+        );
+
+        let names: Vec<&str> = matches.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["users", "products"],
+            "users (FK from orders) ranks before products (unrelated)"
+        );
+    }
+
+    #[test]
+    fn join_target_context_relation_works_in_either_direction() {
+        // users has no FK column of its own, but orders has one pointing
+        // at it -- still "related" from the other side.
+        let matches = source_with_fk().matches_in_context(
+            "",
+            &query_driver::CompletionContext::JoinTarget {
+                known_tables: vec!["users".to_string()],
+            },
+        );
+
+        let names: Vec<&str> = matches.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(names, vec!["orders", "products"]);
+    }
+
+    #[test]
+    fn join_target_context_with_no_relations_falls_back_to_alphabetical() {
+        let matches = source_with_fk().matches_in_context(
+            "",
+            &query_driver::CompletionContext::JoinTarget {
+                known_tables: vec!["products".to_string()],
+            },
+        );
+
+        let names: Vec<&str> = matches.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(names, vec!["orders", "users"]);
+    }
+
+    #[test]
+    fn none_context_behaves_like_plain_matches() {
+        assert_eq!(
+            source_with_fk().matches_in_context("u", &query_driver::CompletionContext::None),
+            source_with_fk().matches("u")
+        );
     }
 }

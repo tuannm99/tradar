@@ -281,6 +281,42 @@ impl QueryDriver for PostgresDriver {
         .fetch_all(pool)
         .await?;
 
+        // Foreign keys, one more round trip in the same information_schema
+        // join style as the primary-key subquery above: `key_column_usage`
+        // for the referencing (schema, table, column) side of the
+        // constraint, joined to `constraint_column_usage` for the
+        // referenced side. Keyed by bare table name, not schema-qualified
+        // -- `qualify_colliding_names` below only prefixes a `SchemaInfo`
+        // when its name collides across schemas, and that's rare enough
+        // this stays a known miss rather than resolving it here too.
+        let fk_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT kcu.table_schema, kcu.table_name, kcu.column_name, \
+                    ccu.table_name, ccu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON kcu.constraint_name = tc.constraint_name \
+              AND kcu.table_schema = tc.table_schema \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON ccu.constraint_name = tc.constraint_name \
+              AND ccu.table_schema = tc.table_schema \
+             WHERE tc.constraint_type = 'FOREIGN KEY'",
+        )
+        .fetch_all(pool)
+        .await?;
+        let mut foreign_keys: std::collections::HashMap<
+            (String, String, String),
+            query_driver::ForeignKeyRef,
+        > = std::collections::HashMap::new();
+        for (fk_schema, fk_table, fk_column, ref_table, ref_column) in fk_rows {
+            foreign_keys.insert(
+                (fk_schema, fk_table, fk_column),
+                query_driver::ForeignKeyRef {
+                    table: ref_table,
+                    column: ref_column,
+                },
+            );
+        }
+
         let mut schema: Vec<SchemaInfo> = Vec::new();
         for (table_schema, table, table_type, column, type_name, primary_key) in rows {
             let same_as_last = schema.last().is_some_and(|s| {
@@ -288,7 +324,7 @@ impl QueryDriver for PostgresDriver {
             });
             if !same_as_last {
                 schema.push(SchemaInfo {
-                    schema: Some(table_schema),
+                    schema: Some(table_schema.clone()),
                     object_kind: Some(
                         if table_type == "VIEW" {
                             "view"
@@ -297,14 +333,18 @@ impl QueryDriver for PostgresDriver {
                         }
                         .to_string(),
                     ),
-                    ..SchemaInfo::new(table)
+                    ..SchemaInfo::new(table.clone())
                 });
             }
+            let foreign_key = foreign_keys
+                .get(&(table_schema, table, column.clone()))
+                .cloned();
             let entry = schema.last_mut().expect("just pushed");
             entry.columns.push(ColumnInfo {
                 name: column,
                 type_name,
                 primary_key,
+                foreign_key,
             });
         }
 
@@ -510,6 +550,45 @@ mod tests {
 
         assert_eq!(schema.len(), 1);
         assert_eq!(schema[0].name, "users");
+    }
+
+    #[tokio::test]
+    async fn list_schema_reports_a_foreign_key_reference() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        let pool = driver.pool.as_ref().unwrap();
+        sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER \
+             REFERENCES users (id))",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let orders = schema.iter().find(|s| s.name == "orders").unwrap();
+        let user_id = orders.columns.iter().find(|c| c.name == "user_id").unwrap();
+        let fk = user_id
+            .foreign_key
+            .as_ref()
+            .expect("user_id references users(id)");
+        assert_eq!(fk.table, "users");
+        assert_eq!(fk.column, "id");
+
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        let id = users.columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(
+            id.foreign_key.is_none(),
+            "users.id is a primary key, not itself a foreign key"
+        );
     }
 
     #[tokio::test]

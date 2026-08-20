@@ -75,6 +75,13 @@ pub struct ColumnInfo {
     /// names exactly the row the user is pointing at, and a statement that
     /// might hit several rows is not one to run on their behalf.
     pub primary_key: bool,
+    /// The table/column this column references via a foreign key, when the
+    /// backend has that concept and reports it (Postgres, SQLite today).
+    /// `None` for a column with no FK, and always `None` for a backend
+    /// without referential integrity (Cassandra, and the document/key-value
+    /// drivers) -- completion and any future ERD treat `None` as "nothing
+    /// to relate", not as "not yet looked up".
+    pub foreign_key: Option<ForeignKeyRef>,
 }
 
 impl ColumnInfo {
@@ -85,8 +92,19 @@ impl ColumnInfo {
             name: name.into(),
             type_name: type_name.into(),
             primary_key: false,
+            foreign_key: None,
         }
     }
+}
+
+/// The table/column a `ColumnInfo` points to via a foreign key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignKeyRef {
+    /// The referenced table's name, in the same form `SchemaInfo::name`
+    /// uses for that backend (so it can be matched straight against other
+    /// `SchemaInfo` entries without reparsing).
+    pub table: String,
+    pub column: String,
 }
 
 /// How many rows a driver will materialise for one query. A result set is
@@ -491,6 +509,24 @@ pub fn qualify_colliding_names(entries: &mut [SchemaInfo]) {
     }
 }
 
+/// Whether `query_name` (as written in query text, or in FK data) and
+/// `schema_name` (a connected `SchemaInfo::name`) name the same table.
+/// Compares case-insensitively and, since either side may or may not carry
+/// a schema qualifier (`public.users` vs. bare `users` -- see
+/// `qualify_colliding_names`), falls back to comparing each side's last
+/// dotted segment before giving up. Shared by completion (`alias.` and
+/// JOIN-target ranking) and the ERD view (walking FK references), both of
+/// which match text that may or may not be schema-qualified against
+/// `SchemaInfo` entries that may or may not be either.
+pub fn same_table(query_name: &str, schema_name: &str) -> bool {
+    if query_name.eq_ignore_ascii_case(schema_name) {
+        return true;
+    }
+    let query_last = query_name.rsplit('.').next().unwrap_or(query_name);
+    let schema_last = schema_name.rsplit('.').next().unwrap_or(schema_name);
+    query_last.eq_ignore_ascii_case(schema_name) || query_name.eq_ignore_ascii_case(schema_last)
+}
+
 /// Double-quotes an identifier, one dotted part at a time so a
 /// schema-qualified `public.users` stays two identifiers rather than
 /// becoming one strangely named table.
@@ -573,6 +609,133 @@ pub fn single_table_source(sql: &str) -> Option<String> {
         Some(t) if is_clause_keyword(&t.word) => Some(table.word.clone()),
         Some(_) => None,
     }
+}
+
+/// What the cursor is positioned to complete, read from the SQL typed so
+/// far -- deliberately schema-agnostic, the same split of responsibility
+/// `single_table_source` uses: this file answers "what does the query
+/// text say", `completion.rs` (which holds the connected schema) answers
+/// "what does that resolve to".
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompletionContext {
+    /// No special context -- fall back to the flat table/column/keyword
+    /// list.
+    None,
+    /// Cursor is right after `<alias>.`, optionally with a partial column
+    /// name already typed after the dot -- `table` is the table that alias
+    /// refers to, resolved from this query's own FROM/JOIN clauses (not
+    /// yet checked against the connected schema).
+    TableColumns { table: String },
+    /// Cursor is completing a table name right after JOIN -- `known_tables`
+    /// are the tables already named in FROM/earlier JOINs, so a caller
+    /// with FK data can rank a related table first.
+    JoinTarget { known_tables: Vec<String> },
+}
+
+/// A table named in a FROM/JOIN clause, and the alias it was given (if
+/// any) -- `alias.column` resolves through this, `single_table_source`'s
+/// own alias-skipping logic (`FROM users u`/`FROM users AS u`) reused here
+/// because JOIN-aware completion needs it for every clause, not just one.
+struct TableRef {
+    table: String,
+    alias: Option<String>,
+}
+
+/// Words that can't be an alias because they start the next clause of a
+/// join, not name one -- `is_clause_keyword`'s SELECT-tail list plus the
+/// join-specific words that show up between one table and the next.
+fn is_alias_stopword(word: &str) -> bool {
+    is_clause_keyword(word)
+        || matches!(
+            word.to_ascii_lowercase().as_str(),
+            "join" | "inner" | "left" | "right" | "full" | "outer" | "cross" | "on" | "using"
+        )
+}
+
+/// Every table named in a FROM/JOIN clause of `tokens`, in order, each with
+/// whatever alias immediately follows it (if any).
+fn from_join_table_refs(tokens: &[SqlToken]) -> Vec<TableRef> {
+    let mut refs = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if token.depth != 0 || !matches!(token.word.to_ascii_lowercase().as_str(), "from" | "join")
+        {
+            continue;
+        }
+        let Some(table_tok) = tokens.get(i + 1) else {
+            continue;
+        };
+        if !is_identifier(&table_tok.word) {
+            continue;
+        }
+        let mut next = i + 2;
+        if tokens
+            .get(next)
+            .is_some_and(|t| t.word.eq_ignore_ascii_case("as"))
+        {
+            next += 1;
+        }
+        let alias = tokens
+            .get(next)
+            .filter(|t| is_identifier(&t.word) && !is_alias_stopword(&t.word))
+            .map(|t| t.word.clone());
+        refs.push(TableRef {
+            table: table_tok.word.clone(),
+            alias,
+        });
+    }
+    refs
+}
+
+/// The table `alias` refers to, in the query the tokens came from -- either
+/// an explicit alias (`FROM users u` -> `u` resolves to `users`) or the
+/// table's own name used bare (`FROM users` -> `users` resolves to itself).
+fn resolve_alias(tokens: &[SqlToken], alias: &str) -> Option<String> {
+    from_join_table_refs(tokens).into_iter().find_map(|r| {
+        let matched = match &r.alias {
+            Some(a) => a.eq_ignore_ascii_case(alias),
+            None => r.table.eq_ignore_ascii_case(alias),
+        };
+        matched.then_some(r.table)
+    })
+}
+
+/// Reads `text_before_cursor` for a completion-worthy context -- see
+/// `CompletionContext`. Returns `None` for anything this hasn't been taught
+/// to recognise, including every non-SQL dialect (Mongo/Redis/ES queries
+/// have no FROM/JOIN to find, so this naturally falls through for them).
+pub fn completion_context(text_before_cursor: &str) -> CompletionContext {
+    let tokens = sql_tokens(text_before_cursor);
+    let Some(last) = tokens.last() else {
+        return CompletionContext::None;
+    };
+    if let Some(dot) = last.word.find('.') {
+        let alias = &last.word[..dot];
+        return match (!alias.is_empty()).then(|| resolve_alias(&tokens, alias)) {
+            Some(Some(table)) => CompletionContext::TableColumns { table },
+            _ => CompletionContext::None,
+        };
+    }
+    // The index of the triggering `JOIN` keyword itself -- either the last
+    // token (nothing typed after it yet) or the second-to-last (a partial
+    // table name is). Tables are read only from *before* that index, so
+    // the in-progress JOIN's own partial text is never mistaken for a
+    // table already in the query.
+    let join_at = if last.word.eq_ignore_ascii_case("join") {
+        Some(tokens.len() - 1)
+    } else if tokens.len() >= 2 && tokens[tokens.len() - 2].word.eq_ignore_ascii_case("join") {
+        Some(tokens.len() - 2)
+    } else {
+        None
+    };
+    if let Some(join_at) = join_at {
+        return CompletionContext::JoinTarget {
+            known_tables: from_join_table_refs(&tokens[..join_at])
+                .into_iter()
+                .map(|r| r.table)
+                .collect(),
+        };
+    }
+    CompletionContext::None
 }
 
 /// Each of `columns`' declared type from `schema`'s entry named `table`,
@@ -914,6 +1077,7 @@ mod tests {
                     name: "id".to_string(),
                     type_name: "INTEGER".to_string(),
                     primary_key: true,
+                    foreign_key: None,
                 },
                 ColumnInfo::new("email", "TEXT"),
             ],
@@ -1389,5 +1553,96 @@ mod tests {
             single_table_source("SELECT coalesce(name, 'x') FROM users WHERE id = 1"),
             Some("users".to_string())
         );
+    }
+
+    #[test]
+    fn dot_after_an_alias_resolves_to_its_table() {
+        assert_eq!(
+            completion_context("SELECT * FROM users u WHERE u."),
+            CompletionContext::TableColumns {
+                table: "users".to_string()
+            }
+        );
+        assert_eq!(
+            completion_context("SELECT * FROM users u WHERE u.na"),
+            CompletionContext::TableColumns {
+                table: "users".to_string()
+            },
+            "a partial column name after the dot doesn't change which table it resolves to"
+        );
+    }
+
+    #[test]
+    fn dot_after_an_as_aliased_table_resolves_to_its_table() {
+        assert_eq!(
+            completion_context("SELECT * FROM users AS u WHERE u."),
+            CompletionContext::TableColumns {
+                table: "users".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn dot_on_the_bare_table_name_resolves_to_itself() {
+        assert_eq!(
+            completion_context("SELECT * FROM users WHERE users."),
+            CompletionContext::TableColumns {
+                table: "users".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn dot_after_a_join_alias_resolves_to_the_joined_table() {
+        assert_eq!(
+            completion_context("SELECT * FROM users u JOIN orders o ON o.user_id = u.id WHERE o."),
+            CompletionContext::TableColumns {
+                table: "orders".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn dot_on_an_unknown_alias_is_not_a_special_context() {
+        assert_eq!(
+            completion_context("SELECT * FROM users u WHERE x."),
+            CompletionContext::None
+        );
+    }
+
+    #[test]
+    fn right_after_join_reports_the_tables_already_in_the_query() {
+        assert_eq!(
+            completion_context("SELECT * FROM users u JOIN "),
+            CompletionContext::JoinTarget {
+                known_tables: vec!["users".to_string()]
+            }
+        );
+        assert_eq!(
+            completion_context("SELECT * FROM users u JOIN or"),
+            CompletionContext::JoinTarget {
+                known_tables: vec!["users".to_string()]
+            },
+            "a partial table name being typed doesn't change the context"
+        );
+    }
+
+    #[test]
+    fn known_tables_after_join_include_every_earlier_from_and_join() {
+        assert_eq!(
+            completion_context("SELECT * FROM users u JOIN orders o ON o.user_id = u.id JOIN "),
+            CompletionContext::JoinTarget {
+                known_tables: vec!["users".to_string(), "orders".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn plain_text_with_no_dot_or_join_has_no_special_context() {
+        assert_eq!(
+            completion_context("SELECT * FROM users WHERE na"),
+            CompletionContext::None
+        );
+        assert_eq!(completion_context(""), CompletionContext::None);
     }
 }

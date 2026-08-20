@@ -22,6 +22,11 @@ pub enum HistoryOutcome {
 }
 
 pub struct HistoryPickerComponent {
+    /// Shown in the panel title as "{title} — {confirm} load, {cancel}
+    /// cancel" -- "History" for the actual history picker, something else
+    /// for the other things this plain list-picker gets reused for (the
+    /// ERD overlay's table picker, at least so far).
+    title: &'static str,
     entries: Vec<String>,
     selected: usize,
     pending: Option<KeyPress>,
@@ -36,6 +41,7 @@ impl HistoryPickerComponent {
     /// navigates them in.
     pub fn new(entries: Vec<String>) -> Self {
         Self {
+            title: "History",
             entries,
             selected: 0,
             pending: None,
@@ -44,6 +50,13 @@ impl HistoryPickerComponent {
             list_area: Rect::ZERO,
             double_click: DoubleClickTracker::new(),
         }
+    }
+
+    /// Overrides the default "History" panel title -- for a caller reusing
+    /// this as a plain searchable-by-scroll list picker for something else.
+    pub fn with_title(mut self, title: &'static str) -> Self {
+        self.title = title;
+        self
     }
 
     pub fn selected_entry(&self) -> Option<&str> {
@@ -132,7 +145,7 @@ impl HistoryPickerComponent {
             .unwrap_or_default();
         let list = List::new(items)
             .block(ui::panel(
-                &format!("History — {confirm} load, {cancel} cancel"),
+                &format!("{} — {confirm} load, {cancel} cancel", self.title),
                 true,
             ))
             .highlight_style(ui::selection_style());
