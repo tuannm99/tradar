@@ -22,5 +22,6 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`sort-by-column.md`](sort-by-column.md) — sort theo cột trong bảng kết quả (phím `s` + click header), client-side, cycle asc/desc/off, giá trị thiếu luôn xếp cuối.
 - [`navigator-schema-level.md`](navigator-schema-level.md) — navigator thêm cấp schema/keyspace/database (Postgres/Cassandra/MongoDB) + nhóm theo loại object (Postgres: Tables/Views/Functions/Procedures), `OutlineEntry::is_object` thay `depth == 0` cho CRUD snippet.
 - [`fk-autocomplete-and-erd.md`](fk-autocomplete-and-erd.md) — dữ liệu FK mới (`ColumnInfo.foreign_key`, Postgres/SQLite), autocomplete ngữ cảnh sâu (`.` sau alias, JOIN gợi ý bảng liên quan), ERD box-drawing (`F4`) cho lân cận 1 bảng.
+- [`crud-snippet-column-picker.md`](crud-snippet-column-picker.md) — mở rộng CRUD snippet: `c`/`r`/`u`/`d` mở column picker (checkbox multi-select) trước khi insert; Mongo/Elasticsearch được "làm thật" (trước đó bỏ qua field), Elasticsearch Delete cố tình giữ nguyên (không sang `_delete_by_query`).
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.

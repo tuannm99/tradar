@@ -192,13 +192,18 @@ impl QueryEngine {
     }
 
     /// A skeleton statement for `op` against the schema entry named
-    /// `name` -- see `Component::crud_snippet`. `None` when `name` isn't a
-    /// known entry (schema failed to load, or it's stale) or the driver
-    /// has nothing to say for it.
-    pub fn crud_snippet(&self, name: &str, op: tradar_core::action::CrudOp) -> Option<String> {
+    /// `name`, restricted to `columns` -- see `Component::crud_snippet`.
+    /// `None` when `name` isn't a known entry (schema failed to load, or
+    /// it's stale) or the driver has nothing to say for it.
+    pub fn crud_snippet(
+        &self,
+        name: &str,
+        op: tradar_core::action::CrudOp,
+        columns: &[String],
+    ) -> Option<String> {
         let schema = self.schema.as_ref().ok()?;
         let entry = schema.iter().find(|entry| entry.name == name)?;
-        self.driver.crud_snippet(entry, op)
+        self.driver.crud_snippet(entry, op, columns)
     }
 
     /// Spawns the actual query execution and returns immediately -- the
@@ -719,6 +724,7 @@ mod tests {
                 &self,
                 entry: &SchemaInfo,
                 _op: tradar_core::action::CrudOp,
+                _columns: &[String],
             ) -> Option<String> {
                 Some(format!("SELECT * FROM {}", entry.name))
             }
@@ -731,7 +737,7 @@ mod tests {
         );
 
         assert_eq!(
-            engine.crud_snippet("users", tradar_core::action::CrudOp::Read),
+            engine.crud_snippet("users", tradar_core::action::CrudOp::Read, &[]),
             Some("SELECT * FROM users".to_string())
         );
     }
@@ -741,7 +747,7 @@ mod tests {
         let engine = engine(Arc::new(FailingDriver));
 
         assert_eq!(
-            engine.crud_snippet("ghost", tradar_core::action::CrudOp::Read),
+            engine.crud_snippet("ghost", tradar_core::action::CrudOp::Read, &[]),
             None
         );
     }
@@ -755,7 +761,7 @@ mod tests {
         );
 
         assert_eq!(
-            engine.crud_snippet("users", tradar_core::action::CrudOp::Read),
+            engine.crud_snippet("users", tradar_core::action::CrudOp::Read, &[]),
             None
         );
     }

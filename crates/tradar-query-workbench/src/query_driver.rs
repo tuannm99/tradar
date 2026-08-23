@@ -389,15 +389,58 @@ pub fn build_sql_edit(edit: &RowEdit) -> String {
     }
 }
 
+/// `columns` empty means "use `default`" -- every op's own natural
+/// default, preserved so a caller that passes `&[]` (every caller before
+/// the navigator grew a column picker) reproduces exactly the old
+/// unconditional behavior. A selection that doesn't match any real column
+/// (stale name, or a picker snapshot from before a schema reload) also
+/// falls back to `default` rather than silently building an empty clause.
+/// Shared by `build_crud_snippet` here and by the Mongo/Elasticsearch
+/// connectors' own bespoke (non-SQL) `crud_snippet` bodies, so a picker
+/// selection means the same thing everywhere it's honored. A free function
+/// rather than a closure: a closure capturing `columns` while also being
+/// called with two differently-lived slice arguments can't express "the
+/// result borrows from whichever slice was picked" without a named
+/// lifetime, which only a function signature (not a closure's elided one)
+/// can carry.
+pub fn pick_columns<'a>(
+    columns: &[String],
+    candidates: &[&'a str],
+    default: &[&'a str],
+) -> Vec<&'a str> {
+    if columns.is_empty() {
+        return default.to_vec();
+    }
+    let picked: Vec<&'a str> = candidates
+        .iter()
+        .copied()
+        .filter(|c| columns.iter().any(|s| s.as_str() == *c))
+        .collect();
+    if picked.is_empty() {
+        default.to_vec()
+    } else {
+        picked
+    }
+}
+
 /// A skeleton Create/Read/Update/Delete statement for `entry`, shared by
 /// the SQL connectors -- see `Component::crud_snippet`. Placeholders are
 /// `<column_name>` rather than a guessed literal: there's no type mapping
 /// reliable enough across every backend's own type names to invent a
 /// plausible value, and "fill in this blank" reads better than a fake
 /// value the user has to notice is fake and replace anyway.
-pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp) -> String {
+///
+/// `columns` is the navigator's column picker's selection -- empty means
+/// "use this op's own default" (see `Component::crud_snippet`'s doc
+/// comment), which is also what every call site that predates the picker
+/// passes, so their output is unchanged. Read is the one op where an
+/// empty *result* (not just an empty `columns` argument) is meaningful on
+/// its own terms: it falls back to `SELECT *` rather than to some default
+/// column list, since "no columns picked" and "show me the whole row" are
+/// the same request for a read.
+pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp, columns: &[String]) -> String {
     let table = quote_identifier(&entry.name);
-    let columns: Vec<&str> = entry.columns.iter().map(|c| c.name.as_str()).collect();
+    let all_columns: Vec<&str> = entry.columns.iter().map(|c| c.name.as_str()).collect();
     let primary_key: Vec<&str> = entry
         .columns
         .iter()
@@ -432,38 +475,60 @@ pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp) -> String {
     };
 
     match op {
-        CrudOp::Read => format!("SELECT * FROM {table} LIMIT 100;"),
+        CrudOp::Read => {
+            let picked: Vec<&str> = all_columns
+                .iter()
+                .copied()
+                .filter(|c| columns.iter().any(|s| s.as_str() == *c))
+                .collect();
+            if picked.is_empty() {
+                format!("SELECT * FROM {table} LIMIT 100;")
+            } else {
+                let list = picked
+                    .iter()
+                    .map(|c| quote_identifier(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("SELECT {list} FROM {table} LIMIT 100;")
+            }
+        }
         CrudOp::Create => {
-            if columns.is_empty() {
+            if all_columns.is_empty() {
                 format!("INSERT INTO {table} (<column>) VALUES (<value>);")
             } else {
+                let insert_columns = pick_columns(columns, &all_columns, &all_columns);
                 let names = bulleted(
-                    &columns
+                    &insert_columns
                         .iter()
                         .map(|c| quote_identifier(c))
                         .collect::<Vec<_>>(),
                 );
-                let placeholders =
-                    bulleted(&columns.iter().map(|c| format!("<{c}>")).collect::<Vec<_>>());
+                let placeholders = bulleted(
+                    &insert_columns
+                        .iter()
+                        .map(|c| format!("<{c}>"))
+                        .collect::<Vec<_>>(),
+                );
                 format!("INSERT INTO {table} (\n{names}\n) VALUES (\n{placeholders}\n);")
             }
         }
         CrudOp::Update => {
-            let settable: Vec<&str> = columns
+            let settable_default: Vec<&str> = all_columns
                 .iter()
                 .copied()
                 .filter(|c| !primary_key.contains(c))
                 .collect();
-            let settable = if settable.is_empty() {
-                columns.clone()
+            let settable_default = if settable_default.is_empty() {
+                all_columns.clone()
             } else {
-                settable
+                settable_default
             };
-            let set_clause = if settable.is_empty() {
+            let set_columns = pick_columns(columns, &all_columns, &settable_default);
+            let set_clause = if set_columns.is_empty() {
                 "  <column> = <value>".to_string()
             } else {
                 bulleted(
-                    &settable
+                    &set_columns
                         .iter()
                         .map(|c| format!("{} = <{c}>", quote_identifier(c)))
                         .collect::<Vec<_>>(),
@@ -474,7 +539,13 @@ pub fn build_crud_snippet(entry: &SchemaInfo, op: CrudOp) -> String {
                 where_clause(&primary_key)
             )
         }
-        CrudOp::Delete => format!("DELETE FROM {table} WHERE {};", where_clause(&primary_key)),
+        CrudOp::Delete => {
+            let where_columns = pick_columns(columns, &all_columns, &primary_key);
+            format!(
+                "DELETE FROM {table} WHERE {};",
+                where_clause(&where_columns)
+            )
+        }
     }
 }
 
@@ -1051,9 +1122,15 @@ pub trait QueryDriver: Send + Sync {
     }
 
     /// A skeleton statement for `op` against `entry`, in this driver's own
-    /// query language -- see `Component::crud_snippet`. `None` by default:
-    /// most drivers don't override this until they're taught to.
-    fn crud_snippet(&self, _entry: &SchemaInfo, _op: CrudOp) -> Option<String> {
+    /// query language, restricted to `columns` -- see
+    /// `Component::crud_snippet`. `None` by default: most drivers don't
+    /// override this until they're taught to.
+    fn crud_snippet(
+        &self,
+        _entry: &SchemaInfo,
+        _op: CrudOp,
+        _columns: &[String],
+    ) -> Option<String> {
         None
     }
 }
@@ -1091,7 +1168,7 @@ mod tests {
     #[test]
     fn crud_snippet_read_is_a_bounded_select() {
         assert_eq!(
-            build_crud_snippet(&users_table(), CrudOp::Read),
+            build_crud_snippet(&users_table(), CrudOp::Read, &[]),
             "SELECT * FROM \"users\" LIMIT 100;"
         );
     }
@@ -1099,7 +1176,7 @@ mod tests {
     #[test]
     fn crud_snippet_create_lists_every_column_one_per_line_with_a_named_placeholder() {
         assert_eq!(
-            build_crud_snippet(&users_table(), CrudOp::Create),
+            build_crud_snippet(&users_table(), CrudOp::Create, &[]),
             "INSERT INTO \"users\" (\n  \"id\",\n  \"email\"\n) VALUES (\n  <id>,\n  <email>\n);"
         );
     }
@@ -1107,7 +1184,7 @@ mod tests {
     #[test]
     fn crud_snippet_update_sets_non_key_columns_one_per_line_and_filters_by_the_key() {
         assert_eq!(
-            build_crud_snippet(&users_table(), CrudOp::Update),
+            build_crud_snippet(&users_table(), CrudOp::Update, &[]),
             "UPDATE \"users\" SET\n  \"email\" = <email>\nWHERE \"id\" = <id>;"
         );
     }
@@ -1115,7 +1192,7 @@ mod tests {
     #[test]
     fn crud_snippet_delete_filters_by_the_primary_key() {
         assert_eq!(
-            build_crud_snippet(&users_table(), CrudOp::Delete),
+            build_crud_snippet(&users_table(), CrudOp::Delete, &[]),
             "DELETE FROM \"users\" WHERE \"id\" = <id>;"
         );
     }
@@ -1125,15 +1202,15 @@ mod tests {
         let entry = SchemaInfo::new("mystery");
 
         assert_eq!(
-            build_crud_snippet(&entry, CrudOp::Create),
+            build_crud_snippet(&entry, CrudOp::Create, &[]),
             "INSERT INTO \"mystery\" (<column>) VALUES (<value>);"
         );
         assert_eq!(
-            build_crud_snippet(&entry, CrudOp::Update),
+            build_crud_snippet(&entry, CrudOp::Update, &[]),
             "UPDATE \"mystery\" SET\n  <column> = <value>\nWHERE <condition>;"
         );
         assert_eq!(
-            build_crud_snippet(&entry, CrudOp::Delete),
+            build_crud_snippet(&entry, CrudOp::Delete, &[]),
             "DELETE FROM \"mystery\" WHERE <condition>;"
         );
     }
@@ -1152,7 +1229,7 @@ mod tests {
         };
 
         for op in [CrudOp::Create, CrudOp::Update] {
-            let snippet = build_crud_snippet(&entry, op);
+            let snippet = build_crud_snippet(&entry, op, &[]);
             for line in snippet.lines() {
                 assert!(
                     line.chars().count() < 80,
@@ -1174,8 +1251,69 @@ mod tests {
         };
 
         assert_eq!(
-            build_crud_snippet(&entry, CrudOp::Update),
+            build_crud_snippet(&entry, CrudOp::Update, &[]),
             "UPDATE \"logs\" SET\n  \"message\" = <message>\nWHERE <condition>;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_read_with_an_explicit_selection_lists_only_those_columns_in_table_order() {
+        assert_eq!(
+            build_crud_snippet(
+                &users_table(),
+                CrudOp::Read,
+                &["email".to_string(), "id".to_string()]
+            ),
+            "SELECT \"id\", \"email\" FROM \"users\" LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_read_with_a_selection_matching_no_real_column_falls_back_to_select_star() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Read, &["ghost".to_string()]),
+            "SELECT * FROM \"users\" LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_create_with_an_explicit_selection_lists_only_those_columns() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Create, &["email".to_string()]),
+            "INSERT INTO \"users\" (\n  \"email\"\n) VALUES (\n  <email>\n);"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_update_with_an_explicit_selection_sets_only_those_columns() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Update, &["email".to_string()]),
+            "UPDATE \"users\" SET\n  \"email\" = <email>\nWHERE \"id\" = <id>;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_update_with_the_primary_key_explicitly_selected_sets_it_too() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Update, &["id".to_string()]),
+            "UPDATE \"users\" SET\n  \"id\" = <id>\nWHERE \"id\" = <id>;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_delete_can_filter_by_a_non_primary_key_column() {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Delete, &["email".to_string()]),
+            "DELETE FROM \"users\" WHERE \"email\" = <email>;"
+        );
+    }
+
+    #[test]
+    fn crud_snippet_delete_with_a_selection_matching_no_real_column_falls_back_to_the_primary_key()
+    {
+        assert_eq!(
+            build_crud_snippet(&users_table(), CrudOp::Delete, &["ghost".to_string()]),
+            "DELETE FROM \"users\" WHERE \"id\" = <id>;"
         );
     }
 

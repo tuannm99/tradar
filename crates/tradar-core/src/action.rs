@@ -86,6 +86,15 @@ pub struct OutlineEntry {
     /// levels above the object itself). A column is neither -- `false`
     /// like a folder, since a column isn't a whole object to CRUD against.
     pub is_object: bool,
+    /// Whether this is a column entry that's part of its table's primary
+    /// key -- mirrors `ColumnInfo::primary_key` in `tradar-query-workbench`.
+    /// Meaningless (always `false`) for anything that isn't a column: a
+    /// connection, a table/object row itself, or a grouping folder. Exists
+    /// so the navigator's column picker (`Component::crud_snippet`) can
+    /// tell which columns are keys without parsing `detail`'s "`{type} pk`"
+    /// display convention back out of a string built purely for humans to
+    /// read.
+    pub primary_key: bool,
 }
 
 /// Which CRUD statement to generate a snippet for -- see
@@ -137,10 +146,16 @@ pub trait Component {
     /// A skeleton statement for `op` against the outline entry named
     /// `name` (a table, collection, index, or key -- whatever `outline`'s
     /// `is_object` entries are for this screen), in this screen's own
-    /// query language. `None` -- the default -- means this screen has no
-    /// notion of CRUD statements, or doesn't recognize `name`; the
-    /// navigator then does nothing rather than inserting a blank line.
-    fn crud_snippet(&self, _name: &str, _op: CrudOp) -> Option<String> {
+    /// query language, restricted to `columns`. An empty `columns` means
+    /// "this op's own default set" (all columns for Create, non-key
+    /// columns for Update's `SET`, the primary key for Delete's `WHERE`,
+    /// every column for Read's `SELECT`) rather than "no columns" -- so a
+    /// caller that hasn't picked anything reproduces exactly what this
+    /// used to do unconditionally, before the navigator grew a column
+    /// picker. `None` -- the default -- means this screen has no notion of
+    /// CRUD statements, or doesn't recognize `name`; the navigator then
+    /// does nothing rather than inserting a blank line.
+    fn crud_snippet(&self, _name: &str, _op: CrudOp, _columns: &[String]) -> Option<String> {
         None
     }
     /// Whether the schema behind `outline` failed to load, for the

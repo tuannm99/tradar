@@ -231,7 +231,16 @@ impl QueryDriver for RedisDriver {
     /// this key's full value". Create/Update share a command per type
     /// (Redis's own `SET`/`HSET`/... already overwrite rather than
     /// distinguishing "new" from "changed"); Delete is always `DEL`.
-    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+    /// `columns` is unused: Redis keys have no columns (`SchemaInfo::columns`
+    /// is always empty here), so the navigator's column picker never has
+    /// anything to offer for a Redis entry and skips straight to inserting
+    /// this, same as it always has.
+    fn crud_snippet(
+        &self,
+        entry: &SchemaInfo,
+        op: tradar_core::action::CrudOp,
+        _columns: &[String],
+    ) -> Option<String> {
         let kind = entry.kind.as_deref()?;
         let key = &entry.name;
         let browse_kind = BrowseKind::parse(kind)?;
@@ -498,19 +507,19 @@ mod tests {
         };
 
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
             Some("HGETALL user:1".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create, &[]),
             Some("HSET user:1 <field> <value>".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update, &[]),
             Some("HSET user:1 <field> <value>".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete, &[]),
             Some("DEL user:1".to_string())
         );
     }
@@ -561,7 +570,7 @@ mod tests {
         };
 
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
             None
         );
     }

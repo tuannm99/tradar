@@ -2,6 +2,44 @@
 
 Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét, không lẫn vào lịch sử. Việc **đã xong** nằm trong `docs/backlog/` (một file mỗi sub-project, tách ra từ `docs/backlog.md` cũ khi file đó dài quá 450 dòng — xem `docs/backlog/README.md` để có mục lục). Thiết kế hệ thống nằm ở `docs/architecture.md`. Cập nhật file này mỗi khi một mục ở đây bắt đầu/kết thúc hoặc có mục mới, đúng tinh thần "roadmap tracks everything" đã theo xuyên suốt dự án.
 
+## Checklist tổng quan
+
+Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở các mục văn xuôi bên dưới, checklist này chỉ để quét nhanh, **không thay thế**. Tick khi một mục chuyển sang "xong" ở phần chi tiết.
+
+**So sánh DataGrip/DBeaver/Studio3T — thứ tự Tier**
+
+- [x] Tier 1 — #9 Sort theo cột
+- [x] Tier 2 — #1 Navigator schema/database + nhóm object
+- [x] Tier 3 — #6 Autocomplete ngữ cảnh sâu
+- [x] Tier 3 — #5 ERD
+- [x] Tier 4 — #7 Generate SQL từ UI (column picker)
+- [ ] Tier 4 — #10 Multi-filter kết hợp (làm tiếp theo)
+- [ ] Tier 5 — #2 Table designer
+- [ ] Tier 5 — #3 Schema diff/compare
+- [ ] Tier 5 — #4 Migration/version-control
+- [ ] Tier 6 — #11 Group-by trong grid
+- [ ] Tier 6 — #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK
+
+**Connector mới**
+
+- [ ] MySQL / MariaDB / ClickHouse
+- [ ] Kafka: mode Groups (lag theo consumer group)
+- [ ] Socket
+- [ ] gRPC (cần chốt phạm vi v1 trước)
+
+**`tradar` CLI: import/export** — chưa scope, tier thấp
+
+- [ ] Chốt các điểm mở (subcommand vs binary riêng, streaming, import vs export...)
+
+**Gap nhỏ, chưa scope**
+
+- [ ] Nhiều theme preset dựng sẵn
+- [ ] Remap phím vim bên trong editor
+- [ ] Resize cột bằng tay trong results grid
+- [ ] Visual mode search-as-motion trong query editor
+- [ ] `:s/pat/repl/` trong query editor
+- [ ] `Component: Send` — re-verify lý do gốc còn đúng không
+
 ## Connector mới, đã lên kế hoạch nhưng chưa code
 
 - **MySQL / MariaDB / ClickHouse.** `README.md` liệt ở mục "Dự kiến". Rẻ nhờ kiến trúc pluggable: thêm crate mới + 1 dòng trong `registry()`, không đụng core. MySQL qua `sqlx` gần như giống hệt connector Postgres đang có.
@@ -32,7 +70,7 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 **Query & editor**
 
 6. ~~Autocomplete theo ngữ cảnh sâu~~ — xong (2026-08-20), xem `docs/backlog/fk-autocomplete-and-erd.md`. `.` sau alias gợi ý đúng cột của bảng đó, gõ sau `JOIN` xếp bảng có FK liên quan lên đầu. Dữ liệu FK mới (`ColumnInfo.foreign_key`) chỉ có cho Postgres/SQLite (Cassandra không có khái niệm FK trong CQL).
-7. **"Generate SQL" từ UI** — tạo câu SELECT/INSERT/UPDATE tự động từ việc chọn bảng/cột qua giao diện, không gõ tay. Cần làm rõ khác gì với CRUD snippet đã có (navigator `c`/`r`/`u`/`d` sinh khung Create/Read/Update/Delete với placeholder `<tên_cột>`) — nếu ý là "point-and-click chọn cột thay vì gõ tay điền placeholder", đây là mở rộng của CRUD snippet chứ không phải tính năng mới từ đầu; nếu ý là "query builder trực quan" (chọn bảng, kéo điều kiện WHERE, chọn JOIN) thì là một sub-project lớn riêng, gần với #2 về độ phức tạp UI.
+7. ~~"Generate SQL" từ UI~~ — xong (2026-08-23), xem `docs/backlog/crud-snippet-column-picker.md`. Chốt phạm vi là mở rộng CRUD snippet đã có (navigator `c`/`r`/`u`/`d` giờ mở column picker trước khi insert), không phải query builder trực quan riêng (chọn bảng/JOIN/WHERE qua UI) — cái đó vẫn để dành cho sau, gần độ phức tạp #2 Table designer nếu có nhu cầu cụ thể.
 
 **Data grid**
 
@@ -47,7 +85,7 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 - **Tier 1 (làm trước, rẻ/độc lập)**: #9 Sort theo cột — xong, `docs/backlog/sort-by-column.md`.
 - **Tier 2 (nền tảng)**: #1 Navigator schema/database + nhóm object — xong, `docs/backlog/navigator-schema-level.md`.
 - **Tier 3 (dùng chung dữ liệu FK vừa thêm ở #1)**: #6 Autocomplete ngữ cảnh sâu — xong, #5 ERD — xong, cả hai `docs/backlog/fk-autocomplete-and-erd.md`.
-- **Tier 4 (cần chốt phạm vi trước khi code, làm tiếp theo)**: #7 Generate SQL từ UI → #10 Multi-filter kết hợp.
+- **Tier 4 (cần chốt phạm vi trước khi code)**: #7 Generate SQL từ UI — xong, `docs/backlog/crud-snippet-column-picker.md`. #10 Multi-filter kết hợp — làm tiếp theo.
 - **Tier 5 (lớn, tách nhiều bước nhỏ)**: #2 Table designer → #3 Schema diff/compare → #4 Migration/version-control.
 - **Tier 6 (để cuối, #12 cần bàn lại có đáng làm không)**: #11 Group-by trong grid → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK.
 

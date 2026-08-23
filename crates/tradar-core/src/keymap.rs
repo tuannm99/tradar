@@ -103,6 +103,13 @@ pub enum Context {
     /// reasoning as `Snippets`, separate because it lists a different kind
     /// of saved thing.
     HttpRequests,
+    /// The navigator's column-picker overlay, opened by `c`/`r`/`u`/`d` on a
+    /// table/collection/index row before the CRUD snippet is inserted --
+    /// see `Component::crud_snippet`. Its own context rather than
+    /// `Snippets`/`Prompt`: `space` (toggle) and `a` (toggle all) have to be
+    /// keys, same reason those two overlays get their own context instead
+    /// of sharing `Prompt`.
+    ColumnPicker,
 }
 
 impl Context {
@@ -124,6 +131,7 @@ impl Context {
             Self::Http => "http",
             Self::HttpResponse => "http-response",
             Self::HttpRequests => "http-requests",
+            Self::ColumnPicker => "column-picker",
         }
     }
 
@@ -145,12 +153,13 @@ impl Context {
             "http" => Self::Http,
             "http-response" => Self::HttpResponse,
             "http-requests" => Self::HttpRequests,
+            "column-picker" => Self::ColumnPicker,
             _ => return None,
         })
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 16] {
+    pub fn all() -> [Self; 17] {
         [
             Self::Global,
             Self::Picker,
@@ -168,6 +177,7 @@ impl Context {
             Self::Prompt,
             Self::Completion,
             Self::Snippets,
+            Self::ColumnPicker,
         ]
     }
 }
@@ -332,6 +342,12 @@ pub enum Command {
     /// own doc comment and the binding's comment in `Context::Editor` for
     /// why not a more conventional key.
     Redo,
+    /// Toggle the highlighted column's checkbox in the navigator's column
+    /// picker (see `Context::ColumnPicker`).
+    ToggleColumn,
+    /// Check every column if any is unchecked, else uncheck all of them --
+    /// same "select all" toggle convention checkbox lists elsewhere use.
+    ToggleAllColumns,
     // Lists
     MoveDown,
     MoveUp,
@@ -427,6 +443,8 @@ impl Command {
             Self::SearchPrev => "search-prev",
             Self::Undo => "undo",
             Self::Redo => "redo",
+            Self::ToggleColumn => "toggle-column",
+            Self::ToggleAllColumns => "toggle-all-columns",
             Self::MoveDown => "move-down",
             Self::MoveUp => "move-up",
             Self::MoveTop => "move-top",
@@ -447,7 +465,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 86] = [
+    const ALL: [Self; 88] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -521,6 +539,8 @@ impl Command {
         Self::SearchPrev,
         Self::Undo,
         Self::Redo,
+        Self::ToggleColumn,
+        Self::ToggleAllColumns,
         Self::MoveDown,
         Self::MoveUp,
         Self::MoveTop,
@@ -612,6 +632,8 @@ impl Command {
             Self::SearchPrev => "Repeat the last search backward",
             Self::Undo => "Undo the last edit",
             Self::Redo => "Redo the last undone edit",
+            Self::ToggleColumn => "Toggle the highlighted column",
+            Self::ToggleAllColumns => "Toggle all columns",
             Self::MoveDown => "Move down",
             Self::MoveUp => "Move up",
             Self::MoveTop => "Jump to the top",
@@ -941,6 +963,15 @@ impl Default for Keymap {
                 ("esc", Command::Cancel),
                 ("d", Command::DeleteSnippet),
                 ("r", Command::RenameSnippet),
+            ]),
+        );
+        bindings.insert(
+            Context::ColumnPicker,
+            parse_defaults(&[
+                ("enter", Command::Confirm),
+                ("esc", Command::Cancel),
+                ("space", Command::ToggleColumn),
+                ("a", Command::ToggleAllColumns),
             ]),
         );
         Self { bindings }

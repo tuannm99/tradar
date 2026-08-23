@@ -238,13 +238,15 @@ pub trait Component {
     fn restore_state(&self) -> Option<String> { None }
     fn outline(&self) -> Vec<OutlineEntry> { Vec::new() }
     fn insert_text(&mut self, _text: &str) {}
-    fn crud_snippet(&self, _name: &str, _op: CrudOp) -> Option<String> { None }
+    fn crud_snippet(&self, _name: &str, _op: CrudOp, _columns: &[String]) -> Option<String> { None }
     fn outline_error(&self) -> Option<String> { None }
     fn connection_alive(&self) -> Option<bool> { None }
     fn status_hints(&self) -> Vec<crate::ui::Hint> { Vec::new() }
     fn draw(&mut self, frame: &mut Frame, area: Rect);
 }
 ```
+
+**Cập nhật 2026-08-23**: `crud_snippet` thêm tham số `columns: &[String]` — rỗng nghĩa là "dùng default của op" (giống hệt hành vi trước khi có tham số này), một danh sách cụ thể thu hẹp snippet sinh ra xuống đúng những cột đó. Nguồn của danh sách này là navigator's column picker mới (`crates/tradar-app/src/components/column_picker.rs`), một overlay checkbox `c`/`r`/`u`/`d` mở ra trước khi insert — xem `docs/backlog/crud-snippet-column-picker.md`. `OutlineEntry` (cũng trong file này) thêm field `primary_key: bool` để picker biết cột nào là khoá mà không cần parse lại chuỗi `detail`.
 
 **Cập nhật 2026-08-16**: đây là chữ ký thật (`crates/tradar-core/src/action.rs`) — lớn hơn nhiều bản đặc tả gốc chỉ có 4 method, vì các đợt việc UI trước (navigator, CRUD snippet, connection-alive badge, help overlay) mỗi lần đều thêm 1 method mới **có default**, không đổi method nào đã có. Chỉ `handle_key_event`/`update`/`draw` là bắt buộc — một Screen mới như `KafkaScreen`/`RabbitScreen` chỉ cần implement đúng 3 cái đó cộng `tick` (để forward `Session::tick()`) và bất kỳ default nào nó thực sự cần override (`connection_alive`, `status_hints`); `outline`/`insert_text` để mặc định vì sidebar riêng của chúng không tham gia cây navigator (xem "Thiết kế UI: Kafka và RabbitMQ" bên dưới). `status_hints()` (thêm 2026-08-16 cùng đợt Kafka/RabbitMQ) sửa một bug thật: thanh status bar trước đó hardcode hint của `QueryScreenComponent` cho mọi screen active — sai ngay khi `KafkaScreen`/`RabbitScreen` tồn tại, vì "f5 run" không có nghĩa gì ở đó. Giờ mỗi Screen tự khai hint của mình, `RootComponent` chỉ vẽ.
 

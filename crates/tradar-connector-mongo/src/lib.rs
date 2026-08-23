@@ -16,7 +16,8 @@ use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
-    ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement, qualify_colliding_names,
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
+    qualify_colliding_names,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
 
@@ -414,18 +415,109 @@ impl QueryDriver for MongoDriver {
         Ok(result)
     }
 
-    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+    fn crud_snippet(
+        &self,
+        entry: &SchemaInfo,
+        op: tradar_core::action::CrudOp,
+        columns: &[String],
+    ) -> Option<String> {
         let collection = &entry.name;
+        let all_fields: Vec<&str> = entry.columns.iter().map(|c| c.name.as_str()).collect();
+
+        // `_id` is the one field whose real value looks nothing like a
+        // generic placeholder (`ObjectId("...")`, not a bare literal) --
+        // see `flatten_document`'s own note that `_id` is the closest
+        // thing a document has to a primary key.
+        let value_for = |field: &str| -> String {
+            if field == "_id" {
+                "ObjectId(\"<id>\")".to_string()
+            } else {
+                "<value>".to_string()
+            }
+        };
+
+        // One field per line once there's more than one -- same reasoning
+        // as the SQL builder's `bulleted`. A field name that isn't a bare
+        // JS identifier (a dotted path like `address.city`, from a nested
+        // document -- see `flatten_document`) is quoted, since `db.x.find`
+        // is read by a real JS-ish parser (`mongosh`), not just displayed.
+        let object_literal = |fields: &[&str]| -> String {
+            match fields {
+                [] => "{}".to_string(),
+                [field] => format!("{{{}: {}}}", mongo_field_key(field), value_for(field)),
+                fields => {
+                    let body = fields
+                        .iter()
+                        .map(|f| format!("  {}: {}", mongo_field_key(f), value_for(f)))
+                        .collect::<Vec<_>>()
+                        .join(",\n");
+                    format!("{{\n{body}\n}}")
+                }
+            }
+        };
+
         Some(match op {
-            tradar_core::action::CrudOp::Read => format!("db.{collection}.find({{}})"),
-            tradar_core::action::CrudOp::Create => format!("db.{collection}.insertOne({{}})"),
+            tradar_core::action::CrudOp::Read => {
+                let picked: Vec<&str> = all_fields
+                    .iter()
+                    .copied()
+                    .filter(|c| columns.iter().any(|s| s.as_str() == *c))
+                    .collect();
+                if picked.is_empty() {
+                    format!("db.{collection}.find({{}})")
+                } else {
+                    let projection = picked
+                        .iter()
+                        .map(|c| format!("{}: 1", mongo_field_key(c)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("db.{collection}.find({{}}, {{{projection}}})")
+                }
+            }
+            tradar_core::action::CrudOp::Create => {
+                let insert_fields = query_driver::pick_columns(columns, &all_fields, &all_fields);
+                format!(
+                    "db.{collection}.insertOne({})",
+                    object_literal(&insert_fields)
+                )
+            }
             tradar_core::action::CrudOp::Update => {
-                format!("db.{collection}.updateOne({{_id: ObjectId(\"<id>\")}}, {{$set: {{}}}})")
+                let non_id: Vec<&str> =
+                    all_fields.iter().copied().filter(|c| *c != "_id").collect();
+                let set_fields = query_driver::pick_columns(columns, &all_fields, &non_id);
+                format!(
+                    "db.{collection}.updateOne({{_id: ObjectId(\"<id>\")}}, {{$set: {}}})",
+                    object_literal(&set_fields)
+                )
             }
             tradar_core::action::CrudOp::Delete => {
-                format!("db.{collection}.deleteOne({{_id: ObjectId(\"<id>\")}})")
+                let filter_fields = query_driver::pick_columns(columns, &all_fields, &["_id"]);
+                format!(
+                    "db.{collection}.deleteOne({})",
+                    object_literal(&filter_fields)
+                )
             }
         })
+    }
+}
+
+/// A JS object key for `field` -- bare when it's a valid identifier, quoted
+/// otherwise (a dotted path like `address.city` from a nested document, see
+/// `flatten_document`). `db.x.find({...})` snippets are read by a real
+/// JS-ish parser (`mongosh`), not just displayed, so an unquoted dot would
+/// produce a syntax error rather than a working query with a wrong field.
+fn mongo_field_key(field: &str) -> String {
+    let is_bare = field
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && field
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    if is_bare {
+        field.to_string()
+    } else {
+        format!("\"{}\"", field.replace('"', "\\\""))
     }
 }
 
@@ -669,21 +761,115 @@ mod tests {
         let entry = SchemaInfo::new("users");
 
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
             Some("db.users.find({})".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create, &[]),
             Some("db.users.insertOne({})".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update, &[]),
             Some("db.users.updateOne({_id: ObjectId(\"<id>\")}, {$set: {}})".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete, &[]),
             Some("db.users.deleteOne({_id: ObjectId(\"<id>\")})".to_string())
         );
+    }
+
+    fn users_with_fields() -> SchemaInfo {
+        let mut column = ColumnInfo::new("_id", "ObjectId");
+        column.primary_key = true;
+        SchemaInfo {
+            name: "users".to_string(),
+            columns: vec![column, ColumnInfo::new("name", "String")],
+            kind: None,
+            ttl: None,
+            schema: None,
+            object_kind: None,
+        }
+    }
+
+    #[test]
+    fn crud_snippet_create_with_a_real_schema_lists_every_field_with_a_named_placeholder() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &users_with_fields(),
+                tradar_core::action::CrudOp::Create,
+                &[]
+            ),
+            Some(
+                "db.users.insertOne({\n  _id: ObjectId(\"<id>\"),\n  name: <value>\n})".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn crud_snippet_create_with_an_explicit_selection_lists_only_those_fields() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &users_with_fields(),
+                tradar_core::action::CrudOp::Create,
+                &["name".to_string()]
+            ),
+            Some("db.users.insertOne({name: <value>})".to_string())
+        );
+    }
+
+    #[test]
+    fn crud_snippet_read_with_a_selection_projects_only_those_fields() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &users_with_fields(),
+                tradar_core::action::CrudOp::Read,
+                &["name".to_string()]
+            ),
+            Some("db.users.find({}, {name: 1})".to_string())
+        );
+    }
+
+    #[test]
+    fn crud_snippet_update_defaults_to_setting_non_id_fields() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &users_with_fields(),
+                tradar_core::action::CrudOp::Update,
+                &[]
+            ),
+            Some(
+                "db.users.updateOne({_id: ObjectId(\"<id>\")}, {$set: {name: <value>}})"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn crud_snippet_delete_can_filter_by_a_non_id_field() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &users_with_fields(),
+                tradar_core::action::CrudOp::Delete,
+                &["name".to_string()]
+            ),
+            Some("db.users.deleteOne({name: <value>})".to_string())
+        );
+    }
+
+    #[test]
+    fn mongo_field_key_quotes_a_dotted_nested_path() {
+        assert_eq!(mongo_field_key("address.city"), "\"address.city\"");
+        assert_eq!(mongo_field_key("name"), "name");
     }
 
     #[test]

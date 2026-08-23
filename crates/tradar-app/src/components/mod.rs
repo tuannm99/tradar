@@ -356,6 +356,14 @@ impl RootComponent {
     }
 
     fn handle_navigator_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        // The column picker, while open, gets every key ahead of the
+        // filter bar and the tree itself -- same "modal steals input"
+        // idiom as the filter bar below.
+        if self.navigator.is_picking_columns() {
+            let outcome = self.navigator.column_picker_key_event(code, modifiers);
+            return outcome.and_then(|o| self.apply_nav_outcome(o));
+        }
+
         // The filter bar, while open, gets every key -- same idiom as the
         // query screen's own search bars: it has to see letters the
         // keymap would otherwise treat as commands (`j`, `g`, ...).
@@ -435,10 +443,15 @@ impl RootComponent {
                 self.navigator_focused = false;
                 None
             }
-            NavOutcome::Snippet { tab, name, op } => {
+            NavOutcome::Snippet {
+                tab,
+                name,
+                op,
+                columns,
+            } => {
                 self.active_tab = tab;
                 if let ScreenSlot::Active(screen) = &mut self.tabs[tab].screen
-                    && let Some(text) = screen.crud_snippet(&name, op)
+                    && let Some(text) = screen.crud_snippet(&name, op, &columns)
                 {
                     screen.insert_text(&text);
                 }
@@ -508,6 +521,15 @@ impl Component for RootComponent {
             if let Some(index) = self.tab_at(event.column) {
                 self.active_tab = index;
             }
+            return None;
+        }
+
+        // A click can't reach the tree underneath while the column picker
+        // is up -- same reasoning as the help overlay's own gate above:
+        // click-to-toggle in the picker itself is a nice-to-have, not
+        // required, but leaking a stray click through to the tree behind
+        // it would be a real bug.
+        if self.navigator_open && self.navigator.is_picking_columns() {
             return None;
         }
 
@@ -788,6 +810,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, tabs: &[Tab], active: usize) -> V
     widths
 }
 
+pub mod column_picker;
 pub mod connection_form;
 pub mod connection_picker;
 pub mod navigator;
@@ -1639,12 +1662,13 @@ mod tests {
                 detail: String::new(),
                 has_children: false,
                 is_object: true,
+                primary_key: false,
             }]
         }
         fn insert_text(&mut self, text: &str) {
             *self.inserted.borrow_mut() = text.to_string();
         }
-        fn crud_snippet(&self, name: &str, op: CrudOp) -> Option<String> {
+        fn crud_snippet(&self, name: &str, op: CrudOp, _columns: &[String]) -> Option<String> {
             Some(format!("{name}:{op:?}"))
         }
         fn connection_alive(&self) -> Option<bool> {

@@ -11,7 +11,7 @@ use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
-    ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
 
@@ -265,15 +265,83 @@ impl QueryDriver for ElasticsearchDriver {
         to_curl(&self.base_url, query)
     }
 
-    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
+    fn crud_snippet(
+        &self,
+        entry: &SchemaInfo,
+        op: tradar_core::action::CrudOp,
+        columns: &[String],
+    ) -> Option<String> {
         let index = &entry.name;
+        let all_fields: Vec<&str> = entry.columns.iter().map(|c| c.name.as_str()).collect();
+
+        // `columns` empty means "use this op's own default" -- same
+        // convention as the SQL connectors' `build_crud_snippet`. ES has
+        // no primary-key concept for a mapping's own fields, so
+        // Create/Update's default is simply every known field (candidates
+        // and default are the same slice); a selection matching no real
+        // field falls back to that default. Delete has no per-field body
+        // at all here (it deletes by `<id>` via the URL path, not a query
+        // body -- filtering by field would mean switching to
+        // `_delete_by_query`, a bulk-delete endpoint deliberately kept out
+        // of scope), so `columns` is unused there.
+        let pick =
+            || -> Vec<&str> { query_driver::pick_columns(columns, &all_fields, &all_fields) };
+
+        // One field per line, JSON-quoted keys (a real body ES parses,
+        // not just display text) -- `indent` lets Create/Update nest it
+        // at their own body depth.
+        let field_lines = |fields: &[&str], indent: &str| -> String {
+            fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let comma = if i + 1 < fields.len() { "," } else { "" };
+                    format!("{indent}\"{}\": <value>{comma}", f.replace('"', "\\\""))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         Some(match op {
-            tradar_core::action::CrudOp::Read => format!(
-                "GET {index}/_search\n{{\n  \"query\": {{\n    \"match_all\": {{}}\n  }}\n}}"
-            ),
-            tradar_core::action::CrudOp::Create => format!("POST {index}/_doc\n{{\n}}"),
+            tradar_core::action::CrudOp::Read => {
+                let picked: Vec<&str> = all_fields
+                    .iter()
+                    .copied()
+                    .filter(|c| columns.iter().any(|s| s.as_str() == *c))
+                    .collect();
+                if picked.is_empty() {
+                    format!(
+                        "GET {index}/_search\n{{\n  \"query\": {{\n    \"match_all\": {{}}\n  }}\n}}"
+                    )
+                } else {
+                    let source = picked
+                        .iter()
+                        .map(|c| format!("\"{}\"", c.replace('"', "\\\"")))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "GET {index}/_search\n{{\n  \"_source\": [{source}],\n  \"query\": {{\n    \"match_all\": {{}}\n  }}\n}}"
+                    )
+                }
+            }
+            tradar_core::action::CrudOp::Create => {
+                let fields = pick();
+                if fields.is_empty() {
+                    format!("POST {index}/_doc\n{{\n}}")
+                } else {
+                    format!("POST {index}/_doc\n{{\n{}\n}}", field_lines(&fields, "  "))
+                }
+            }
             tradar_core::action::CrudOp::Update => {
-                format!("POST {index}/_update/<id>\n{{\n  \"doc\": {{\n  }}\n}}")
+                let fields = pick();
+                if fields.is_empty() {
+                    format!("POST {index}/_update/<id>\n{{\n  \"doc\": {{\n  }}\n}}")
+                } else {
+                    format!(
+                        "POST {index}/_update/<id>\n{{\n  \"doc\": {{\n{}\n  }}\n}}",
+                        field_lines(&fields, "    ")
+                    )
+                }
             }
             tradar_core::action::CrudOp::Delete => format!("DELETE {index}/_doc/<id>"),
         })
@@ -374,22 +442,114 @@ mod tests {
         let entry = SchemaInfo::new("my-index");
 
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
             Some(
                 "GET my-index/_search\n{\n  \"query\": {\n    \"match_all\": {}\n  }\n}"
                     .to_string()
             )
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create, &[]),
             Some("POST my-index/_doc\n{\n}".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update, &[]),
             Some("POST my-index/_update/<id>\n{\n  \"doc\": {\n  }\n}".to_string())
         );
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete, &[]),
+            Some("DELETE my-index/_doc/<id>".to_string())
+        );
+    }
+
+    fn my_index_with_fields() -> SchemaInfo {
+        SchemaInfo {
+            name: "my-index".to_string(),
+            columns: vec![
+                ColumnInfo::new("title", "text"),
+                ColumnInfo::new("views", "long"),
+            ],
+            kind: None,
+            ttl: None,
+            schema: None,
+            object_kind: None,
+        }
+    }
+
+    #[test]
+    fn crud_snippet_create_with_a_real_mapping_lists_every_field() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &my_index_with_fields(),
+                tradar_core::action::CrudOp::Create,
+                &[]
+            ),
+            Some(
+                "POST my-index/_doc\n{\n  \"title\": <value>,\n  \"views\": <value>\n}".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn crud_snippet_create_with_an_explicit_selection_lists_only_those_fields() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &my_index_with_fields(),
+                tradar_core::action::CrudOp::Create,
+                &["title".to_string()]
+            ),
+            Some("POST my-index/_doc\n{\n  \"title\": <value>\n}".to_string())
+        );
+    }
+
+    #[test]
+    fn crud_snippet_read_with_a_selection_adds_a_source_filter() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &my_index_with_fields(),
+                tradar_core::action::CrudOp::Read,
+                &["title".to_string()]
+            ),
+            Some(
+                "GET my-index/_search\n{\n  \"_source\": [\"title\"],\n  \"query\": {\n    \"match_all\": {}\n  }\n}"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn crud_snippet_update_with_a_real_mapping_sets_every_field_in_the_doc_body() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &my_index_with_fields(),
+                tradar_core::action::CrudOp::Update,
+                &[]
+            ),
+            Some(
+                "POST my-index/_update/<id>\n{\n  \"doc\": {\n    \"title\": <value>,\n    \"views\": <value>\n  }\n}"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn crud_snippet_delete_ignores_columns_since_it_deletes_by_id_only() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &my_index_with_fields(),
+                tradar_core::action::CrudOp::Delete,
+                &["title".to_string()]
+            ),
             Some("DELETE my-index/_doc/<id>".to_string())
         );
     }

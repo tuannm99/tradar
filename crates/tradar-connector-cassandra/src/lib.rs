@@ -115,8 +115,13 @@ impl QueryDriver for CassandraDriver {
         query_driver::split_sql_statements(text)
     }
 
-    fn crud_snippet(&self, entry: &SchemaInfo, op: tradar_core::action::CrudOp) -> Option<String> {
-        Some(query_driver::build_crud_snippet(entry, op))
+    fn crud_snippet(
+        &self,
+        entry: &SchemaInfo,
+        op: tradar_core::action::CrudOp,
+        columns: &[String],
+    ) -> Option<String> {
+        Some(query_driver::build_crud_snippet(entry, op, columns))
     }
 
     async fn ping(&self) -> anyhow::Result<()> {
@@ -325,8 +330,33 @@ mod tests {
         let entry = SchemaInfo::new("demo.events");
 
         assert_eq!(
-            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read),
+            driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
             Some("SELECT * FROM \"demo\".\"events\" LIMIT 100;".to_string())
+        );
+    }
+
+    #[test]
+    fn crud_snippet_forwards_a_column_selection_to_the_shared_sql_builder() {
+        let driver = CassandraDriver::new("127.0.0.1:9042");
+        let entry = SchemaInfo {
+            name: "demo.events".to_string(),
+            columns: vec![
+                ColumnInfo::new("id", "uuid"),
+                ColumnInfo::new("payload", "text"),
+            ],
+            kind: None,
+            ttl: None,
+            schema: None,
+            object_kind: None,
+        };
+
+        assert_eq!(
+            driver.crud_snippet(
+                &entry,
+                tradar_core::action::CrudOp::Read,
+                &["payload".to_string()]
+            ),
+            Some("SELECT \"payload\" FROM \"demo\".\"events\" LIMIT 100;".to_string())
         );
     }
 

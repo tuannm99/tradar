@@ -24,6 +24,8 @@ use tradar_core::theme::theme;
 use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
 
+use crate::components::column_picker::{ColumnPickerComponent, ColumnPickerOutcome, PickerColumn};
+
 /// What the host has to know about one connection to draw it: its name,
 /// whether it's open (and where), and what it has to browse.
 pub struct NavConnection {
@@ -54,6 +56,7 @@ enum Row {
 }
 
 /// What the host should do about the row the user just chose.
+#[derive(Debug, PartialEq, Eq)]
 pub enum NavOutcome {
     /// Connect this connection (by index into the list the host passed in)
     /// -- it isn't open yet, so there's nothing to expand until it is.
@@ -62,13 +65,26 @@ pub enum NavOutcome {
     Focus(usize),
     /// Switch to `tab` and put `name` into its editor.
     Insert { tab: usize, name: String },
-    /// Switch to `tab` and insert a CRUD skeleton for `name` into its
-    /// editor -- `c`/`r`/`u`/`d` on a table/collection/index/key row.
+    /// Switch to `tab` and insert a CRUD skeleton for `name`, restricted
+    /// to `columns`, into its editor -- `c`/`r`/`u`/`d` on a
+    /// table/collection/index/key row, after the column picker (if one
+    /// was shown -- see `choose_snippet`) was confirmed. Empty `columns`
+    /// means "this op's own default", same as `Component::crud_snippet`.
     Snippet {
         tab: usize,
         name: String,
         op: CrudOp,
+        columns: Vec<String>,
     },
+}
+
+/// A `c`/`r`/`u`/`d` request waiting on the column picker before it can
+/// become a `NavOutcome::Snippet` -- see `choose_snippet`.
+struct PendingSnippet {
+    tab: usize,
+    name: String,
+    op: CrudOp,
+    picker: ColumnPickerComponent,
 }
 
 #[derive(Default)]
@@ -95,6 +111,10 @@ pub struct NavigatorComponent {
     /// Recognizes a second click on the same row as "activate" (same as
     /// `Enter`) rather than "select (again)".
     double_click: DoubleClickTracker,
+    /// `Some` while the column picker is open, waiting on a confirm/cancel
+    /// before `choose_snippet`'s request can turn into a `NavOutcome` --
+    /// see `column_picker_key_event`.
+    pending_snippet: Option<PendingSnippet>,
 }
 
 impl NavigatorComponent {
@@ -319,6 +339,16 @@ impl NavigatorComponent {
     /// (once a screen's outline groups by schema/database and/or object
     /// kind) a folder node isn't a whole row/document/key to build a
     /// statement against, no matter what depth it happens to sit at.
+    ///
+    /// When the table has columns to choose from, this opens the column
+    /// picker (see `is_picking_columns`/`column_picker_key_event`) instead
+    /// of returning a `NavOutcome::Snippet` straight away -- the request
+    /// only becomes one once the picker is confirmed. A table reporting no
+    /// columns (Redis: `SchemaInfo::columns` is always empty there, or any
+    /// other driver that hasn't been taught to report them yet) has
+    /// nothing to pick from, so this skips the picker and returns the
+    /// snippet directly, preserving the exact one-keystroke behavior it
+    /// always had.
     pub fn choose_snippet(
         &mut self,
         connections: &[NavConnection],
@@ -332,11 +362,67 @@ impl NavigatorComponent {
             return None;
         }
         let tab = connections[connection].tab?;
-        Some(NavOutcome::Snippet {
+        let name = outline_entry.label.clone();
+        let table_depth = outline_entry.depth;
+        let columns: Vec<PickerColumn> = connections[connection].outline[entry + 1..]
+            .iter()
+            .take_while(|e| e.depth > table_depth)
+            .filter(|e| e.depth == table_depth + 1)
+            .map(|e| PickerColumn {
+                name: e.label.clone(),
+                primary_key: e.primary_key,
+            })
+            .collect();
+
+        if columns.is_empty() {
+            return Some(NavOutcome::Snippet {
+                tab,
+                name,
+                op,
+                columns: Vec::new(),
+            });
+        }
+        self.pending_snippet = Some(PendingSnippet {
             tab,
-            name: outline_entry.label.clone(),
+            name,
             op,
-        })
+            picker: ColumnPickerComponent::new(op, columns),
+        });
+        None
+    }
+
+    /// Whether the column picker is open, waiting on its own keys ahead of
+    /// the tree's -- same "modal steals input" idiom as `is_filtering`.
+    pub fn is_picking_columns(&self) -> bool {
+        self.pending_snippet.is_some()
+    }
+
+    /// One key while the column picker has the keys -- see
+    /// `is_picking_columns`. Confirming turns the pending request into a
+    /// `NavOutcome::Snippet`; cancelling drops it and returns focus to
+    /// plain tree navigation, same as `Esc` on the filter bar.
+    pub fn column_picker_key_event(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<NavOutcome> {
+        let pending = self.pending_snippet.as_mut()?;
+        match pending.picker.handle_key_event(code, modifiers) {
+            Some(ColumnPickerOutcome::Cancelled) => {
+                self.pending_snippet = None;
+                None
+            }
+            Some(ColumnPickerOutcome::Confirmed(columns)) => {
+                let PendingSnippet { tab, name, op, .. } = self.pending_snippet.take()?;
+                Some(NavOutcome::Snippet {
+                    tab,
+                    name,
+                    op,
+                    columns,
+                })
+            }
+            None => None,
+        }
     }
 
     /// Selects whatever row was clicked. Returns whether this was a second
@@ -471,6 +557,10 @@ impl NavigatorComponent {
             spans.extend(input.spans(focused));
             frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
         }
+
+        if let Some(pending) = &mut self.pending_snippet {
+            pending.picker.draw(frame, area);
+        }
     }
 }
 
@@ -493,6 +583,7 @@ mod tests {
             detail: String::new(),
             has_children,
             is_object,
+            primary_key: false,
         }
     }
 
@@ -585,18 +676,86 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_snippet_on_a_table_reports_the_tab_name_and_op() {
+    fn choosing_a_snippet_on_a_table_with_columns_opens_the_column_picker_first() {
         let conns = connections();
         let mut navigator = NavigatorComponent::new();
         navigator.expand(&conns);
         navigator.apply_move(VimMove::Down, &conns);
 
-        match navigator.choose_snippet(&conns, CrudOp::Read) {
-            Some(NavOutcome::Snippet { tab, name, op }) => {
-                assert_eq!((tab, name.as_str(), op), (0, "users", CrudOp::Read))
-            }
-            _ => panic!("expected a snippet request aimed at the table's own tab"),
+        let outcome = navigator.choose_snippet(&conns, CrudOp::Read);
+
+        assert_eq!(
+            outcome, None,
+            "nothing is inserted until the picker confirms"
+        );
+        assert!(navigator.is_picking_columns());
+    }
+
+    #[test]
+    fn confirming_the_column_picker_reports_the_tab_name_op_and_selection() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+        navigator.choose_snippet(&conns, CrudOp::Read);
+
+        // Read's own default is nothing checked -- confirming immediately
+        // reproduces the pre-picker "SELECT *" behavior.
+        match navigator.column_picker_key_event(KeyCode::Enter, KeyModifiers::NONE) {
+            Some(NavOutcome::Snippet {
+                tab,
+                name,
+                op,
+                columns,
+            }) => assert_eq!(
+                (tab, name.as_str(), op, columns.as_slice()),
+                (0, "users", CrudOp::Read, [].as_slice())
+            ),
+            other => panic!("expected a snippet request aimed at the table's own tab: {other:?}"),
         }
+        assert!(!navigator.is_picking_columns());
+    }
+
+    #[test]
+    fn esc_while_picking_columns_cancels_without_inserting_anything() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+        navigator.choose_snippet(&conns, CrudOp::Read);
+
+        let outcome = navigator.column_picker_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert_eq!(outcome, None);
+        assert!(!navigator.is_picking_columns());
+    }
+
+    #[test]
+    fn choosing_a_snippet_on_a_table_with_no_columns_skips_the_picker() {
+        let conns = vec![NavConnection {
+            name: "cache".to_string(),
+            tab: Some(0),
+            outline: vec![entry(0, "sessions", false, true)],
+            error: None,
+            alive: Some(true),
+        }];
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_snippet(&conns, CrudOp::Delete) {
+            Some(NavOutcome::Snippet {
+                tab,
+                name,
+                op,
+                columns,
+            }) => assert_eq!(
+                (tab, name.as_str(), op, columns.as_slice()),
+                (0, "sessions", CrudOp::Delete, [].as_slice())
+            ),
+            other => panic!("a table with nothing to pick from must skip the picker: {other:?}"),
+        }
+        assert!(!navigator.is_picking_columns());
     }
 
     #[test]

@@ -185,6 +185,7 @@ fn flatten_outline(schema: &Result<Vec<SchemaInfo>, String>) -> Vec<OutlineEntry
                     detail: String::new(),
                     has_children: !tables.is_empty(),
                     is_object: false,
+                    primary_key: false,
                 });
                 1
             }
@@ -216,6 +217,7 @@ fn push_kind_grouped(entries: &mut Vec<OutlineEntry>, depth: u8, tables: &[&Sche
                     detail: String::new(),
                     has_children: !group.is_empty(),
                     is_object: false,
+                    primary_key: false,
                 });
                 depth + 1
             }
@@ -251,6 +253,7 @@ fn push_table(entries: &mut Vec<OutlineEntry>, depth: u8, table: &SchemaInfo) {
         detail: String::new(),
         has_children: !table.columns.is_empty(),
         is_object: true,
+        primary_key: false,
     });
     for column in &table.columns {
         entries.push(OutlineEntry {
@@ -265,6 +268,7 @@ fn push_table(entries: &mut Vec<OutlineEntry>, depth: u8, table: &SchemaInfo) {
             },
             has_children: false,
             is_object: false,
+            primary_key: column.primary_key,
         });
     }
 }
@@ -1394,8 +1398,13 @@ impl Component for QueryScreenComponent {
         hints
     }
 
-    fn crud_snippet(&self, name: &str, op: tradar_core::action::CrudOp) -> Option<String> {
-        self.engine.crud_snippet(name, op)
+    fn crud_snippet(
+        &self,
+        name: &str,
+        op: tradar_core::action::CrudOp,
+        columns: &[String],
+    ) -> Option<String> {
+        self.engine.crud_snippet(name, op, columns)
     }
 
     fn insert_text(&mut self, text: &str) {
