@@ -33,12 +33,12 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 
 **Gap nhỏ, chưa scope**
 
-- [ ] Nhiều theme preset dựng sẵn
+- [ ] Nhiều theme preset dựng sẵn (đã gỡ chặn — xem ghi chú bên dưới)
 - [ ] Remap phím vim bên trong editor
 - [ ] Resize cột bằng tay trong results grid
 - [ ] Visual mode search-as-motion trong query editor
 - [ ] `:s/pat/repl/` trong query editor
-- [ ] `Component: Send` — re-verify lý do gốc còn đúng không
+- [x] `Component: Send` — re-verify lý do gốc còn đúng không (xong 2026-09-03, kết luận: giữ nguyên)
 
 ## Connector mới, đã lên kế hoạch nhưng chưa code
 
@@ -48,12 +48,12 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 
 ## Gap nhỏ, chưa được scope
 
-- Nhiều theme preset dựng sẵn (hiện: một theme dark + override từng màu).
+- Nhiều theme preset dựng sẵn (hiện: một theme dark + override từng màu). **Đã gỡ chặn 2026-09-03**: khảo sát mục này phát hiện 8 role `syntax_*` của `Theme` là dead code — `sql_highlight.rs`'s `color_for` hardcode màu ANSI thay vì đọc `theme()`, nên một preset sẽ không đổi được màu syntax highlighting dù có viết ra. Đã fix (xem `docs/backlog/known-issues.md`), giờ preset chỉ còn là việc thêm vài palette + một key `preset` trong `[theme]`. **Vẫn cần chốt trước khi code**: preset nào (light? nord/dracula? high-contrast?), và preset có kết hợp được với override từng role không (nên: preset làm nền, override đè lên trên).
 - Cho phép remap cả phím vim *bên trong* editor (hiện cố định theo vim chuẩn — xem ghi chú phạm vi ở đầu `crates/tradar-core/src/keymap.rs`).
 - Cột trong bảng kết quả resize được bằng tay (hiện tự tính theo giá trị rộng nhất, cap 40 ký tự).
 - **Visual mode search-as-motion** trong query editor — thật vim hỗ trợ `/pattern` làm motion trong Visual mode, editor tự viết ở đây cố tình chưa làm (`open_buffer_search` chỉ hoạt động ở Normal mode).
 - **`:s/pat/repl/` (replace) trong query editor** — phần còn thiếu của "Visual mode, copy/paste nội bộ, search trong buffer" (`docs/backlog/features-batch-2026-08-14.md`), tách ra làm sau vì chưa có tiền lệ UI dạng dòng lệnh `:` nào trong app, cần scope riêng.
-- **`Component: Send`** — xem "Đã cân nhắc và gác lại" trong `docs/architecture.md`; lý do gốc (`edtui` giữ `Rc`) đã biến mất nhưng chưa ai verify lại.
+- ~~**`Component: Send`**~~ — đã verify 2026-09-03, **kết luận: giữ nguyên, không bound**. Mọi implementor thật (`RootComponent`, `ConnectionPickerComponent`, `QueryScreenComponent`, `KafkaScreen`, `RabbitScreen`, `HttpScreen`) đã `Send` sẵn; chỉ 2 test double còn giữ `Rc`. Lý do gốc (`edtui` giữ `Rc`) đúng là đã biến mất — nhưng điều kiện kích hoạt mà `docs/architecture.md` đặt ra ("xem lại nếu channel `ConnectOutcome` từng trở thành điểm khó bảo trì thật") thì chưa xảy ra, nên bound vào lúc này là đổi kiến trúc cho một lợi ích chưa ai cần. Chi tiết + cách verify trong `docs/backlog/known-issues.md`.
 
 ## So sánh DataGrip/DBeaver/Studio3T — gap còn lại (user hỏi 2026-08-19)
 

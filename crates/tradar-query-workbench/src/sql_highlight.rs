@@ -18,6 +18,7 @@
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
+use tradar_core::theme::theme;
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
 /// Must stay in the same order passed to `HighlightConfiguration::configure`
@@ -62,22 +63,33 @@ fn sql_config() -> &'static HighlightConfiguration {
     })
 }
 
+/// Maps a tree-sitter capture name onto the palette's `syntax_*` role for
+/// it. Reads `theme()` rather than naming a `Color` inline, same as every
+/// other drawing code in the app -- these eight roles exist precisely so a
+/// user's `config.toml` can recolor highlighting, and until 2026-09-03 this
+/// function hardcoded ANSI colors instead, which left every `syntax-*`
+/// override in a config file silently doing nothing.
 fn color_for(highlight_name: &str) -> Color {
+    let theme = theme();
     match highlight_name {
-        "keyword" | "keyword.operator" | "conditional" => Color::Magenta,
-        "string" => Color::Green,
-        "number" | "float" | "boolean" => Color::Yellow,
+        "keyword" | "keyword.operator" | "conditional" => theme.syntax_keyword,
+        "string" => theme.syntax_string,
+        "number" | "float" | "boolean" => theme.syntax_number,
         // The grammar tags comments with both `@comment` and `@spell`
         // (`(comment) @comment @spell`) -- `@spell` is meant as metadata
         // for a spell-checker, not a distinct visual category, but
         // whichever of the two capture actually fires isn't guaranteed, so
         // both map to the same color rather than risk `@spell` shadowing
         // `@comment` (or vice versa) with something else.
-        "comment" | "spell" => Color::DarkGray,
-        "type" | "type.builtin" | "type.qualifier" | "storageclass" => Color::Cyan,
-        "function.call" => Color::Blue,
-        "field" | "variable" | "parameter" => Color::White,
-        "punctuation.bracket" | "punctuation.delimiter" | "operator" | "attribute" => Color::Gray,
+        "comment" | "spell" => theme.syntax_comment,
+        "type" | "type.builtin" | "type.qualifier" | "storageclass" => theme.syntax_type,
+        "function.call" => theme.syntax_function,
+        "field" | "variable" | "parameter" => theme.syntax_variable,
+        "punctuation.bracket" | "punctuation.delimiter" | "operator" | "attribute" => {
+            theme.syntax_punctuation
+        }
+        // Not a highlighted category -- left as the terminal's own default
+        // foreground, which no palette role names.
         _ => Color::Reset,
     }
 }
@@ -141,5 +153,95 @@ mod tests {
         let colors = char_colors(text).unwrap();
 
         assert_eq!(colors.len(), text.chars().count());
+    }
+
+    /// Every highlight category must resolve through the palette, not an
+    /// ANSI constant -- otherwise the eight `syntax-*` keys `config.toml`
+    /// accepts are keys that quietly do nothing. Compares against
+    /// `theme()` rather than installing a palette of its own: `set_theme`
+    /// is a process-wide `OnceLock` only the first caller wins, so a test
+    /// that set one would be racing every other test in this binary.
+    #[test]
+    fn every_category_takes_its_color_from_the_palette() {
+        let theme = theme();
+
+        for (capture, expected) in [
+            ("keyword", theme.syntax_keyword),
+            ("keyword.operator", theme.syntax_keyword),
+            ("conditional", theme.syntax_keyword),
+            ("string", theme.syntax_string),
+            ("number", theme.syntax_number),
+            ("float", theme.syntax_number),
+            ("boolean", theme.syntax_number),
+            ("comment", theme.syntax_comment),
+            ("spell", theme.syntax_comment),
+            ("type", theme.syntax_type),
+            ("type.builtin", theme.syntax_type),
+            ("type.qualifier", theme.syntax_type),
+            ("storageclass", theme.syntax_type),
+            ("function.call", theme.syntax_function),
+            ("field", theme.syntax_variable),
+            ("variable", theme.syntax_variable),
+            ("parameter", theme.syntax_variable),
+            ("punctuation.bracket", theme.syntax_punctuation),
+            ("punctuation.delimiter", theme.syntax_punctuation),
+            ("operator", theme.syntax_punctuation),
+            ("attribute", theme.syntax_punctuation),
+        ] {
+            assert_eq!(
+                color_for(capture),
+                expected,
+                "@{capture} must come from the palette"
+            );
+        }
+    }
+
+    /// Pins the actual regression: `color_for` used to return
+    /// `Color::Magenta`/`Green`/... directly, so this asserts the rendered
+    /// color really is the palette's and not the ANSI constant it used to
+    /// be. `HIGHLIGHT_NAMES` also has to cover every capture `color_for`
+    /// names, or a category could never fire at all.
+    #[test]
+    fn a_highlighted_keyword_renders_in_the_palette_color() {
+        let colors = char_colors("select 1 from t").unwrap();
+
+        assert_eq!(colors[0], theme().syntax_keyword);
+        assert_ne!(
+            colors[0],
+            Color::Magenta,
+            "the pre-2026-09-03 hardcoded color must be gone"
+        );
+    }
+
+    #[test]
+    fn every_capture_color_for_handles_is_configured_on_the_highlighter() {
+        for capture in [
+            "attribute",
+            "boolean",
+            "comment",
+            "conditional",
+            "field",
+            "float",
+            "function.call",
+            "keyword",
+            "keyword.operator",
+            "number",
+            "operator",
+            "parameter",
+            "punctuation.bracket",
+            "punctuation.delimiter",
+            "spell",
+            "storageclass",
+            "string",
+            "type",
+            "type.builtin",
+            "type.qualifier",
+            "variable",
+        ] {
+            assert!(
+                HIGHLIGHT_NAMES.contains(&capture),
+                "@{capture} is colored but never configured, so it can never fire"
+            );
+        }
     }
 }
