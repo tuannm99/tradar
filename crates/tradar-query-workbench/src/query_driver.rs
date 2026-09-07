@@ -1063,10 +1063,10 @@ pub trait QueryDriver: Send + Sync {
 
     /// This driver's statement for a row edit made in the results grid.
     /// `None` -- the default -- leaves the grid read-only, which is right
-    /// for a backend whose results aren't rows of a table anyone can
-    /// address (Redis replies, an Elasticsearch response body). Only the
-    /// driver knows its own syntax, so nothing outside one writes SQL; the
-    /// SQL connectors all delegate to `build_sql_edit`.
+    /// for a backend whose results aren't rows of anything addressable
+    /// (Redis replies, a Kafka/RabbitMQ message). Only the driver knows its
+    /// own syntax, so nothing outside one writes SQL; the SQL connectors
+    /// all delegate to `build_sql_edit`.
     fn edit_sql(&self, _edit: &RowEdit) -> Option<String> {
         None
     }
@@ -1075,6 +1075,19 @@ pub trait QueryDriver: Send + Sync {
     /// when this driver can't tell, which keeps the grid read-only for that
     /// result. SQL connectors delegate to `single_table_source`.
     fn edit_source(&self, _query: &str) -> Option<String> {
+        None
+    }
+
+    /// The column name(s) that identify one row of `edit_source`'s result,
+    /// for `RowEdit::key`. `None` -- the default -- falls back to the
+    /// connection's own schema (`ColumnInfo::primary_key`), right for the
+    /// SQL connectors and Mongo, whose schema already declares this
+    /// (Mongo's `list_schema` marks `_id` itself). Elasticsearch overrides
+    /// this instead of declaring `_id` in its schema: `_id` is metadata
+    /// every document has structurally, never a field an index's own
+    /// mapping would ever include, so there'd be nothing in `list_schema`'s
+    /// output to mark `primary_key` on in the first place.
+    fn edit_key_columns(&self, _source: &str) -> Option<Vec<String>> {
         None
     }
 

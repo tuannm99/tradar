@@ -110,6 +110,12 @@ pub enum Context {
     /// keys, same reason those two overlays get their own context instead
     /// of sharing `Prompt`.
     ColumnPicker,
+    /// The filter-conditions panel (`F3` in `Context::Results`): lists the
+    /// `col:value`/`AND`/`OR` conditions the results filter parses into and
+    /// lets `d` drop one. Its own context rather than `Snippets`, same
+    /// reason `Snippets` isn't `Prompt` -- `d` has to be a plain key here
+    /// too.
+    FilterConditions,
 }
 
 impl Context {
@@ -132,6 +138,7 @@ impl Context {
             Self::HttpResponse => "http-response",
             Self::HttpRequests => "http-requests",
             Self::ColumnPicker => "column-picker",
+            Self::FilterConditions => "filter-conditions",
         }
     }
 
@@ -154,12 +161,13 @@ impl Context {
             "http-response" => Self::HttpResponse,
             "http-requests" => Self::HttpRequests,
             "column-picker" => Self::ColumnPicker,
+            "filter-conditions" => Self::FilterConditions,
             _ => return None,
         })
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 17] {
+    pub fn all() -> [Self; 18] {
         [
             Self::Global,
             Self::Picker,
@@ -178,6 +186,7 @@ impl Context {
             Self::Completion,
             Self::Snippets,
             Self::ColumnPicker,
+            Self::FilterConditions,
         ]
     }
 }
@@ -251,8 +260,17 @@ pub enum Command {
     /// loaded `QueryResult`, not an `ORDER BY` sent back to the database --
     /// see `ResultsComponent::sort_by_column`.
     SortColumn,
-    /// Narrow the results grid to rows matching what you type.
+    /// Narrow the results grid to rows matching what you type -- accepts
+    /// `col:value` conditions combined with `AND`/`OR` (the parsing lives
+    /// in `tradar-query-workbench`, which depends on this crate, not the
+    /// other way around -- nothing here needs to know the syntax).
     Search,
+    /// Open/close the filter-conditions panel: lists what `Search`'s filter
+    /// text parsed into and lets you drop one condition without retyping
+    /// the rest.
+    ToggleFilterConditions,
+    /// Delete the highlighted condition, in the filter-conditions panel.
+    DeleteFilterCondition,
     /// Show/hide the selected cell's full value in a panel below the grid
     /// -- pretty-printed if it's a JSON object/array, so a jsonb column no
     /// longer means squinting at a truncated one-liner.
@@ -407,6 +425,8 @@ impl Command {
             Self::DeleteRow => "delete-row",
             Self::SortColumn => "sort-column",
             Self::Search => "search",
+            Self::ToggleFilterConditions => "toggle-filter-conditions",
+            Self::DeleteFilterCondition => "delete-filter-condition",
             Self::TogglePreview => "toggle-preview",
             Self::RetryQuery => "retry-query",
             Self::EditQuery => "edit-query",
@@ -465,7 +485,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 88] = [
+    const ALL: [Self; 90] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -503,6 +523,8 @@ impl Command {
         Self::DeleteRow,
         Self::SortColumn,
         Self::Search,
+        Self::ToggleFilterConditions,
+        Self::DeleteFilterCondition,
         Self::TogglePreview,
         Self::RetryQuery,
         Self::EditQuery,
@@ -596,6 +618,8 @@ impl Command {
             Self::DeleteRow => "Delete the selected row",
             Self::SortColumn => "Sort by the selected column (asc/desc/off)",
             Self::Search => "Filter the list",
+            Self::ToggleFilterConditions => "Show/hide the filter-conditions panel",
+            Self::DeleteFilterCondition => "Delete the selected filter condition",
             Self::TogglePreview => "Show/hide the selected cell's full value",
             Self::RetryQuery => "Retry the failed query",
             Self::EditQuery => "Fix the failed query in the editor",
@@ -897,6 +921,7 @@ impl Default for Keymap {
                 ("d", Command::DeleteRow),
                 ("s", Command::SortColumn),
                 ("/", Command::Search),
+                ("f3", Command::ToggleFilterConditions),
                 ("space", Command::TogglePreview),
                 ("t", Command::ToggleResultView),
                 ("r", Command::RetryQuery),
@@ -972,6 +997,14 @@ impl Default for Keymap {
                 ("esc", Command::Cancel),
                 ("space", Command::ToggleColumn),
                 ("a", Command::ToggleAllColumns),
+            ]),
+        );
+        bindings.insert(
+            Context::FilterConditions,
+            parse_defaults(&[
+                ("enter", Command::Confirm),
+                ("esc", Command::Cancel),
+                ("d", Command::DeleteFilterCondition),
             ]),
         );
         Self { bindings }

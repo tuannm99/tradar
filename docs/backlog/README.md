@@ -23,5 +23,7 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`navigator-schema-level.md`](navigator-schema-level.md) — navigator thêm cấp schema/keyspace/database (Postgres/Cassandra/MongoDB) + nhóm theo loại object (Postgres: Tables/Views/Functions/Procedures), `OutlineEntry::is_object` thay `depth == 0` cho CRUD snippet.
 - [`fk-autocomplete-and-erd.md`](fk-autocomplete-and-erd.md) — dữ liệu FK mới (`ColumnInfo.foreign_key`, Postgres/SQLite), autocomplete ngữ cảnh sâu (`.` sau alias, JOIN gợi ý bảng liên quan), ERD box-drawing (`F4`) cho lân cận 1 bảng.
 - [`crud-snippet-column-picker.md`](crud-snippet-column-picker.md) — mở rộng CRUD snippet: `c`/`r`/`u`/`d` mở column picker (checkbox multi-select) trước khi insert; Mongo/Elasticsearch được "làm thật" (trước đó bỏ qua field), Elasticsearch Delete cố tình giữ nguyên (không sang `_delete_by_query`).
+- [`multi-filter.md`](multi-filter.md) — filter kết quả mở rộng cú pháp `cột:giá_trị` + `AND`/`OR` (`ParsedFilter`, module `filter.rs` mới), panel `F3` xem/xoá từng điều kiện đã tách ra.
+- [`mongo-es-row-edit.md`](mongo-es-row-edit.md) — mở row-edit (sửa cell/xoá row) cho MongoDB (`find()` đơn giản, khoá `_id`) và Elasticsearch (`_search` 1 index, khoá `_id`) — suy luận kiểu JSON từ text gõ vào, `QueryDriver::edit_key_columns` mới, và `execute()` của ES đổi sang tách `_search` thành 1 document/hit.
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.

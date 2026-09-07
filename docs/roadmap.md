@@ -13,7 +13,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Tier 3 — #6 Autocomplete ngữ cảnh sâu
 - [x] Tier 3 — #5 ERD
 - [x] Tier 4 — #7 Generate SQL từ UI (column picker)
-- [ ] Tier 4 — #10 Multi-filter kết hợp (làm tiếp theo)
+- [x] Tier 4 — #10 Multi-filter kết hợp
 - [ ] Tier 5 — #2 Table designer
 - [ ] Tier 5 — #3 Schema diff/compare
 - [ ] Tier 5 — #4 Migration/version-control
@@ -76,7 +76,7 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 
 8. ~~Import CSV/Excel/JSON vào bảng qua UI trong TUI grid~~ — **bỏ, đổi hướng sang CLI (2026-08-19)**, xem mục "`tradar` CLI: import/export" ngay bên dưới thay vì làm trong `Data grid` này.
 9. **Sort theo cột (click header)** — xong (2026-08-19), xem `docs/backlog/sort-by-column.md`.
-10. **Multi-filter kết hợp** — hiện chỉ 1 ô filter text đơn khớp bất kỳ cột nào (`/`). Cần nghĩ UI cho nhiều điều kiện cùng lúc (theo cột cụ thể, AND/OR) mà không đụng vỡ ý nghĩa của filter đơn hiện có.
+10. ~~Multi-filter kết hợp~~ — xong (2026-09-07), xem `docs/backlog/multi-filter.md`. Chốt qua `AskUserQuestion`: kết hợp cả hai hướng (mở rộng cú pháp ô filter `/` hiện có bằng `cột:giá_trị` + `AND`/`OR`, cộng panel `F3` xem/xoá từng điều kiện), hỗ trợ cả AND lẫn OR.
 11. **Group-by trong grid** — client-side, cần nghĩ trước cả UI (group theo cột nào, hiện aggregate gì) lẫn có đáng làm trong một results grid vốn thiết kế cho xem/sửa row-by-row hay không (khác hẳn mục đích của group-by).
 12. **Mở rộng edit-cell/delete-row ngoài single-table-with-PK** — **rủi ro cao nhất trong toàn bộ danh sách**, cân nhắc kỹ trước khi nhận làm: `single_table_source`/`build_sql_edit` cố tình bảo thủ (từ chối join/view/no-PK) đúng vì đoán sai bảng nguồn nghĩa là sinh `UPDATE`/`DELETE` nhắm sai chỗ — hậu quả là mất/sửa nhầm dữ liệu thật, không phải một tính năng thiếu vô hại. Nếu làm, cần một cơ chế xác định nguồn đáng tin hơn heuristic hiện tại (có thể là hỏi DB trực tiếp qua `EXPLAIN`/system catalog thay vì tự parse SQL), và có lẽ vẫn nên giữ nguyên tắc "từ chối rồi nói rõ lý do" cho các trường hợp còn mơ hồ thay vì cố đoán bừa.
 
@@ -85,7 +85,7 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 - **Tier 1 (làm trước, rẻ/độc lập)**: #9 Sort theo cột — xong, `docs/backlog/sort-by-column.md`.
 - **Tier 2 (nền tảng)**: #1 Navigator schema/database + nhóm object — xong, `docs/backlog/navigator-schema-level.md`.
 - **Tier 3 (dùng chung dữ liệu FK vừa thêm ở #1)**: #6 Autocomplete ngữ cảnh sâu — xong, #5 ERD — xong, cả hai `docs/backlog/fk-autocomplete-and-erd.md`.
-- **Tier 4 (cần chốt phạm vi trước khi code)**: #7 Generate SQL từ UI — xong, `docs/backlog/crud-snippet-column-picker.md`. #10 Multi-filter kết hợp — làm tiếp theo.
+- **Tier 4 (cần chốt phạm vi trước khi code)**: #7 Generate SQL từ UI — xong, `docs/backlog/crud-snippet-column-picker.md`. #10 Multi-filter kết hợp — xong, `docs/backlog/multi-filter.md`.
 - **Tier 5 (lớn, tách nhiều bước nhỏ)**: #2 Table designer → #3 Schema diff/compare → #4 Migration/version-control.
 - **Tier 6 (để cuối, #12 cần bàn lại có đáng làm không)**: #11 Group-by trong grid → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK.
 

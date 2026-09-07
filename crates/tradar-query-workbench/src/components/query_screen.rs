@@ -21,6 +21,7 @@ use crate::components::browse_sidebar::{BrowseClick, BrowseSidebarComponent};
 use crate::components::completion::{CompletionPopup, CompletionSource};
 use crate::components::file_picker::{FilePickerComponent, PickerOutcome};
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
+use crate::components::filter_conditions::{FilterConditionsComponent, FilterConditionsOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
@@ -67,6 +68,11 @@ pub struct QueryScreenComponent {
     /// The ERD overlay -- a table picker that becomes the rendered
     /// diagram once a table's chosen. `None` until `Command::ShowErd`.
     erd: Option<crate::components::erd::ErdComponent>,
+    /// The filter-conditions panel, open after `Command::ToggleFilterConditions`
+    /// (`F3` while the results pane is focused). Built fresh from
+    /// `results.filter()`/`results.columns()` each time it opens -- see
+    /// `open_filter_conditions`.
+    filter_conditions: Option<FilterConditionsComponent>,
     /// Where the editor was last drawn, so a click there can focus it.
     editor_area: Rect,
     /// Everything completable for this connection, built once on connect.
@@ -326,6 +332,7 @@ impl QueryScreenComponent {
             snippet_prompt: None,
             snippet_picker: None,
             erd: None,
+            filter_conditions: None,
             editor_area: Rect::ZERO,
             completions,
             outline,
@@ -405,6 +412,7 @@ impl QueryScreenComponent {
             Command::Search => {
                 self.search = Some(ui::TextInput::new(self.results.filter()));
             }
+            Command::ToggleFilterConditions => self.open_filter_conditions(),
             Command::RetryQuery => self.retry_failed_query(),
             Command::EditQuery => {
                 if self.results.last_error.is_some() {
@@ -624,6 +632,36 @@ impl QueryScreenComponent {
         }
     }
 
+    /// `F3`: opens the filter-conditions panel over whatever the results
+    /// filter currently parses into -- a no-op with an empty filter, since
+    /// there'd be nothing to list.
+    fn open_filter_conditions(&mut self) {
+        if self.results.filter().trim().is_empty() {
+            return;
+        }
+        self.filter_conditions = Some(FilterConditionsComponent::new(
+            self.results.filter(),
+            self.results.columns(),
+        ));
+    }
+
+    /// What a filter-conditions panel outcome means: `Cancelled` just
+    /// closes it, `Changed` re-applies the rebuilt filter text through the
+    /// same `ResultsComponent::set_filter` typing into the filter box uses,
+    /// and closes the panel too once nothing's left to manage.
+    fn handle_filter_conditions_outcome(&mut self, outcome: Option<FilterConditionsOutcome>) {
+        match outcome {
+            Some(FilterConditionsOutcome::Cancelled) => self.filter_conditions = None,
+            Some(FilterConditionsOutcome::Changed(text)) => {
+                self.results.set_filter(&text);
+                if text.trim().is_empty() {
+                    self.filter_conditions = None;
+                }
+            }
+            None => {}
+        }
+    }
+
     /// Fetches the sidebar's highlighted key into the results pane -- a
     /// no-op for every connector but Redis, since `self.browse` is only
     /// ever `Some` there.
@@ -772,29 +810,40 @@ impl QueryScreenComponent {
             .as_deref()
             .ok_or("nothing has been run yet")?;
         let table = self.engine.edit_source(query).ok_or(
-            "only a plain SELECT from a single table can be edited here — \
-             a join, a grouped result or a subquery has no one row to change",
+            "this result can't be edited here — only a plain, single-source \
+             read qualifies (a SQL join/grouped result/subquery, a Mongo \
+             aggregate, or a multi-index Elasticsearch search all have no \
+             one row to change)",
         )?;
 
-        let schema = self
-            .engine
-            .schema()
-            .as_ref()
-            .map_err(|e| format!("the schema for this connection wasn't read: {e}"))?;
-        // A Postgres source is schema-qualified (`public.users`) while the
-        // sidebar lists bare names, so match on the last part.
-        let bare = table.rsplit('.').next().unwrap_or(&table);
-        let info = schema
-            .iter()
-            .find(|entry| entry.name.eq_ignore_ascii_case(bare))
-            .ok_or_else(|| format!("'{table}' isn't in this connection's schema"))?;
-
-        let key_columns: Vec<&str> = info
-            .columns
-            .iter()
-            .filter(|column| column.primary_key)
-            .map(|column| column.name.as_str())
-            .collect();
+        // Most drivers (SQL, Mongo) declare their key column(s) in the
+        // connection's own schema (`ColumnInfo::primary_key`); Elasticsearch
+        // names `_id` directly instead, since it's metadata no index
+        // mapping ever declares -- see `QueryDriver::edit_key_columns`'s own
+        // doc comment.
+        let key_columns: Vec<String> = match self.engine.edit_key_columns(&table) {
+            Some(columns) => columns,
+            None => {
+                let schema = self
+                    .engine
+                    .schema()
+                    .as_ref()
+                    .map_err(|e| format!("the schema for this connection wasn't read: {e}"))?;
+                // A Postgres source is schema-qualified (`public.users`)
+                // while the sidebar lists bare names, so match on the last
+                // part.
+                let bare = table.rsplit('.').next().unwrap_or(&table);
+                let info = schema
+                    .iter()
+                    .find(|entry| entry.name.eq_ignore_ascii_case(bare))
+                    .ok_or_else(|| format!("'{table}' isn't in this connection's schema"))?;
+                info.columns
+                    .iter()
+                    .filter(|column| column.primary_key)
+                    .map(|column| column.name.clone())
+                    .collect()
+            }
+        };
         if key_columns.is_empty() {
             return Err(format!(
                 "'{table}' has no primary key — there is no WHERE clause that names exactly one row"
@@ -804,7 +853,7 @@ impl QueryScreenComponent {
         let columns = self.results.columns();
         let row = self.results.selected_row().ok_or("no row is selected")?;
         let mut key = Vec::with_capacity(key_columns.len());
-        for name in key_columns {
+        for name in &key_columns {
             let index = columns
                 .iter()
                 .position(|c| c.eq_ignore_ascii_case(name))
@@ -812,7 +861,7 @@ impl QueryScreenComponent {
                     format!("the key column '{name}' isn't in this result — select it too")
                 })?;
             let value = row.get(index).cloned().unwrap_or_default();
-            key.push((name.to_string(), value));
+            key.push((name.clone(), value));
         }
         Ok((table, key))
     }
@@ -1164,6 +1213,12 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        if let Some(panel) = self.filter_conditions.as_mut() {
+            let outcome = panel.handle_key_event(code, modifiers);
+            self.handle_filter_conditions_outcome(outcome);
+            return None;
+        }
+
         // While suggestions are showing they take the keys bound to them,
         // and nothing else -- every other key falls through to normal
         // editing, which then refilters the list.
@@ -1285,6 +1340,12 @@ impl Component for QueryScreenComponent {
         if let Some(snippet_picker) = self.snippet_picker.as_mut() {
             let outcome = snippet_picker.handle_mouse_event(event);
             self.handle_snippet_picker_outcome(outcome);
+            return None;
+        }
+
+        if let Some(panel) = self.filter_conditions.as_mut() {
+            let outcome = panel.handle_mouse_event(event);
+            self.handle_filter_conditions_outcome(outcome);
             return None;
         }
 
@@ -1603,6 +1664,12 @@ impl Component for QueryScreenComponent {
             let popup = ui::centered_rect(92, 92, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             erd.draw(frame, popup);
+        }
+
+        if let Some(panel) = &mut self.filter_conditions {
+            let popup = ui::centered_rect(70, 60, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            panel.draw(frame, popup);
         }
 
         if let Some(menu) = &self.context_menu {
@@ -3170,6 +3237,67 @@ mod tests {
     }
 
     #[test]
+    fn f3_with_no_filter_set_is_a_no_op() {
+        let (mut screen, _rx) = screen_showing_cities();
+
+        screen.handle_key_event(KeyCode::F(3), KeyModifiers::NONE);
+
+        assert!(
+            screen.filter_conditions.is_none(),
+            "nothing to manage with an empty filter"
+        );
+    }
+
+    #[test]
+    fn f3_opens_a_panel_listing_the_parsed_conditions() {
+        let (mut screen, _rx) = screen_showing_cities();
+        screen.results.set_filter("id:1 AND city:hanoi");
+
+        screen.handle_key_event(KeyCode::F(3), KeyModifiers::NONE);
+
+        assert!(screen.filter_conditions.is_some());
+    }
+
+    #[test]
+    fn deleting_a_condition_in_the_panel_re_applies_the_narrower_filter() {
+        let (mut screen, _rx) = screen_showing_cities();
+        screen.results.set_filter("id:1 AND city:hanoi");
+        screen.handle_key_event(KeyCode::F(3), KeyModifiers::NONE);
+
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+
+        assert_eq!(screen.results.filter(), "city:hanoi");
+        assert!(
+            screen.filter_conditions.is_some(),
+            "one condition remains, so the panel stays open"
+        );
+    }
+
+    #[test]
+    fn deleting_the_last_condition_closes_the_panel_too() {
+        let (mut screen, _rx) = screen_showing_cities();
+        screen.results.set_filter("id:1");
+        screen.handle_key_event(KeyCode::F(3), KeyModifiers::NONE);
+
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+
+        assert_eq!(screen.results.filter(), "");
+        assert!(screen.filter_conditions.is_none());
+    }
+
+    #[test]
+    fn esc_closes_the_panel_without_touching_the_filter() {
+        let (mut screen, _rx) = screen_showing_cities();
+        screen.results.set_filter("id:1 AND city:hanoi");
+        screen.handle_key_event(KeyCode::F(3), KeyModifiers::NONE);
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.filter_conditions.is_none());
+        assert_eq!(screen.results.filter(), "id:1 AND city:hanoi");
+    }
+
+    #[test]
     fn a_key_bound_elsewhere_is_plain_text_while_the_filter_bar_is_open() {
         let (mut screen, _rx) = screen_showing_cities();
 
@@ -3408,7 +3536,7 @@ mod tests {
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(
-            text.contains("single table"),
+            text.contains("single-source"),
             "the refusal must explain itself: {text}"
         );
         assert_eq!(
