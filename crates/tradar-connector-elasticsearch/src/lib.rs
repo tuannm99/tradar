@@ -54,6 +54,60 @@ fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', r"'\''")
 }
 
+/// One row per hit for a `_search`-shaped response (`hits.hits` present,
+/// however many -- zero included), each `_id` merged alongside its
+/// `_source` fields the same way a Mongo document already carries its own
+/// `_id` -- what makes a search result addressable by
+/// `QueryDriver::edit_source`/`edit_sql` at all instead of the whole
+/// response being one opaque "document". `None` for anything that isn't
+/// this shape (`_count`, `_cat`, `_cluster/health`, an error body, a single
+/// `_doc` fetch), which keeps that response exactly as it always was --
+/// the whole thing as one `Documents` entry -- since there's no per-row
+/// structure in it to unwrap. Never drops a hit even if it's missing
+/// `_source` (an explicit `"_source": false` in the request) -- that hit
+/// just comes back as `{"_id": ...}` alone rather than disappearing.
+fn unwrap_search_hits(json: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    let hits = json.get("hits")?.get("hits")?.as_array()?;
+    Some(
+        hits.iter()
+            .map(|hit| {
+                let mut doc = serde_json::Map::new();
+                if let Some(id) = hit.get("_id") {
+                    doc.insert("_id".to_string(), id.clone());
+                }
+                if let Some(serde_json::Value::Object(source)) = hit.get("_source") {
+                    doc.extend(source.clone());
+                }
+                serde_json::Value::Object(doc)
+            })
+            .collect(),
+    )
+}
+
+/// Infers a JSON value for a value as it's displayed in the grid or typed
+/// into the row-edit prompt: text that parses as JSON (a number,
+/// `true`/`false`, `null`, or a typed-out array/object literal) is used as
+/// that value, anything else -- the common case, an ordinary string field
+/// -- becomes a JSON string. Unlike Mongo's `mongo_value_literal`, there's
+/// no constructor-call syntax (`ObjectId(...)`) to special-case first: ES
+/// has no such wrapper convention, ids/dates are already plain strings.
+fn es_infer_value(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+}
+
+/// Wraps `value` in a nested JSON object for each `.`-separated segment of
+/// `path`, innermost segment last -- `nest_dotted_path("customer.name", v)`
+/// gives `{"customer": {"name": v}}`. A bare `path` with no dot gives
+/// `{path: v}` unchanged. See `edit_sql`'s doc comment for why a dotted ES
+/// column name has to become real nesting rather than a literal flat key.
+fn nest_dotted_path(path: &str, value: serde_json::Value) -> serde_json::Value {
+    path.rsplit('.').fold(value, |acc, segment| {
+        let mut map = serde_json::Map::new();
+        map.insert(segment.to_string(), acc);
+        serde_json::Value::Object(map)
+    })
+}
+
 fn to_curl(base_url: &str, query: &str) -> Option<String> {
     let (method, path, body) = parse_query(query)?;
     let base_url = base_url.trim_end_matches('/');
@@ -258,7 +312,78 @@ impl QueryDriver for ElasticsearchDriver {
         // as a JSON string rather than erroring on a decode failure.
         let text = response.text().await?;
         let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-        Ok(QueryResult::Documents(vec![json]))
+        // A `_search`-shaped response (`hits.hits` present, however many --
+        // zero included) unwraps into one row per hit, same as a Mongo
+        // `find()` returning one row per document; anything else (`_count`,
+        // `_cat`, `_cluster/health`, an error body, a single `_doc` fetch)
+        // stays exactly as it always has, the whole response as one
+        // `Documents` entry, since there's no per-row structure to unwrap.
+        match unwrap_search_hits(&json) {
+            Some(docs) => Ok(QueryResult::Documents(docs)),
+            None => Ok(QueryResult::Documents(vec![json])),
+        }
+    }
+
+    /// The single, named index a plain `_search` reads from -- conservative
+    /// by the same "when in doubt, refuse" principle `single_table_source`
+    /// uses for SQL: a comma-separated list, a `*` wildcard, or `_all`
+    /// could span several indices, so there's no one source a generated
+    /// `_update`/`DELETE` could safely aim at (a hit's own `_index`, not
+    /// used here, would resolve that -- out of scope for now, see
+    /// `docs/backlog/mongo-es-row-edit.md`). `POST` is accepted alongside
+    /// `GET` since a body is what usually makes `_search` a `POST` in
+    /// practice (Kibana's own console defaults to it).
+    fn edit_source(&self, query: &str) -> Option<String> {
+        let (method, path, _body) = parse_query(query)?;
+        if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("POST") {
+            return None;
+        }
+        let path = path.trim_start_matches('/');
+        let path = path.split('?').next().unwrap_or(path);
+        let index = path.strip_suffix("/_search")?;
+        if index.is_empty()
+            || index.contains(',')
+            || index.contains('*')
+            || index.eq_ignore_ascii_case("_all")
+        {
+            return None;
+        }
+        Some(index.to_string())
+    }
+
+    /// Builds the `_update`/`DELETE` this driver would run for `edit`,
+    /// against the `_id` `edit.key` carries (the one field every `_search`
+    /// hit is unwrapped with -- see `unwrap_search_hits`). A `SetValue`'s
+    /// new value goes through `es_infer_value` (a number/bool/null/JSON
+    /// literal passes through as typed, anything else becomes a JSON
+    /// string) and, for a dotted column name (a nested field, ES's own
+    /// flattening convention -- see `index_fields`), `nest_dotted_path`
+    /// turns it into the real nested object `_update`'s `doc` merge needs
+    /// (`_update` does a literal key merge with no path expansion of its
+    /// own, so a flat `{"customer.name": v}` would create a spurious
+    /// top-level field literally named `"customer.name"` instead of
+    /// reaching the real nested field).
+    fn edit_sql(&self, edit: &query_driver::RowEdit) -> Option<String> {
+        let index = &edit.table;
+        let id = edit.key.iter().find(|(k, _)| k == "_id")?.1.as_str();
+        Some(match &edit.change {
+            query_driver::RowChange::SetValue { column, value } => {
+                let doc = nest_dotted_path(column, es_infer_value(value));
+                let body = serde_json::json!({ "doc": doc });
+                format!(
+                    "POST {index}/_update/{id}\n{}",
+                    serde_json::to_string_pretty(&body).unwrap_or_default()
+                )
+            }
+            query_driver::RowChange::DeleteRow => format!("DELETE {index}/_doc/{id}"),
+        })
+    }
+
+    /// Always `_id` -- see the trait method's own doc comment for why this
+    /// can't come from `list_schema` the way it does for the SQL
+    /// connectors and Mongo.
+    fn edit_key_columns(&self, _source: &str) -> Option<Vec<String>> {
+        Some(vec!["_id".to_string()])
     }
 
     fn export_curl(&self, query: &str) -> Option<String> {
@@ -578,6 +703,135 @@ mod tests {
         assert!(parse_query("GET").is_none());
     }
 
+    #[test]
+    fn unwrap_search_hits_merges_id_into_each_hit_s_source() {
+        let response = serde_json::json!({
+            "took": 1,
+            "hits": {
+                "hits": [
+                    {"_id": "1", "_index": "my-index", "_source": {"title": "a"}},
+                    {"_id": "2", "_index": "my-index", "_source": {"title": "b"}},
+                ]
+            }
+        });
+
+        let docs = unwrap_search_hits(&response).expect("a hits.hits response");
+
+        assert_eq!(
+            docs,
+            vec![
+                serde_json::json!({"_id": "1", "title": "a"}),
+                serde_json::json!({"_id": "2", "title": "b"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn unwrap_search_hits_is_none_for_a_response_with_no_hits_key() {
+        assert!(unwrap_search_hits(&serde_json::json!({"count": 3})).is_none());
+    }
+
+    #[test]
+    fn unwrap_search_hits_keeps_a_hit_missing_source_rather_than_dropping_it() {
+        let response = serde_json::json!({"hits": {"hits": [{"_id": "1"}]}});
+
+        let docs = unwrap_search_hits(&response).unwrap();
+
+        assert_eq!(docs, vec![serde_json::json!({"_id": "1"})]);
+    }
+
+    #[test]
+    fn edit_source_accepts_a_plain_single_index_search() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        assert_eq!(
+            driver.edit_source("GET my-index/_search\n{\"query\": {\"match_all\": {}}}"),
+            Some("my-index".to_string())
+        );
+        assert_eq!(
+            driver.edit_source("POST my-index/_search"),
+            Some("my-index".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_source_refuses_multi_index_wildcard_and_non_search() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        assert_eq!(driver.edit_source("GET a,b/_search"), None);
+        assert_eq!(driver.edit_source("GET my-*/_search"), None);
+        assert_eq!(driver.edit_source("GET _all/_search"), None);
+        assert_eq!(driver.edit_source("GET my-index/_count"), None);
+        assert_eq!(driver.edit_source("GET my-index/_doc/1"), None);
+        assert_eq!(driver.edit_source("DELETE my-index/_doc/1"), None);
+    }
+
+    #[test]
+    fn edit_sql_delete_row_targets_the_hit_s_id() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        let edit = query_driver::RowEdit {
+            table: "my-index".to_string(),
+            key: vec![("_id".to_string(), "abc123".to_string())],
+            change: query_driver::RowChange::DeleteRow,
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some("DELETE my-index/_doc/abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_sql_set_value_infers_the_value_s_json_type() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+        let edit_for = |value: &str| query_driver::RowEdit {
+            table: "my-index".to_string(),
+            key: vec![("_id".to_string(), "1".to_string())],
+            change: query_driver::RowChange::SetValue {
+                column: "views".to_string(),
+                value: value.to_string(),
+            },
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit_for("42")),
+            Some("POST my-index/_update/1\n{\n  \"doc\": {\n    \"views\": 42\n  }\n}".to_string())
+        );
+        assert_eq!(
+            driver.edit_sql(&edit_for("Ada")),
+            Some(
+                "POST my-index/_update/1\n{\n  \"doc\": {\n    \"views\": \"Ada\"\n  }\n}"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn edit_sql_set_value_nests_a_dotted_column_into_a_real_object() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        let edit = query_driver::RowEdit {
+            table: "my-index".to_string(),
+            key: vec![("_id".to_string(), "1".to_string())],
+            change: query_driver::RowChange::SetValue {
+                column: "customer.name".to_string(),
+                value: "Ada".to_string(),
+            },
+        };
+
+        // Not a flat "customer.name" key -- a real nested object, or
+        // Elasticsearch's partial-update merge would create a spurious
+        // top-level field instead of reaching the real nested one.
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some(
+                "POST my-index/_update/1\n{\n  \"doc\": {\n    \"customer\": {\n      \"name\": \"Ada\"\n    }\n  }\n}"
+                    .to_string()
+            )
+        );
+    }
+
     #[tokio::test]
     async fn connect_succeeds_for_a_running_cluster() {
         let container = ElasticSearch::default().start().await.unwrap();
@@ -661,6 +915,114 @@ mod tests {
             }
             other => panic!("expected Documents, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_unwraps_a_search_into_one_document_per_hit() {
+        let container = ElasticSearch::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(9200).await.unwrap();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut driver = ElasticsearchDriver::new(&base_url);
+        driver.connect().await.unwrap();
+        let client = reqwest::Client::new();
+        for (id, title) in [("1", "a"), ("2", "b")] {
+            client
+                .put(format!("{base_url}/orders/_doc/{id}?refresh=true"))
+                .header("content-type", "application/json")
+                .body(format!(r#"{{"title": "{title}"}}"#))
+                .send()
+                .await
+                .unwrap();
+        }
+
+        let result = driver
+            .execute("GET orders/_search\n{\"query\": {\"match_all\": {}}}")
+            .await
+            .unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => {
+                assert_eq!(docs.len(), 2, "docs were: {docs:?}");
+                for doc in &docs {
+                    assert!(doc.get("_id").is_some(), "doc was: {doc:?}");
+                    assert!(doc.get("title").is_some(), "doc was: {doc:?}");
+                }
+            }
+            other => panic!("expected Documents, got {other:?}"),
+        }
+    }
+
+    /// End-to-end proof this feature actually works, not just that it
+    /// builds the right-looking string: `edit_source`/`edit_sql` build a
+    /// real update from a real `_search` hit, `execute()` runs it, and a
+    /// direct `GET .../_doc/<id>` (bypassing the search index's own
+    /// near-real-time refresh, unlike a second `_search`) confirms the
+    /// document actually changed -- same for the follow-up delete.
+    #[tokio::test]
+    async fn edit_sql_round_trips_a_real_update_and_delete_against_a_search_hit() {
+        let container = ElasticSearch::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(9200).await.unwrap();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut driver = ElasticsearchDriver::new(&base_url);
+        driver.connect().await.unwrap();
+        let client = reqwest::Client::new();
+        client
+            .put(format!("{base_url}/orders/_doc/1?refresh=true"))
+            .header("content-type", "application/json")
+            .body(r#"{"title": "a"}"#)
+            .send()
+            .await
+            .unwrap();
+
+        let query = "GET orders/_search\n{\"query\": {\"match_all\": {}}}";
+        assert_eq!(driver.edit_source(query).as_deref(), Some("orders"));
+
+        let update_sql = driver
+            .edit_sql(&query_driver::RowEdit {
+                table: "orders".to_string(),
+                key: vec![("_id".to_string(), "1".to_string())],
+                change: query_driver::RowChange::SetValue {
+                    column: "title".to_string(),
+                    value: "b".to_string(),
+                },
+            })
+            .expect("a plain single-index search must be editable");
+        driver.execute(&update_sql).await.unwrap();
+
+        let after_update: serde_json::Value = client
+            .get(format!("{base_url}/orders/_doc/1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            after_update["_source"]["title"], "b",
+            "doc after update: {after_update:?}"
+        );
+
+        let delete_sql = driver
+            .edit_sql(&query_driver::RowEdit {
+                table: "orders".to_string(),
+                key: vec![("_id".to_string(), "1".to_string())],
+                change: query_driver::RowChange::DeleteRow,
+            })
+            .unwrap();
+        driver.execute(&delete_sql).await.unwrap();
+
+        let after_delete: serde_json::Value = client
+            .get(format!("{base_url}/orders/_doc/1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            after_delete["found"], false,
+            "doc should be deleted: {after_delete:?}"
+        );
     }
 
     #[test]

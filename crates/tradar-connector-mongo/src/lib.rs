@@ -415,6 +415,42 @@ impl QueryDriver for MongoDriver {
         Ok(result)
     }
 
+    /// The collection a `find` reads from -- `None` for `aggregate` and
+    /// every write method, same conservative "when in doubt, refuse"
+    /// principle `single_table_source` uses for SQL: `aggregate`'s pipeline
+    /// can reshape/join/group documents well past "one row = one document
+    /// in this collection", so there's no source a generated
+    /// `updateOne`/`deleteOne` could safely aim at. A `find` call always
+    /// returns whole documents (its own 2nd projection argument is already
+    /// rejected by `run_method`, see `execute_find_rejects_a_projection_argument_it_does_not_support`),
+    /// so every field -- `_id` included -- is always present to edit/key by.
+    fn edit_source(&self, query: &str) -> Option<String> {
+        let parsed = parse_shell_query(query.trim()).ok()?;
+        (parsed.method == "find").then_some(parsed.collection)
+    }
+
+    /// Builds the `updateOne`/`deleteOne` this driver would run for `edit`,
+    /// filtered by `edit.key` (always just `_id`, the one field
+    /// `list_schema` marks `primary_key: true` -- see that field's own
+    /// comment). Both the filter's key value and a `SetValue`'s new value
+    /// go through `mongo_value_literal` -- see its own doc comment for why
+    /// a value can't just be quoted as a plain string the way SQL's
+    /// `build_sql_edit` does.
+    fn edit_sql(&self, edit: &query_driver::RowEdit) -> Option<String> {
+        let collection = &edit.table;
+        let filter = mongo_filter_literal(&edit.key);
+        Some(match &edit.change {
+            query_driver::RowChange::SetValue { column, value } => format!(
+                "db.{collection}.updateOne({filter}, {{$set: {{{}: {}}}}})",
+                mongo_field_key(column),
+                mongo_value_literal(value)
+            ),
+            query_driver::RowChange::DeleteRow => {
+                format!("db.{collection}.deleteOne({filter})")
+            }
+        })
+    }
+
     fn crud_snippet(
         &self,
         entry: &SchemaInfo,
@@ -519,6 +555,58 @@ fn mongo_field_key(field: &str) -> String {
     } else {
         format!("\"{}\"", field.replace('"', "\\\""))
     }
+}
+
+/// `{_id: ObjectId("..."), ...}` -- every `(column, displayed value)` pair
+/// in a `RowEdit::key` as one mongosh filter object, values run through
+/// `mongo_value_literal`. In practice this is always just `_id` (the one
+/// column `list_schema` marks as a key), but built generically the same
+/// shape `build_sql_edit`'s `WHERE` clause is.
+fn mongo_filter_literal(key: &[(String, String)]) -> String {
+    let body = key
+        .iter()
+        .map(|(column, value)| {
+            format!(
+                "{}: {}",
+                mongo_field_key(column),
+                mongo_value_literal(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{body}}}")
+}
+
+/// Infers a mongosh literal from a value as it's displayed in the grid or
+/// typed into the row-edit prompt. Unlike SQL (`build_sql_edit`'s own doc
+/// comment: Postgres/SQLite coerce a quoted `'1'` to a number where a
+/// number is wanted), a quoted JS string is never silently reinterpreted as
+/// another type -- `{_id: "ObjectId(...)"}"` would filter for that literal
+/// *string*, not call the constructor, so quoting everything as SQL does
+/// would break every structured field.
+///
+/// `ObjectId("...")`/`ISODate("...")` (exactly the shape `simplify_extjson`
+/// formats a document's own such fields as, so a key's displayed value
+/// round-trips straight back into a working filter) pass through as-is;
+/// anything else that parses as JSON -- a number, `true`/`false`, `null`,
+/// or a typed-out array/object literal -- also passes through as-is; every
+/// other text (the common case, an ordinary string field) is JSON-quoted.
+/// A known, deliberate limitation of inferring type from typed text rather
+/// than asking the user to pick one: a `Decimal128`/`Binary`/other BSON
+/// type with no bare-text mongosh literal of its own has no way to be
+/// entered here and is sent as a plain string instead.
+fn mongo_value_literal(value: &str) -> String {
+    let trimmed = value.trim();
+    let is_constructor_call = |prefix: &str| {
+        trimmed.starts_with(prefix) && trimmed.ends_with("\")") && trimmed.contains('"')
+    };
+    if is_constructor_call("ObjectId(\"") || is_constructor_call("ISODate(\"") {
+        return trimmed.to_string();
+    }
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
 async fn run_method(
@@ -873,6 +961,150 @@ mod tests {
     }
 
     #[test]
+    fn edit_source_accepts_a_plain_find() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.edit_source("db.users.find({})"),
+            Some("users".to_string())
+        );
+        assert_eq!(
+            driver.edit_source("db.users.find({\"status\": \"active\"})"),
+            Some("users".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_source_refuses_aggregate_and_writes() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(driver.edit_source("db.users.aggregate([])"), None);
+        assert_eq!(
+            driver.edit_source("db.users.insertOne({name: \"a\"})"),
+            None
+        );
+        assert_eq!(driver.edit_source("use somedb"), None);
+        assert_eq!(driver.edit_source("show dbs"), None);
+    }
+
+    fn id_key(id: &str) -> Vec<(String, String)> {
+        vec![("_id".to_string(), id.to_string())]
+    }
+
+    #[test]
+    fn edit_sql_set_value_filters_by_id_and_infers_the_value_s_type() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let edit = query_driver::RowEdit {
+            table: "users".to_string(),
+            key: id_key("ObjectId(\"507f1f77bcf86cd799439011\")"),
+            change: query_driver::RowChange::SetValue {
+                column: "name".to_string(),
+                value: "Ada".to_string(),
+            },
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some(
+                "db.users.updateOne({_id: ObjectId(\"507f1f77bcf86cd799439011\")}, \
+                 {$set: {name: \"Ada\"}})"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn edit_sql_infers_numbers_bools_and_null_as_bare_literals() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+        let edit_for = |value: &str| query_driver::RowEdit {
+            table: "users".to_string(),
+            key: id_key("ObjectId(\"507f1f77bcf86cd799439011\")"),
+            change: query_driver::RowChange::SetValue {
+                column: "age".to_string(),
+                value: value.to_string(),
+            },
+        };
+
+        assert!(
+            driver
+                .edit_sql(&edit_for("42"))
+                .unwrap()
+                .contains("{$set: {age: 42}}")
+        );
+        assert!(
+            driver
+                .edit_sql(&edit_for("true"))
+                .unwrap()
+                .contains("{$set: {age: true}}")
+        );
+        assert!(
+            driver
+                .edit_sql(&edit_for("null"))
+                .unwrap()
+                .contains("{$set: {age: null}}")
+        );
+    }
+
+    #[test]
+    fn edit_sql_quotes_a_plain_string_id_that_is_not_an_objectid() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let edit = query_driver::RowEdit {
+            table: "users".to_string(),
+            key: id_key("abc123"),
+            change: query_driver::RowChange::DeleteRow,
+        };
+
+        // A bare "abc123" would read as a JS identifier, not a string --
+        // must come back quoted or the generated statement wouldn't parse
+        // as the filter it's meant to be.
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some("db.users.deleteOne({_id: \"abc123\"})".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_sql_delete_row_uses_the_key_as_the_filter() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let edit = query_driver::RowEdit {
+            table: "users".to_string(),
+            key: id_key("ObjectId(\"507f1f77bcf86cd799439011\")"),
+            change: query_driver::RowChange::DeleteRow,
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some("db.users.deleteOne({_id: ObjectId(\"507f1f77bcf86cd799439011\")})".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_sql_quotes_a_dotted_nested_field_being_set() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let edit = query_driver::RowEdit {
+            table: "users".to_string(),
+            key: id_key("ObjectId(\"507f1f77bcf86cd799439011\")"),
+            change: query_driver::RowChange::SetValue {
+                column: "address.city".to_string(),
+                value: "Hanoi".to_string(),
+            },
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some(
+                "db.users.updateOne({_id: ObjectId(\"507f1f77bcf86cd799439011\")}, \
+                 {$set: {\"address.city\": \"Hanoi\"}})"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn simplify_extjson_formats_an_oid_as_a_mongosh_style_literal() {
         let mut value = serde_json::json!({"$oid": "507f1f77bcf86cd799439011"});
 
@@ -1220,6 +1452,76 @@ mod tests {
             id.starts_with("ObjectId(\"") && id.ends_with("\")"),
             "was: {id:?}"
         );
+    }
+
+    /// End-to-end proof this feature actually works against a real
+    /// MongoDB, not just that it builds the right-looking string: a
+    /// document's real, `ObjectId`-typed `_id` (as displayed by `find`)
+    /// round-trips straight back into a working filter with no reverse
+    /// parsing, and the update/delete this builds actually mutates the
+    /// collection.
+    #[tokio::test]
+    async fn edit_sql_round_trips_a_real_update_and_delete_against_a_found_document() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada", "age": 30})"#)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            driver.edit_source(r#"db.users.find({})"#),
+            Some("users".to_string())
+        );
+        let result = driver
+            .execute(r#"db.users.find({"name": "Ada"})"#)
+            .await
+            .unwrap();
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        let id = docs[0]["_id"].as_str().unwrap().to_string();
+
+        let update_sql = driver
+            .edit_sql(&query_driver::RowEdit {
+                table: "users".to_string(),
+                key: id_key(&id),
+                change: query_driver::RowChange::SetValue {
+                    column: "age".to_string(),
+                    value: "31".to_string(),
+                },
+            })
+            .expect("a plain find must be editable");
+        driver.execute(&update_sql).await.unwrap();
+
+        let after_update = driver
+            .execute(&format!(r#"db.users.find({{"_id": {id}}})"#))
+            .await
+            .unwrap();
+        let QueryResult::Documents(docs) = after_update else {
+            panic!("expected Documents");
+        };
+        assert_eq!(docs[0]["age"], 31, "doc after update: {:?}", docs[0]);
+
+        let delete_sql = driver
+            .edit_sql(&query_driver::RowEdit {
+                table: "users".to_string(),
+                key: id_key(&id),
+                change: query_driver::RowChange::DeleteRow,
+            })
+            .unwrap();
+        driver.execute(&delete_sql).await.unwrap();
+
+        let after_delete = driver
+            .execute(&format!(r#"db.users.find({{"_id": {id}}})"#))
+            .await
+            .unwrap();
+        let QueryResult::Documents(docs) = after_delete else {
+            panic!("expected Documents");
+        };
+        assert!(docs.is_empty(), "doc should be deleted: {docs:?}");
     }
 
     #[tokio::test]

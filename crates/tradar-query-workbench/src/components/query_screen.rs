@@ -810,29 +810,40 @@ impl QueryScreenComponent {
             .as_deref()
             .ok_or("nothing has been run yet")?;
         let table = self.engine.edit_source(query).ok_or(
-            "only a plain SELECT from a single table can be edited here — \
-             a join, a grouped result or a subquery has no one row to change",
+            "this result can't be edited here — only a plain, single-source \
+             read qualifies (a SQL join/grouped result/subquery, a Mongo \
+             aggregate, or a multi-index Elasticsearch search all have no \
+             one row to change)",
         )?;
 
-        let schema = self
-            .engine
-            .schema()
-            .as_ref()
-            .map_err(|e| format!("the schema for this connection wasn't read: {e}"))?;
-        // A Postgres source is schema-qualified (`public.users`) while the
-        // sidebar lists bare names, so match on the last part.
-        let bare = table.rsplit('.').next().unwrap_or(&table);
-        let info = schema
-            .iter()
-            .find(|entry| entry.name.eq_ignore_ascii_case(bare))
-            .ok_or_else(|| format!("'{table}' isn't in this connection's schema"))?;
-
-        let key_columns: Vec<&str> = info
-            .columns
-            .iter()
-            .filter(|column| column.primary_key)
-            .map(|column| column.name.as_str())
-            .collect();
+        // Most drivers (SQL, Mongo) declare their key column(s) in the
+        // connection's own schema (`ColumnInfo::primary_key`); Elasticsearch
+        // names `_id` directly instead, since it's metadata no index
+        // mapping ever declares -- see `QueryDriver::edit_key_columns`'s own
+        // doc comment.
+        let key_columns: Vec<String> = match self.engine.edit_key_columns(&table) {
+            Some(columns) => columns,
+            None => {
+                let schema = self
+                    .engine
+                    .schema()
+                    .as_ref()
+                    .map_err(|e| format!("the schema for this connection wasn't read: {e}"))?;
+                // A Postgres source is schema-qualified (`public.users`)
+                // while the sidebar lists bare names, so match on the last
+                // part.
+                let bare = table.rsplit('.').next().unwrap_or(&table);
+                let info = schema
+                    .iter()
+                    .find(|entry| entry.name.eq_ignore_ascii_case(bare))
+                    .ok_or_else(|| format!("'{table}' isn't in this connection's schema"))?;
+                info.columns
+                    .iter()
+                    .filter(|column| column.primary_key)
+                    .map(|column| column.name.clone())
+                    .collect()
+            }
+        };
         if key_columns.is_empty() {
             return Err(format!(
                 "'{table}' has no primary key — there is no WHERE clause that names exactly one row"
@@ -842,7 +853,7 @@ impl QueryScreenComponent {
         let columns = self.results.columns();
         let row = self.results.selected_row().ok_or("no row is selected")?;
         let mut key = Vec::with_capacity(key_columns.len());
-        for name in key_columns {
+        for name in &key_columns {
             let index = columns
                 .iter()
                 .position(|c| c.eq_ignore_ascii_case(name))
@@ -850,7 +861,7 @@ impl QueryScreenComponent {
                     format!("the key column '{name}' isn't in this result — select it too")
                 })?;
             let value = row.get(index).cloned().unwrap_or_default();
-            key.push((name.to_string(), value));
+            key.push((name.clone(), value));
         }
         Ok((table, key))
     }
@@ -3525,7 +3536,7 @@ mod tests {
             .unwrap();
         let text = buffer_text(terminal.backend().buffer());
         assert!(
-            text.contains("single table"),
+            text.contains("single-source"),
             "the refusal must explain itself: {text}"
         );
         assert_eq!(

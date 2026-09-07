@@ -191,6 +191,11 @@ impl QueryEngine {
         self.driver.edit_sql(edit)
     }
 
+    /// The key column(s) for `source` -- see `QueryDriver::edit_key_columns`.
+    pub fn edit_key_columns(&self, source: &str) -> Option<Vec<String>> {
+        self.driver.edit_key_columns(source)
+    }
+
     /// A skeleton statement for `op` against the schema entry named
     /// `name`, restricted to `columns` -- see `Component::crud_snippet`.
     /// `None` when `name` isn't a known entry (schema failed to load, or
