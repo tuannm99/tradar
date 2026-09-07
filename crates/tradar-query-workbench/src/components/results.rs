@@ -172,18 +172,16 @@ fn preview_text(value: &str) -> String {
     }
 }
 
-/// Indices of the rows in `rows` that survive a case-insensitive substring
-/// search for `filter` in any cell -- shared by
-/// `ResultsComponent::visible_items` (drives row selection/movement) and
-/// `draw_table_body` (draws the result), so the two can never disagree
-/// about which rows are visible.
-fn filter_table_rows(rows: &[Vec<String>], filter: &str) -> Vec<usize> {
-    let needle = filter.to_lowercase();
+/// Indices of the rows in `rows` that survive `filter` -- parsed via
+/// `crate::filter::ParsedFilter` (`col:value`/`AND`/`OR`, see that module) --
+/// shared by `ResultsComponent::visible_items` (drives row
+/// selection/movement) and `draw_table_body` (draws the result), so the two
+/// can never disagree about which rows are visible.
+fn filter_table_rows(rows: &[Vec<String>], filter: &str, columns: &[String]) -> Vec<usize> {
+    let parsed = crate::filter::ParsedFilter::parse(filter, columns);
     rows.iter()
         .enumerate()
-        .filter(|(_, row)| {
-            needle.is_empty() || row.iter().any(|cell| cell.to_lowercase().contains(&needle))
-        })
+        .filter(|(_, row)| parsed.matches_row(row))
         .map(|(index, _)| index)
         .collect()
 }
@@ -224,8 +222,9 @@ fn visible_and_sorted_rows(
     filter: &str,
     sort: Option<(usize, SortDirection)>,
     column_types: &[Option<String>],
+    columns: &[String],
 ) -> Vec<usize> {
-    let mut indices = filter_table_rows(rows, filter);
+    let mut indices = filter_table_rows(rows, filter, columns);
     if let Some((column, direction)) = sort {
         let numeric = column_types
             .get(column)
@@ -447,28 +446,37 @@ impl ResultsComponent {
     /// still lands on the row the user is pointing at.
     fn visible_items(&self) -> Vec<usize> {
         match &self.last_result {
-            Some(QueryResult::Table { rows, .. }) => {
-                visible_and_sorted_rows(rows, &self.filter, self.sort, &self.column_types)
+            Some(QueryResult::Table { rows, columns, .. }) => {
+                visible_and_sorted_rows(rows, &self.filter, self.sort, &self.column_types, columns)
             }
             // No SQL schema applies to a flattened document view (see
             // `draw`'s comment on the same thing), so `column_types` is
             // always empty here -- a sorted column falls back to a string
-            // compare, same as any column of unknown type.
+            // compare, same as any column of unknown type. `columns` (the
+            // flattened table's own header) is real, though, so `col:value`
+            // still scopes correctly here.
             Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => self
                 .doc_table
                 .as_ref()
-                .map(|(_, rows)| visible_and_sorted_rows(rows, &self.filter, self.sort, &[]))
+                .map(|(columns, rows)| {
+                    visible_and_sorted_rows(rows, &self.filter, self.sort, &[], columns)
+                })
                 .unwrap_or_default(),
+            // No column list applies to the raw JSON view either -- every
+            // condition falls back to a bare substring, checked against the
+            // whole document's JSON text rather than one cell (see
+            // `ParsedFilter::matches_text`).
             Some(QueryResult::Documents(docs)) => {
-                let needle = self.filter.to_lowercase();
+                let parsed = crate::filter::ParsedFilter::parse(&self.filter, &[]);
                 docs.iter()
                     .enumerate()
                     .filter(|(_, doc)| {
-                        needle.is_empty()
-                            || serde_json::to_string(doc)
-                                .unwrap_or_default()
-                                .to_lowercase()
-                                .contains(&needle)
+                        parsed.is_empty()
+                            || parsed.matches_text(
+                                &serde_json::to_string(doc)
+                                    .unwrap_or_default()
+                                    .to_lowercase(),
+                            )
                     })
                     .map(|(index, _)| index)
                     .collect()
@@ -988,7 +996,7 @@ fn draw_table_body(
     // on a screen full of rows, "which one am I on" is otherwise
     // something you have to count. Computed once and reused below for
     // both the preview (which cell is selected) and the table body.
-    let visible_rows = visible_and_sorted_rows(rows, filter, sort, column_types);
+    let visible_rows = visible_and_sorted_rows(rows, filter, sort, column_types, columns);
     let gutter = (rows.len().to_string().chars().count() as u16).max(1);
 
     // Computed with the cell cursor as it stood before this frame's
@@ -1744,6 +1752,41 @@ mod tests {
         results.set_filter("DA NA");
 
         assert_eq!(results.selected_text().as_deref(), Some("2\tDa Nang"));
+    }
+
+    #[test]
+    fn a_column_scoped_filter_only_checks_that_column() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+
+        // "1" only ever appears in `id`, so this must not also match "Hanoi"
+        // sitting at id 1 for some other reason -- and must not match id 2
+        // just because "Da Nang" doesn't contain "1" either.
+        results.set_filter("id:1");
+
+        assert_eq!(results.selected_text().as_deref(), Some("1\tHanoi"));
+        assert_eq!(results.item_count(), 1);
+    }
+
+    #[test]
+    fn and_narrows_to_rows_matching_every_condition() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+
+        results.set_filter("city:hanoi AND id:3");
+
+        assert_eq!(results.item_count(), 1);
+        assert_eq!(results.selected_text().as_deref(), Some("3\tHanoi"));
+    }
+
+    #[test]
+    fn or_widens_to_rows_matching_either_group() {
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+
+        results.set_filter("id:1 OR city:nang");
+
+        assert_eq!(results.item_count(), 2);
     }
 
     #[test]

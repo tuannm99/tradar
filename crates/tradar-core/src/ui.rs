@@ -890,6 +890,7 @@ fn context_title(context: Context) -> &'static str {
         Context::Completion => "Autocomplete (while suggestions show)",
         Context::Snippets => "Snippet library (while open)",
         Context::ColumnPicker => "Navigator column picker (while open)",
+        Context::FilterConditions => "Filter-conditions panel (while open)",
     }
 }
 
