@@ -117,7 +117,35 @@ chốt phạm vi:
 - Rà thêm nếu có thời gian: `docs/backlog/known-issues.md`/`docs/roadmap.md`
   có mục nào liên quan Mongo/ES bị bỏ sót không, đọc lại toàn bộ
   `crates/tradar-connector-mongo`/`crates/tradar-connector-elasticsearch`
-  một lượt tìm `// TODO`/comment ghi rõ giới hạn chưa làm.
+  một lượt tìm `// TODO`/comment ghi rõ giới hạn chưa làm. (Đã grep
+  `docs/roadmap.md` — không có mục Mongo/ES nào đang mở bị bỏ sót, an toàn để
+  chọn bất kỳ hướng nào ở trên mà không đụng việc đã ghi sẵn chỗ khác.)
+
+**Ứng viên rõ nhất của Hướng B nếu muốn có sẵn 1 đường vào cụ thể (song song
+mức chi tiết với A1/A2)**: `bulkWrite` — vì nó đụng đúng chỗ code đã quen
+(`run_method` trong `crates/tradar-connector-mongo/src/lib.rs`, cùng file/
+cùng pattern với `insertOne`/`updateMany`/... hiện có), không cần đổi kiến
+trúc `ParsedQuery`/`MethodCall` như chaining đã làm.
+
+- Input mongosh thật: `db.col.bulkWrite([{insertOne: {document: {...}}},
+  {updateOne: {filter: {...}, update: {...}}}, {deleteOne: {filter: {...}}}, ...])`
+  — 1 đối số duy nhất là mảng các operation object, mỗi phần tử có đúng 1 key
+  (`insertOne`/`insertMany`/`updateOne`/`updateMany`/`replaceOne`/`deleteOne`/
+  `deleteMany`).
+- Driver Rust có sẵn `Collection::bulk_write(models: Vec<WriteModel>)` (action
+  builder, `mongodb` crate) — `WriteModel` là enum khớp gần đúng 1-1 với các
+  key trên, nên việc chính là viết 1 hàm parse JSON-object-với-1-key thành
+  `WriteModel`, lặp qua mảng, rồi gọi `bulk_write` thật — không phải tự viết
+  loop gọi từng operation tay (mất tính "1 write duy nhất" thật của MongoDB).
+  `reject_chain()` áp dụng như các method khác — không có chain nào hợp lý
+  trên `bulkWrite`.
+- Không editable (`edit_source` trả `None`) — 1 lệnh `bulkWrite` không phải
+  "1 nguồn đọc" nên không có gì để row-edit, giống `insertOne`/`updateMany`.
+- Rủi ro chính không phải logic mà là **lỗi 1 phần tử giữa chừng mảng**:
+  MongoDB thật cho phép `ordered: false` (option thứ 2 của `bulkWrite`) để
+  tiếp tục dù 1 op lỗi — quyết định có hỗ trợ option đó ngay hay để mặc định
+  `ordered: true` (dừng ở lỗi đầu tiên) là câu cần `AskUserQuestion` hỏi user
+  trước khi code, không tự chọn.
 
 ### Ngoài nhóm Mongo/ES
 
