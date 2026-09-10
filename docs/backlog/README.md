@@ -25,5 +25,6 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`crud-snippet-column-picker.md`](crud-snippet-column-picker.md) — mở rộng CRUD snippet: `c`/`r`/`u`/`d` mở column picker (checkbox multi-select) trước khi insert; Mongo/Elasticsearch được "làm thật" (trước đó bỏ qua field), Elasticsearch Delete cố tình giữ nguyên (không sang `_delete_by_query`).
 - [`multi-filter.md`](multi-filter.md) — filter kết quả mở rộng cú pháp `cột:giá_trị` + `AND`/`OR` (`ParsedFilter`, module `filter.rs` mới), panel `F3` xem/xoá từng điều kiện đã tách ra.
 - [`mongo-es-row-edit.md`](mongo-es-row-edit.md) — mở row-edit (sửa cell/xoá row) cho MongoDB (`find()` đơn giản, khoá `_id`) và Elasticsearch (`_search` 1 index, khoá `_id`) — suy luận kiểu JSON từ text gõ vào, `QueryDriver::edit_key_columns` mới, và `execute()` của ES đổi sang tách `_search` thành 1 document/hit.
+- [`mongo-chaining.md`](mongo-chaining.md) — Mongo: chain `sort`/`limit`/`skip`/`count()` sau `find()`, lệnh mới `findOne`/`countDocuments`, `find()` nhận projection — parser đổi sang `Vec<MethodCall>`, cộng fix bug có sẵn trong `split_top_level_args` (không bỏ qua nội dung chuỗi JSON khi đếm độ sâu ngoặc).
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.
