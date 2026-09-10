@@ -63,6 +63,42 @@ bảo thủ, chỉ nhận đúng 1 index tên tường minh.
   hình dạng response khác hẳn (`{responses: [...]}`), cần logic tách riêng
   nếu có nhu cầu cụ thể.
 
+**Code sketch cho A1/A2** (đọc kỹ `crates/tradar-connector-elasticsearch/src/lib.rs`
+trước khi dán, chỉ là khung để khỏi dò lại từ đầu, không phải patch chạy
+được ngay):
+
+```rust
+// Cạnh unwrap_search_hits — cùng nguyên tắc: None nếu không đúng hình
+// dạng GET .../_doc/<id> (giữ nguyên hành vi cũ), Some(1 document) nếu
+// đúng. Phân biệt với _search bằng chính response body: có "found" +
+// "_source" ở top-level, không có "hits".
+fn unwrap_get_doc(json: &serde_json::Value) -> Option<serde_json::Value> {
+    let found = json.get("found")?.as_bool()?;
+    if !found {
+        return Some(serde_json::json!({})); // "not found" -- 0 row, không lỗi
+    }
+    let id = json.get("_id")?.clone();
+    let mut doc = serde_json::Map::new();
+    doc.insert("_id".to_string(), id);
+    if let Some(serde_json::Value::Object(source)) = json.get("_source") {
+        doc.extend(source.clone());
+    }
+    Some(serde_json::Value::Object(doc))
+}
+
+// Trong execute(), sau chỗ gọi unwrap_search_hits (ES connector, hàm
+// execute() hiện tại chain match unwrap_search_hits(&json) rồi mới
+// fallback "cả response = 1 document" -- thêm 1 nhánh nữa giữa 2 cái đó
+// cho unwrap_get_doc, path phải khớp đúng "<index>/_doc/<id>" (GET, có
+// đúng 2 segment sau index, không phải _search/_count/...).
+
+// edit_source: thêm điều kiện match path shape "<index>/_doc/<id>" (path
+// đã có sẵn cách tách y hệt A trong edit_source hiện tại cho "<index>/_search"
+// -- strip_suffix("/_search") đổi thành parse "/_doc/" ở giữa, tách
+// index + id luôn từ path, không cần đọc lại response). edit_sql không
+// đổi gì -- đã đúng "_update"/"DELETE _doc/<id>" sẵn từ trước.
+```
+
 ### Hướng B: Rà lại toàn bộ 2 connector tìm bất cập khác
 
 Việc research/audit trước, không phải code ngay — mỗi gạch đầu dòng dưới
