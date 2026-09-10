@@ -28,16 +28,66 @@ và xoá hoặc làm rỗng file này khi nội dung đã cũ hoặc đã đư�
 
 ## Việc tiếp theo
 
-Không có việc cụ thể nào đang dở. User đang ưu tiên nhóm Mongo/Elasticsearch
-— hai hướng còn lại đã hỏi nhưng chưa chọn (xem lịch sử hội thoại):
-mở rộng Elasticsearch ngoài `_search` (GET .../_doc/<id>, multi-index,
-_count/_msearch), hoặc rà lại toàn bộ 2 connector tìm bất cập khác. Hỏi lại
-user trước khi tự chọn hướng nếu không có chỉ định mới.
+Không có việc cụ thể nào đang dở — session trước hết quota nên dừng lại ở
+mức **planning**, chưa code. User đang ưu tiên nhóm Mongo/Elasticsearch,
+2 hướng đã nêu nhưng chưa chọn hẳn; phác thảo sẵn từng hướng dưới đây để
+session sau (hoặc chính mình tuần sau) bắt tay vào được ngay, không phải
+suy nghĩ lại từ đầu — **vẫn phải hỏi user chọn hướng nào trước khi code**,
+đây chỉ là chuẩn bị sẵn phương án, không phải đã chốt.
 
-Ngoài nhóm Mongo/ES: `docs/roadmap.md`'s checklist tổng quan, Tier 5 (lớn,
-chưa scope) — #2 Table designer → #3 Schema diff/compare → #4
-Migration/version-control — mỗi mục cần `AskUserQuestion` riêng trước khi
-code.
+### Hướng A: Elasticsearch ngoài `_search` (dễ hơn, chia nhỏ được)
+
+Hiện trạng: `unwrap_search_hits` (thêm ở PR #2) tách `_search` thành nhiều
+row bất kể 1 hay nhiều index bị query — tức **browse** đã ổn cả với
+multi-index/wildcard rồi. Chỉ riêng **row-edit** (`edit_source`) cố tình
+bảo thủ, chỉ nhận đúng 1 index tên tường minh.
+
+- **A1 — `GET <index>/_doc/<id>` cũng tách thành 1 row có `_id`** (rủi ro
+  thấp nhất, làm trước): hiện response này vẫn là 1 "document" nguyên envelope
+  (`{_index, _id, _version, found, _source}`), khác hẳn cách `_search` hiện
+  hiển thị. Thêm một hàm `unwrap_get_doc` tương tự `unwrap_search_hits`
+  (gộp `_id` + field của `_source`), gọi trong `execute()` bên cạnh
+  `unwrap_search_hits`.
+- **A2 — Row-edit cho shape đó**: `edit_source` nhận thêm `GET
+  <index>/_doc/<id>` (path shape `<index>/_doc/<literal id>`, không phải
+  `_search`) — vì chỉ có đúng 1 document, không cần lo multi-index. Có thể
+  gộp cùng `edit_sql` hiện có (đã dùng `_update`/`DELETE _doc/<id>` sẵn).
+- **A3 — Row-edit cho multi-index/wildcard `_search`** (rủi ro cao hơn,
+  để sau nếu có nhu cầu): cần mang `_index` của từng hit vào row (thêm
+  field `_index` khi unwrap, tương tự `_id`), rồi đổi `RowEdit`/`edit_sql`
+  đọc `_index` từ chính row thay vì giả định `edit.table` là 1 index cố
+  định cho cả kết quả — đổi kiến trúc chung `RowEdit` (dùng chung với SQL/
+  Mongo), cần cân nhắc kỹ trước khi làm, không nhẹ như A1/A2.
+- Không đáng làm ngay (ghi lại để không quên): `_count` không có `hits`
+  nên không có gì để tách row (đúng, không phải thiếu sót); `_msearch`
+  hình dạng response khác hẳn (`{responses: [...]}`), cần logic tách riêng
+  nếu có nhu cầu cụ thể.
+
+### Hướng B: Rà lại toàn bộ 2 connector tìm bất cập khác
+
+Việc research/audit trước, không phải code ngay — mỗi gạch đầu dòng dưới
+đây là một *ứng viên*, cần xác nhận với user có đáng làm không trước khi
+chốt phạm vi:
+
+- **Mongo**: `bulkWrite` (nhiều write khác loại trong 1 lệnh, mongosh thật
+  có) chưa hỗ trợ; transaction/session (`startSession`) vẫn cố tình ngoài
+  phạm vi (đã ghi trong `docs/architecture.md`, không đổi trừ khi user yêu
+  cầu); `aggregate(...)` chưa nhận chain (`.toArray()` là no-op thật ra
+  không cần, nhưng `.explain()` thì có thể có ích).
+- **Elasticsearch**: không có auth (Basic/API key) hay TLS client-cert cho
+  cluster cần bảo mật; mỗi lần chạy đúng 1 request, không có `_bulk` được
+  xử lý đặc biệt (vẫn forward nguyên văn được, chỉ là không có trợ giúp gì
+  thêm); `_msearch` như trên.
+- Rà thêm nếu có thời gian: `docs/backlog/known-issues.md`/`docs/roadmap.md`
+  có mục nào liên quan Mongo/ES bị bỏ sót không, đọc lại toàn bộ
+  `crates/tradar-connector-mongo`/`crates/tradar-connector-elasticsearch`
+  một lượt tìm `// TODO`/comment ghi rõ giới hạn chưa làm.
+
+### Ngoài nhóm Mongo/ES
+
+`docs/roadmap.md`'s checklist tổng quan, Tier 5 (lớn, chưa scope) — #2
+Table designer → #3 Schema diff/compare → #4 Migration/version-control —
+mỗi mục cần `AskUserQuestion` riêng trước khi code.
 
 ## Đừng quên
 
