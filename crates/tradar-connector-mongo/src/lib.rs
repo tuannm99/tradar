@@ -1,10 +1,12 @@
 //! MongoDB connector: a minimal shell-subset parser for the literal shape
-//! `db.<collection>.<method>(<json-args>)`, not a real JS engine. Anything
-//! outside that shape — chained methods, `$where`, arbitrary expressions —
-//! is rejected with a clear error rather than guessed at. Two mongosh shell
-//! helpers are special-cased on top of that: `use <db>` switches which
-//! database `db.<collection>...` targets, and `show dbs`/`show databases`
-//! lists every database on the server.
+//! `db.<collection>.<method>(<json-args>)` with optional chained cursor
+//! calls (`.find(...).sort(...).limit(...).skip(...)`, `.count()`), not a
+//! real JS engine. Anything outside that shape — `$where`, arbitrary
+//! expressions, a chain method this doesn't recognize — is rejected with a
+//! clear error rather than guessed at. Two mongosh shell helpers are
+//! special-cased on top of that: `use <db>` switches which database
+//! `db.<collection>...` targets, and `show dbs`/`show databases` lists
+//! every database on the server.
 
 use std::sync::{Arc, Mutex};
 
@@ -21,10 +23,31 @@ use tradar_query_workbench::query_driver::{
 };
 use tradar_query_workbench::query_engine::QueryEngine;
 
+/// One `.method(args)` call in a chain -- `db.users.find({}).sort({name: 1})`
+/// parses to two of these, `find` and `sort`.
+struct MethodCall {
+    name: String,
+    args: Vec<serde_json::Value>,
+}
+
 struct ParsedQuery {
     collection: String,
-    method: String,
-    args: Vec<serde_json::Value>,
+    /// Always at least one call -- the first is the primary operation
+    /// (`find`, `insertOne`, ...), any further ones are chained cursor
+    /// calls. Which chain calls a given primary accepts (if any) is
+    /// decided in `run_method`, not here -- this only knows shell syntax,
+    /// not Mongo semantics.
+    calls: Vec<MethodCall>,
+}
+
+impl ParsedQuery {
+    fn primary(&self) -> &MethodCall {
+        &self.calls[0]
+    }
+
+    fn chain(&self) -> &[MethodCall] {
+        &self.calls[1..]
+    }
 }
 
 fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
@@ -37,30 +60,77 @@ fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
         .find('.')
         .ok_or_else(|| anyhow::anyhow!("missing collection name"))?;
     let collection = rest[..dot].to_string();
-    let rest = &rest[dot + 1..];
+    let mut rest = &rest[dot + 1..];
 
-    let paren = rest
-        .find('(')
-        .ok_or_else(|| anyhow::anyhow!("missing method call"))?;
-    let method = rest[..paren].to_string();
-    let rest = rest[paren + 1..].trim_end();
-    let args_text = rest
-        .strip_suffix(')')
-        .ok_or_else(|| anyhow::anyhow!("missing closing parenthesis"))?;
+    let mut calls = Vec::new();
+    loop {
+        let paren = rest
+            .find('(')
+            .ok_or_else(|| anyhow::anyhow!("missing method call"))?;
+        let name = rest[..paren].trim().to_string();
+        let after_paren = &rest[paren + 1..];
+        let close = find_matching_close_paren(after_paren)
+            .ok_or_else(|| anyhow::anyhow!("missing closing parenthesis"))?;
+        let args_text = &after_paren[..close];
+        let args = split_top_level_args(args_text)?
+            .into_iter()
+            .map(|arg| serde_json::from_str(arg.trim()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("invalid JSON argument: {e}"))?;
+        calls.push(MethodCall { name, args });
 
-    let args = split_top_level_args(args_text)?
-        .into_iter()
-        .map(|arg| serde_json::from_str(arg.trim()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("invalid JSON argument: {e}"))?;
+        let after_call = after_paren[close + 1..].trim_start();
+        if let Some(next) = after_call.strip_prefix('.') {
+            rest = next;
+        } else if after_call.is_empty() {
+            break;
+        } else {
+            anyhow::bail!("unexpected text after a method call: {after_call:?}");
+        }
+    }
 
-    Ok(ParsedQuery {
-        collection,
-        method,
-        args,
-    })
+    Ok(ParsedQuery { collection, calls })
 }
 
+/// The index of the `)` matching the `(` that ended right before `text`
+/// starts, tracking `(`/`{`/`[` nesting and skipping over JSON string
+/// contents (so a `)`/`}` inside a quoted string can't be mistaken for the
+/// real close). `None` if the parens never balance. Needed once chained
+/// calls exist: the old code just took everything up to the last `)` in
+/// the buffer, which only worked because there was never more than one
+/// call to find the end of.
+fn find_matching_close_paren(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' | '{' | '[' => depth += 1,
+            ')' if depth == 0 => return Some(i),
+            ')' | '}' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Splits `text` (the args of one call, comma-separated JSON values) on
+/// top-level commas -- tracking `{}`/`[]` depth and skipping over JSON
+/// string contents, the same way `find_matching_close_paren` does, and for
+/// the same reason: a `}`/`,` inside a quoted string value (e.g.
+/// `{"note": "a, b"}`) isn't a real delimiter, and counting it as one
+/// either miscounts the nesting depth or splits one argument into two.
 fn split_top_level_args(text: &str) -> anyhow::Result<Vec<&str>> {
     let text = text.trim();
     if text.is_empty() {
@@ -69,8 +139,21 @@ fn split_top_level_args(text: &str) -> anyhow::Result<Vec<&str>> {
     let mut args = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
+    let mut in_string = false;
+    let mut escaped = false;
     for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
         match c {
+            '"' => in_string = true,
             '{' | '[' => depth += 1,
             '}' | ']' => depth -= 1,
             ',' if depth == 0 => {
@@ -150,12 +233,13 @@ impl QueryDriver for MongoDriver {
         Ok(())
     }
 
-    /// The shell shapes this driver actually parses (the six methods, plus
-    /// `use`/`show dbs`) are a closed set -- completing anything else there
-    /// would mislead. The `$`-operators are different: they're free-form
-    /// JSON keys *inside* a method's filter/update/pipeline argument, so
-    /// every one MongoDB itself recognizes is fair to suggest regardless of
-    /// which method it ends up nested in.
+    /// The shell shapes this driver actually parses (the primary methods,
+    /// the chained cursor calls `find(...)` alone accepts, plus `use`/`show
+    /// dbs`) are a closed set -- completing anything else there would
+    /// mislead. The `$`-operators are different: they're free-form JSON
+    /// keys *inside* a method's filter/update/pipeline argument, so every
+    /// one MongoDB itself recognizes is fair to suggest regardless of which
+    /// method it ends up nested in.
     fn keywords(&self) -> &'static [&'static str] {
         &[
             "db",
@@ -164,6 +248,8 @@ impl QueryDriver for MongoDriver {
             "dbs",
             "databases",
             "find",
+            "findOne",
+            "countDocuments",
             "aggregate",
             "insertOne",
             "insertMany",
@@ -171,6 +257,11 @@ impl QueryDriver for MongoDriver {
             "updateMany",
             "deleteOne",
             "deleteMany",
+            // Chained cursor calls, `find(...)` only.
+            "sort",
+            "limit",
+            "skip",
+            "count",
             // Query/filter operators.
             "$eq",
             "$gt",
@@ -400,7 +491,7 @@ impl QueryDriver for MongoDriver {
         let parsed = parse_shell_query(trimmed)?;
         let db = self.database();
         let collection = db.collection::<Document>(&parsed.collection);
-        let mut result = run_method(&collection, &parsed.method, &parsed.args).await?;
+        let mut result = run_method(&collection, parsed.primary(), parsed.chain()).await?;
         // Every arm of `run_method` produces `Documents` via either
         // `into_relaxed_extjson()` or serializing a driver result struct
         // that itself contains `Bson` values (`inserted_id`, ...) -- both
@@ -415,18 +506,29 @@ impl QueryDriver for MongoDriver {
         Ok(result)
     }
 
-    /// The collection a `find` reads from -- `None` for `aggregate` and
-    /// every write method, same conservative "when in doubt, refuse"
-    /// principle `single_table_source` uses for SQL: `aggregate`'s pipeline
-    /// can reshape/join/group documents well past "one row = one document
-    /// in this collection", so there's no source a generated
-    /// `updateOne`/`deleteOne` could safely aim at. A `find` call always
-    /// returns whole documents (its own 2nd projection argument is already
-    /// rejected by `run_method`, see `execute_find_rejects_a_projection_argument_it_does_not_support`),
-    /// so every field -- `_id` included -- is always present to edit/key by.
+    /// The collection a `find` reads from -- `None` for `aggregate`,
+    /// `findOne`/`countDocuments`, and every write method, same
+    /// conservative "when in doubt, refuse" principle `single_table_source`
+    /// uses for SQL: `aggregate`'s pipeline can reshape/join/group
+    /// documents well past "one row = one document in this collection", so
+    /// there's no source a generated `updateOne`/`deleteOne` could safely
+    /// aim at. Chained `.sort()`/`.limit()`/`.skip()` don't change that --
+    /// they narrow/reorder which documents `find` returns, never reshape
+    /// one -- so those stay editable; a chained `.count()` doesn't return
+    /// documents at all, so that one isn't. A plain `find`'s own optional
+    /// 2nd (projection) argument can still hide the key/edited field from
+    /// the result, but that's caught generically downstream (`editable_row`
+    /// errors "the key column '_id' isn't in this result"), not here.
     fn edit_source(&self, query: &str) -> Option<String> {
         let parsed = parse_shell_query(query.trim()).ok()?;
-        (parsed.method == "find").then_some(parsed.collection)
+        if parsed.primary().name != "find" {
+            return None;
+        }
+        let chain_is_safe = parsed
+            .chain()
+            .iter()
+            .all(|call| matches!(call.name.as_str(), "sort" | "limit" | "skip"));
+        chain_is_safe.then(|| parsed.collection.clone())
     }
 
     /// Builds the `updateOne`/`deleteOne` this driver would run for `edit`,
@@ -611,9 +713,12 @@ fn mongo_value_literal(value: &str) -> String {
 
 async fn run_method(
     collection: &mongodb::Collection<Document>,
-    method: &str,
-    args: &[serde_json::Value],
+    primary: &MethodCall,
+    chain: &[MethodCall],
 ) -> anyhow::Result<QueryResult> {
+    let method = primary.name.as_str();
+    let args = &primary.args;
+
     let doc_arg = |i: usize| -> anyhow::Result<Document> {
         let value = args
             .get(i)
@@ -632,30 +737,120 @@ async fn run_method(
         Ok(())
     };
 
+    // Only `find` accepts a chain (`.sort()`/`.limit()`/`.skip()`/
+    // `.count()`, applied below) -- every other method rejects one outright
+    // rather than silently ignoring it.
+    let reject_chain = || -> anyhow::Result<()> {
+        if let Some(call) = chain.first() {
+            anyhow::bail!("{method}(...) does not support chained .{}()", call.name);
+        }
+        Ok(())
+    };
+
     match method {
         "find" => {
-            // Only a filter is supported; projection (a 2nd argument) is not
-            // implemented yet.
+            // Filter, and now an optional projection as the 2nd argument.
+            max_args(2)?;
+            let filter = if args.is_empty() {
+                Document::new()
+            } else {
+                doc_arg(0)?
+            };
+            let mut builder = collection.find(filter);
+            if let Some(projection) = args.get(1) {
+                builder = builder.projection(json_to_document(projection.clone())?);
+            }
+
+            // `.count()` has to be the chain's last call (nothing after it
+            // means anything -- there are no more documents to modify how
+            // you fetch), everything before it configures the cursor.
+            let mut wants_count = false;
+            for (i, call) in chain.iter().enumerate() {
+                match call.name.as_str() {
+                    "sort" => {
+                        if call.args.len() != 1 {
+                            anyhow::bail!("sort(...) requires exactly 1 argument");
+                        }
+                        builder = builder.sort(json_to_document(call.args[0].clone())?);
+                    }
+                    "limit" => {
+                        let n = call.args.first().and_then(|v| v.as_i64()).ok_or_else(|| {
+                            anyhow::anyhow!("limit(...) requires a numeric argument")
+                        })?;
+                        builder = builder.limit(n);
+                    }
+                    "skip" => {
+                        let n = call.args.first().and_then(|v| v.as_u64()).ok_or_else(|| {
+                            anyhow::anyhow!("skip(...) requires a numeric argument")
+                        })?;
+                        builder = builder.skip(n);
+                    }
+                    "count" if i == chain.len() - 1 => {
+                        if !call.args.is_empty() {
+                            anyhow::bail!("count() does not take arguments");
+                        }
+                        wants_count = true;
+                    }
+                    "count" => anyhow::bail!("count() must be the last call in the chain"),
+                    other => anyhow::bail!(
+                        "find(...) does not support chained .{other}() -- only \
+                         .sort()/.limit()/.skip()/.count() are implemented"
+                    ),
+                }
+            }
+
+            let mut cursor = builder.await?;
+            let mut docs = Vec::new();
+            while let Some(doc) = cursor.try_next().await? {
+                docs.push(Bson::Document(doc).into_relaxed_extjson());
+            }
+            if wants_count {
+                Ok(QueryResult::Documents(vec![
+                    serde_json::json!({ "count": docs.len() }),
+                ]))
+            } else {
+                Ok(QueryResult::Documents(docs))
+            }
+        }
+        "findOne" => {
+            reject_chain()?;
+            max_args(2)?;
+            let filter = if args.is_empty() {
+                Document::new()
+            } else {
+                doc_arg(0)?
+            };
+            let mut builder = collection.find_one(filter);
+            if let Some(projection) = args.get(1) {
+                builder = builder.projection(json_to_document(projection.clone())?);
+            }
+            let docs = match builder.await? {
+                Some(doc) => vec![Bson::Document(doc).into_relaxed_extjson()],
+                None => Vec::new(),
+            };
+            Ok(QueryResult::Documents(docs))
+        }
+        "countDocuments" => {
+            reject_chain()?;
             max_args(1)?;
             let filter = if args.is_empty() {
                 Document::new()
             } else {
                 doc_arg(0)?
             };
-            let mut cursor = collection.find(filter).await?;
-            let mut docs = Vec::new();
-            while let Some(doc) = cursor.try_next().await? {
-                docs.push(Bson::Document(doc).into_relaxed_extjson());
-            }
-            Ok(QueryResult::Documents(docs))
+            let count = collection.count_documents(filter).await?;
+            Ok(QueryResult::Documents(vec![
+                serde_json::json!({ "count": count }),
+            ]))
         }
         "aggregate" => {
+            reject_chain()?;
             // Real Mongo shell syntax passes a single pipeline array:
             // db.<coll>.aggregate([{"$match": ...}, {"$group": ...}]). Unwrap
             // that into individual stage documents. Fall back to treating
             // each top-level argument as its own stage document, for the
             // non-shell varargs form: aggregate({stage}, {stage}).
-            let stage_values: Vec<serde_json::Value> = match args {
+            let stage_values: Vec<serde_json::Value> = match args.as_slice() {
                 [serde_json::Value::Array(stages)] => stages.clone(),
                 other => other.to_vec(),
             };
@@ -671,11 +866,13 @@ async fn run_method(
             Ok(QueryResult::Documents(docs))
         }
         "insertOne" => {
+            reject_chain()?;
             max_args(1)?;
             let result = collection.insert_one(doc_arg(0)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "insertMany" => {
+            reject_chain()?;
             max_args(1)?;
             let docs_arg = args
                 .first()
@@ -690,22 +887,26 @@ async fn run_method(
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "updateOne" => {
+            reject_chain()?;
             // filter, update; a 3rd "options" argument is not supported.
             max_args(2)?;
             let result = collection.update_one(doc_arg(0)?, doc_arg(1)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "updateMany" => {
+            reject_chain()?;
             max_args(2)?;
             let result = collection.update_many(doc_arg(0)?, doc_arg(1)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "deleteOne" => {
+            reject_chain()?;
             max_args(1)?;
             let result = collection.delete_one(doc_arg(0)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
         }
         "deleteMany" => {
+            reject_chain()?;
             max_args(1)?;
             let result = collection.delete_many(doc_arg(0)?).await?;
             Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
@@ -1104,6 +1305,127 @@ mod tests {
         );
     }
 
+    /// A `Collection` handle against an address nothing listens on --
+    /// `Client::with_uri_str`/`with_options` only parse the URI and set up
+    /// internal state, they don't connect (MongoDB drivers connect lazily,
+    /// on the first real operation) -- so this is safe to build without
+    /// Docker or network access, as long as the test never actually awaits
+    /// an operation on it. Every `run_method` test below relies on that:
+    /// each one exercises a validation error that `run_method` returns
+    /// *before* it ever awaits the driver call that would need a real
+    /// server.
+    async fn unreachable_collection() -> mongodb::Collection<Document> {
+        let client = mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/test")
+            .await
+            .unwrap();
+        client.database("test").collection::<Document>("users")
+    }
+
+    #[tokio::test]
+    async fn run_method_rejects_a_chain_on_a_method_that_does_not_support_one() {
+        let collection = unreachable_collection().await;
+        let primary = MethodCall {
+            name: "insertOne".to_string(),
+            args: vec![serde_json::json!({"name": "Ada"})],
+        };
+        let chain = vec![MethodCall {
+            name: "sort".to_string(),
+            args: vec![],
+        }];
+
+        let result = run_method(&collection, &primary, &chain).await;
+
+        assert!(result.is_err(), "insertOne must refuse a chained call");
+    }
+
+    #[tokio::test]
+    async fn run_method_rejects_count_not_at_the_end_of_the_chain() {
+        let collection = unreachable_collection().await;
+        let primary = MethodCall {
+            name: "find".to_string(),
+            args: vec![],
+        };
+        let chain = vec![
+            MethodCall {
+                name: "count".to_string(),
+                args: vec![],
+            },
+            MethodCall {
+                name: "limit".to_string(),
+                args: vec![serde_json::json!(1)],
+            },
+        ];
+
+        let result = run_method(&collection, &primary, &chain).await;
+
+        assert!(result.is_err(), "count() must be the chain's last call");
+    }
+
+    #[tokio::test]
+    async fn run_method_rejects_an_unrecognized_chain_call() {
+        let collection = unreachable_collection().await;
+        let primary = MethodCall {
+            name: "find".to_string(),
+            args: vec![],
+        };
+        let chain = vec![MethodCall {
+            name: "forEach".to_string(),
+            args: vec![],
+        }];
+
+        let result = run_method(&collection, &primary, &chain).await;
+
+        assert!(result.is_err(), "forEach is not a real JS engine call");
+    }
+
+    #[tokio::test]
+    async fn run_method_rejects_a_non_numeric_limit_or_skip() {
+        let collection = unreachable_collection().await;
+        let primary = MethodCall {
+            name: "find".to_string(),
+            args: vec![],
+        };
+
+        let bad_limit = run_method(
+            &collection,
+            &primary,
+            &[MethodCall {
+                name: "limit".to_string(),
+                args: vec![serde_json::json!("ten")],
+            }],
+        )
+        .await;
+        assert!(bad_limit.is_err());
+
+        let bad_skip = run_method(
+            &collection,
+            &primary,
+            &[MethodCall {
+                name: "skip".to_string(),
+                args: vec![serde_json::json!("five")],
+            }],
+        )
+        .await;
+        assert!(bad_skip.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_method_rejects_sort_with_the_wrong_argument_count() {
+        let collection = unreachable_collection().await;
+        let primary = MethodCall {
+            name: "find".to_string(),
+            args: vec![],
+        };
+        let chain = vec![MethodCall {
+            name: "sort".to_string(),
+            args: vec![],
+        }];
+
+        let result = run_method(&collection, &primary, &chain).await;
+
+        assert!(result.is_err(), "sort() with no argument must be rejected");
+    }
+
     #[test]
     fn simplify_extjson_formats_an_oid_as_a_mongosh_style_literal() {
         let mut value = serde_json::json!({"$oid": "507f1f77bcf86cd799439011"});
@@ -1204,8 +1526,12 @@ mod tests {
         let parsed = parse_shell_query(r#"db.users.find({"active": true})"#).unwrap();
 
         assert_eq!(parsed.collection, "users");
-        assert_eq!(parsed.method, "find");
-        assert_eq!(parsed.args, vec![serde_json::json!({"active": true})]);
+        assert_eq!(parsed.calls.len(), 1);
+        assert_eq!(parsed.primary().name, "find");
+        assert_eq!(
+            parsed.primary().args,
+            vec![serde_json::json!({"active": true})]
+        );
     }
 
     #[test]
@@ -1215,9 +1541,9 @@ mod tests {
                 .unwrap();
 
         assert_eq!(parsed.collection, "users");
-        assert_eq!(parsed.method, "updateOne");
+        assert_eq!(parsed.primary().name, "updateOne");
         assert_eq!(
-            parsed.args,
+            parsed.primary().args,
             vec![
                 serde_json::json!({"_id": 1}),
                 serde_json::json!({"$set": {"name": "Ada"}})
@@ -1229,7 +1555,7 @@ mod tests {
     fn parses_a_method_call_with_no_arguments() {
         let parsed = parse_shell_query("db.users.find()").unwrap();
 
-        assert_eq!(parsed.args, Vec::<serde_json::Value>::new());
+        assert_eq!(parsed.primary().args, Vec::<serde_json::Value>::new());
     }
 
     #[test]
@@ -1240,6 +1566,48 @@ mod tests {
     #[test]
     fn rejects_malformed_json_arguments() {
         assert!(parse_shell_query("db.users.find({not json})").is_err());
+    }
+
+    #[test]
+    fn parses_a_chained_find_into_a_primary_call_plus_the_chain() {
+        let parsed =
+            parse_shell_query(r#"db.users.find({}).sort({"name": 1}).limit(10).skip(5)"#).unwrap();
+
+        assert_eq!(parsed.collection, "users");
+        assert_eq!(parsed.primary().name, "find");
+        let chain: Vec<&str> = parsed.chain().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(chain, vec!["sort", "limit", "skip"]);
+        assert_eq!(parsed.chain()[0].args, vec![serde_json::json!({"name": 1})]);
+        assert_eq!(parsed.chain()[1].args, vec![serde_json::json!(10)]);
+        assert_eq!(parsed.chain()[2].args, vec![serde_json::json!(5)]);
+    }
+
+    #[test]
+    fn parses_a_trailing_count_with_no_arguments() {
+        let parsed = parse_shell_query(r#"db.users.find({}).count()"#).unwrap();
+
+        assert_eq!(parsed.chain().len(), 1);
+        assert_eq!(parsed.chain()[0].name, "count");
+        assert_eq!(parsed.chain()[0].args, Vec::<serde_json::Value>::new());
+    }
+
+    #[test]
+    fn rejects_a_chain_call_missing_its_own_closing_paren() {
+        assert!(parse_shell_query(r#"db.users.find({}).sort({"name": 1}"#).is_err());
+    }
+
+    #[test]
+    fn a_brace_inside_a_json_string_argument_does_not_confuse_the_call_boundary() {
+        // The chain call boundary is found by `find_matching_close_paren`,
+        // which has to skip over string contents -- a naive brace-depth
+        // scan would miscount on a value like this.
+        let parsed = parse_shell_query(r#"db.users.find({"note": "a } b"}).limit(1)"#).unwrap();
+
+        assert_eq!(
+            parsed.primary().args,
+            vec![serde_json::json!({"note": "a } b"})]
+        );
+        assert_eq!(parsed.chain()[0].name, "limit");
     }
 
     fn doc_from_json(json: serde_json::Value) -> Document {
@@ -1575,7 +1943,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_find_rejects_a_projection_argument_it_does_not_support() {
+    async fn execute_find_with_a_projection_returns_only_the_selected_fields() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada", "age": 30})"#)
+            .await
+            .unwrap();
+
+        let result = driver
+            .execute(r#"db.users.find({}, {"name": 1, "_id": 0})"#)
+            .await
+            .unwrap();
+
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["name"], "Ada");
+        assert!(
+            docs[0].get("age").is_none(),
+            "age should have been excluded by the projection: {:?}",
+            docs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_find_chained_sort_limit_skip_orders_and_paginates() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        for n in [3, 1, 2] {
+            driver
+                .execute(&format!(r#"db.users.insertOne({{"n": {n}}})"#))
+                .await
+                .unwrap();
+        }
+
+        // Ascending by n, skip the smallest, limit to 1 -- should land on
+        // exactly the middle value.
+        let result = driver
+            .execute(r#"db.users.find({}).sort({"n": 1}).skip(1).limit(1)"#)
+            .await
+            .unwrap();
+
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(docs.len(), 1, "docs were: {docs:?}");
+        assert_eq!(docs[0]["n"], 2);
+    }
+
+    #[tokio::test]
+    async fn execute_find_chained_count_reports_the_matching_count_not_documents() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        for _ in 0..3 {
+            driver
+                .execute(r#"db.users.insertOne({"active": true})"#)
+                .await
+                .unwrap();
+        }
+
+        let result = driver
+            .execute(r#"db.users.find({"active": true}).count()"#)
+            .await
+            .unwrap();
+
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(docs, vec![serde_json::json!({"count": 3})]);
+    }
+
+    #[tokio::test]
+    async fn execute_find_one_returns_a_single_document_or_none() {
         let container = Mongo::new().start().await.unwrap();
         let port = container.get_host_port_ipv4(27017).await.unwrap();
         let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
@@ -1585,12 +2032,65 @@ mod tests {
             .await
             .unwrap();
 
-        let result = driver.execute(r#"db.users.find({}, {"name": 1})"#).await;
+        let found = driver
+            .execute(r#"db.users.findOne({"name": "Ada"})"#)
+            .await
+            .unwrap();
+        let QueryResult::Documents(docs) = found else {
+            panic!("expected Documents");
+        };
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["name"], "Ada");
 
-        assert!(
-            result.is_err(),
-            "expected find with a projection argument to be rejected, got {result:?}"
+        let missing = driver
+            .execute(r#"db.users.findOne({"name": "nobody"})"#)
+            .await
+            .unwrap();
+        let QueryResult::Documents(docs) = missing else {
+            panic!("expected Documents");
+        };
+        assert!(docs.is_empty(), "docs were: {docs:?}");
+    }
+
+    #[tokio::test]
+    async fn execute_count_documents_reports_the_matching_count() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        for active in [true, true, false] {
+            driver
+                .execute(&format!(r#"db.users.insertOne({{"active": {active}}})"#))
+                .await
+                .unwrap();
+        }
+
+        let result = driver
+            .execute(r#"db.users.countDocuments({"active": true})"#)
+            .await
+            .unwrap();
+
+        let QueryResult::Documents(docs) = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(docs, vec![serde_json::json!({"count": 2})]);
+    }
+
+    #[test]
+    fn edit_source_still_accepts_a_chained_find_with_sort_limit_skip() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.edit_source(r#"db.users.find({}).sort({"name": 1}).limit(10).skip(5)"#),
+            Some("users".to_string())
         );
+    }
+
+    #[test]
+    fn edit_source_refuses_a_chained_count() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(driver.edit_source(r#"db.users.find({}).count()"#), None);
     }
 
     #[tokio::test]
