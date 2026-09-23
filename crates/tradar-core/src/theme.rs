@@ -114,6 +114,113 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// The "Dracula" preset (<https://draculatheme.com>), true 24-bit hex
+    /// straight from its published palette -- unlike `default()`'s indexed
+    /// colors (chosen for terminals without truecolor support), a *named*
+    /// preset is picked specifically to look like the real thing, and
+    /// truecolor is common enough now that that trade favors fidelity.
+    pub fn dracula() -> Self {
+        let background = Color::Rgb(40, 42, 54);
+        let current_line = Color::Rgb(68, 71, 90);
+        let foreground = Color::Rgb(248, 248, 242);
+        let comment = Color::Rgb(98, 114, 164);
+        let cyan = Color::Rgb(139, 233, 253);
+        let green = Color::Rgb(80, 250, 123);
+        let orange = Color::Rgb(255, 184, 108);
+        let pink = Color::Rgb(255, 121, 198);
+        let purple = Color::Rgb(189, 147, 249);
+        let red = Color::Rgb(255, 85, 85);
+        let yellow = Color::Rgb(241, 250, 140);
+
+        Self {
+            border: comment,
+            border_focused: purple,
+            title: comment,
+            title_focused: cyan,
+
+            text: foreground,
+            text_dim: comment,
+
+            selection_bg: current_line,
+            selection_fg: foreground,
+
+            error: red,
+            warning: orange,
+            accent: green,
+
+            status_bar_bg: current_line,
+            status_bar_fg: foreground,
+            status_key: yellow,
+
+            tab_active_bg: purple,
+            tab_active_fg: background,
+            tab_inactive: comment,
+
+            syntax_keyword: pink,
+            syntax_string: green,
+            syntax_number: orange,
+            syntax_comment: comment,
+            syntax_type: cyan,
+            syntax_function: purple,
+            syntax_variable: foreground,
+            syntax_punctuation: foreground,
+        }
+    }
+
+    /// The "Nord" preset (<https://www.nordtheme.com>), same true-hex
+    /// reasoning as `dracula()` -- role choices follow the palette's own
+    /// Polar Night/Snow Storm/Frost/Aurora groupings (see the project's
+    /// "Colors and Palettes" docs) rather than reusing `default()`'s
+    /// indexed values.
+    pub fn nord() -> Self {
+        let polar0 = Color::Rgb(46, 52, 64);
+        let polar1 = Color::Rgb(59, 66, 82);
+        let polar3 = Color::Rgb(76, 86, 106);
+        let snow4 = Color::Rgb(216, 222, 233);
+        let snow6 = Color::Rgb(236, 239, 244);
+        let frost7 = Color::Rgb(143, 188, 187);
+        let frost8 = Color::Rgb(136, 192, 208);
+        let frost9 = Color::Rgb(129, 161, 193);
+        let aurora_red = Color::Rgb(191, 97, 106);
+        let aurora_yellow = Color::Rgb(235, 203, 139);
+        let aurora_green = Color::Rgb(163, 190, 140);
+        let aurora_purple = Color::Rgb(180, 142, 173);
+
+        Self {
+            border: polar3,
+            border_focused: frost8,
+            title: polar3,
+            title_focused: frost9,
+
+            text: snow6,
+            text_dim: snow4,
+
+            selection_bg: Color::Rgb(67, 76, 94),
+            selection_fg: snow6,
+
+            error: aurora_red,
+            warning: aurora_yellow,
+            accent: aurora_green,
+
+            status_bar_bg: polar1,
+            status_bar_fg: snow4,
+            status_key: aurora_yellow,
+
+            tab_active_bg: frost8,
+            tab_active_fg: polar0,
+            tab_inactive: polar3,
+
+            syntax_keyword: frost9,
+            syntax_string: aurora_green,
+            syntax_number: aurora_purple,
+            syntax_comment: polar3,
+            syntax_type: frost7,
+            syntax_function: frost8,
+            syntax_variable: snow4,
+            syntax_punctuation: snow4,
+        }
+    }
+
     /// Overrides individual roles from `[theme]` in `config.toml`. Keys are
     /// the field names above in kebab-case (`border-focused`,
     /// `syntax-keyword`, ...); values are anything `ratatui`'s `Color`
@@ -164,6 +271,17 @@ impl Theme {
             "syntax-punctuation" => &mut self.syntax_punctuation,
             _ => return None,
         })
+    }
+
+    /// The preset named `name` in `[theme]`'s `preset` key, or `None` for an
+    /// unrecognized name -- kept next to `dracula()`/`nord()` so the list of
+    /// valid names lives in exactly one place.
+    pub fn by_preset_name(name: &str) -> Option<Self> {
+        match name {
+            "dracula" => Some(Self::dracula()),
+            "nord" => Some(Self::nord()),
+            _ => None,
+        }
     }
 }
 
@@ -231,5 +349,39 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("not a valid color"), "{err}");
+    }
+
+    #[test]
+    fn dracula_and_nord_differ_from_the_default_and_each_other() {
+        let default = Theme::default();
+        let dracula = Theme::dracula();
+        let nord = Theme::nord();
+
+        assert_ne!(dracula, default);
+        assert_ne!(nord, default);
+        assert_ne!(dracula, nord);
+    }
+
+    #[test]
+    fn by_preset_name_finds_dracula_and_nord_and_rejects_an_unknown_name() {
+        assert_eq!(Theme::by_preset_name("dracula"), Some(Theme::dracula()));
+        assert_eq!(Theme::by_preset_name("nord"), Some(Theme::nord()));
+        assert_eq!(Theme::by_preset_name("solarized"), None);
+    }
+
+    #[test]
+    fn an_override_still_applies_on_top_of_a_preset() {
+        let mut theme = Theme::dracula();
+
+        theme
+            .apply_overrides(&overrides(&[("error", "#ff0000")]))
+            .unwrap();
+
+        assert_eq!(theme.error, Color::Rgb(255, 0, 0));
+        assert_eq!(
+            theme.accent,
+            Theme::dracula().accent,
+            "roles not named in the override must keep the preset's own color"
+        );
     }
 }

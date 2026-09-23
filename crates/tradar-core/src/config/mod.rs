@@ -5,7 +5,8 @@
 //!
 //! ```toml
 //! [theme]
-//! border-focused = "#89b4fa"
+//! preset = "dracula"          # optional base palette ("dracula" or "nord"); omit for the built-in default
+//! border-focused = "#89b4fa"  # per-role overrides still apply on top of the preset
 //! error = "red"
 //!
 //! [keymap.global]
@@ -67,11 +68,22 @@ impl Keys {
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     #[serde(default)]
-    theme: HashMap<String, String>,
+    theme: ThemeSection,
     #[serde(default)]
     keymap: HashMap<String, HashMap<String, Keys>>,
     #[serde(default)]
     editor: EditorSection,
+}
+
+/// `[theme]`'s own two-part shape: an optional named preset as the base
+/// palette, then per-role overrides on top of it -- `preset` is pulled out
+/// of the flattened map rather than living in it, since it picks a whole
+/// `Theme`, not a single `Color` `Theme::apply_overrides` could parse.
+#[derive(Debug, Default, Deserialize)]
+struct ThemeSection {
+    preset: Option<String>,
+    #[serde(flatten)]
+    overrides: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -112,7 +124,11 @@ fn load(path: &std::path::Path) -> anyhow::Result<(Theme, Keymap, bool)> {
     let contents = std::fs::read_to_string(path)?;
     let file: ConfigFile = toml::from_str(&contents)?;
 
-    theme.apply_overrides(&file.theme)?;
+    if let Some(name) = &file.theme.preset {
+        theme = Theme::by_preset_name(name)
+            .ok_or_else(|| anyhow::anyhow!("theme.preset: unknown preset '{name}'"))?;
+    }
+    theme.apply_overrides(&file.theme.overrides)?;
 
     let keymap_overrides: HashMap<String, HashMap<String, Vec<String>>> = file
         .keymap
@@ -174,6 +190,38 @@ mod tests {
         let (theme, ..) = load(&path).unwrap();
 
         assert_eq!(theme.error, Color::Rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn a_preset_name_selects_its_theme() {
+        let (_dir, path) = write_config("[theme]\npreset = \"dracula\"\n");
+
+        let (theme, ..) = load(&path).unwrap();
+
+        assert_eq!(theme, crate::theme::Theme::dracula());
+    }
+
+    #[test]
+    fn an_override_still_applies_on_top_of_a_preset_from_config() {
+        let (_dir, path) = write_config("[theme]\npreset = \"nord\"\nerror = \"#ff0000\"\n");
+
+        let (theme, ..) = load(&path).unwrap();
+
+        assert_eq!(theme.error, Color::Rgb(255, 0, 0));
+        assert_eq!(
+            theme.accent,
+            crate::theme::Theme::nord().accent,
+            "roles not overridden must keep the preset's own color"
+        );
+    }
+
+    #[test]
+    fn an_unknown_preset_name_is_an_error() {
+        let (_dir, path) = write_config("[theme]\npreset = \"solarized\"\n");
+
+        let err = load(&path).unwrap_err();
+
+        assert!(err.to_string().contains("unknown preset"), "{err}");
     }
 
     #[test]
