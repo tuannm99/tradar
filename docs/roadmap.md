@@ -17,8 +17,8 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Tier 5 — #3 Schema diff/compare
 - [x] Tier 5 — #2 Table designer
 - [x] Tier 5 — #4 Migration/version-control
-- [ ] Tier 6 — #11 Group-by trong grid
-- [ ] Tier 6 — #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK
+- [ ] Tier 6 — #11 Group-by trong grid — bỏ qua 2026-09-23
+- [x] Tier 6 — #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK
 
 **Connector mới**
 
@@ -77,8 +77,8 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 8. ~~Import CSV/Excel/JSON vào bảng qua UI trong TUI grid~~ — **bỏ, đổi hướng sang CLI (2026-08-19)**, xem mục "`tradar` CLI: import/export" ngay bên dưới thay vì làm trong `Data grid` này.
 9. **Sort theo cột (click header)** — xong (2026-08-19), xem `docs/backlog/sort-by-column.md`.
 10. ~~Multi-filter kết hợp~~ — xong (2026-09-07), xem `docs/backlog/multi-filter.md`. Chốt qua `AskUserQuestion`: kết hợp cả hai hướng (mở rộng cú pháp ô filter `/` hiện có bằng `cột:giá_trị` + `AND`/`OR`, cộng panel `F3` xem/xoá từng điều kiện), hỗ trợ cả AND lẫn OR.
-11. **Group-by trong grid** — client-side, cần nghĩ trước cả UI (group theo cột nào, hiện aggregate gì) lẫn có đáng làm trong một results grid vốn thiết kế cho xem/sửa row-by-row hay không (khác hẳn mục đích của group-by).
-12. **Mở rộng edit-cell/delete-row ngoài single-table-with-PK** — **rủi ro cao nhất trong toàn bộ danh sách**, cân nhắc kỹ trước khi nhận làm: `single_table_source`/`build_sql_edit` cố tình bảo thủ (từ chối join/view/no-PK) đúng vì đoán sai bảng nguồn nghĩa là sinh `UPDATE`/`DELETE` nhắm sai chỗ — hậu quả là mất/sửa nhầm dữ liệu thật, không phải một tính năng thiếu vô hại. Nếu làm, cần một cơ chế xác định nguồn đáng tin hơn heuristic hiện tại (có thể là hỏi DB trực tiếp qua `EXPLAIN`/system catalog thay vì tự parse SQL), và có lẽ vẫn nên giữ nguyên tắc "từ chối rồi nói rõ lý do" cho các trường hợp còn mơ hồ thay vì cố đoán bừa.
+11. **Group-by trong grid** — **bỏ qua 2026-09-23**, qua `AskUserQuestion`: đồng ý với chính nghi vấn roadmap đặt ra — group-by không hợp mục đích một results grid vốn thiết kế cho xem/sửa row-by-row (edit-cell, delete-row, cell cursor h/l đều giả định "đang nhìn đúng dòng thật trong DB"; một hàng nhóm không còn là một dòng thật để trỏ vào). Không tự chốt cứng "sẽ không bao giờ làm" — chỉ là chưa có lý do cụ thể để ưu tiên trước #12, để lại đây làm ghi chú như CLI import/export.
+12. ~~Mở rộng edit-cell/delete-row ngoài single-table-with-PK~~ — xong (2026-09-23), xem `docs/backlog/no-pk-row-edit.md`. **Rủi ro cao nhất trong toàn bộ danh sách**, nên hỏi lại phạm vi qua `AskUserQuestion` trước khi code: vẫn làm nhưng cẩn thận, và giới hạn đúng một trường hợp — bảng không có PK khai báo, fallback dùng toàn bộ cột kết quả làm khoá `WHERE`, luôn cảnh báo tĩnh trong overlay confirm. Kết quả JOIN **không** được mở rộng (bị loại rõ ràng ở vòng scope — "sửa dòng nào, ghi vào bảng nào" không còn rõ ràng, rủi ro cao hơn giá trị mang lại), `single_table_source` giữ nguyên không đổi.
 
 **Thứ tự đã chốt (2026-08-19)**, user duyệt đề xuất theo rủi ro/phụ thuộc kỹ thuật, không tự chọn thứ tự khác. #8 đổi hướng sang CLI (xem mục riêng bên dưới) nên rút khỏi Tier 1:
 
@@ -87,7 +87,7 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 - **Tier 3 (dùng chung dữ liệu FK vừa thêm ở #1)**: #6 Autocomplete ngữ cảnh sâu — xong, #5 ERD — xong, cả hai `docs/backlog/fk-autocomplete-and-erd.md`.
 - **Tier 4 (cần chốt phạm vi trước khi code)**: #7 Generate SQL từ UI — xong, `docs/backlog/crud-snippet-column-picker.md`. #10 Multi-filter kết hợp — xong, `docs/backlog/multi-filter.md`.
 - **Tier 5 (lớn, tách nhiều bước nhỏ)** — **cả 3 mục đã xong**: #3 Schema diff/compare — xong, `docs/backlog/schema-diff.md`. → #2 Table designer — xong, `docs/backlog/table-designer.md`. → #4 Migration/version-control — xong, `docs/backlog/migrations.md`. **Đảo thứ tự 2026-09-23** (ban đầu #2 → #3 → #4): user yêu cầu ưu tiên Postgres/Mongo/Elasticsearch trong 3 mục Tier 5 — #3 là mục duy nhất phục vụ được cả ba (schema info đã có sẵn cho cả ba: Postgres qua PK khai báo, Mongo qua suy luận từ `list_schema`, Elasticsearch qua mapping REST API), trong khi #2 Table designer sinh DDL (`ALTER TABLE`...) chỉ có ý nghĩa cho Postgres/SQLite/Cassandra — Mongo và Elasticsearch schemaless, không có khái niệm DDL tương đương. #4 vẫn xếp cuối vì chưa chốt phạm vi.
-- **Tier 6 (để cuối, #12 cần bàn lại có đáng làm không)**: #11 Group-by trong grid → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK. Giữ nguyên thứ tự — cả #11 (generic, mọi driver) và #12 (mở rộng cơ chế `build_sql_edit` vốn chỉ áp dụng Postgres/SQLite; Mongo/Elasticsearch đã có edit-cell riêng qua `updateOne`/`_update` từ 2026-09-07) đều không có mục nào ưu tiên rõ rệt hơn cho riêng Postgres/Mongo/Elasticsearch.
+- **Tier 6 (để cuối, cả 2 mục đã xử lý xong)**: #11 Group-by trong grid — bỏ qua 2026-09-23 (xem lý do ở mục #11 phía trên). → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK — xong 2026-09-23, `docs/backlog/no-pk-row-edit.md`.
 
 ## `tradar` CLI: import/export (ý tưởng mới, 2026-08-19) — tier thấp, để sau
 
