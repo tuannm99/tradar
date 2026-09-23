@@ -891,6 +891,7 @@ fn context_title(context: Context) -> &'static str {
         Context::Snippets => "Snippet library (while open)",
         Context::ColumnPicker => "Navigator column picker (while open)",
         Context::FilterConditions => "Filter-conditions panel (while open)",
+        Context::TableDesigner => "Table designer (while open)",
     }
 }
 

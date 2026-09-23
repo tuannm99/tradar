@@ -109,6 +109,20 @@ pub enum CrudOp {
     Delete,
 }
 
+/// A navigator-initiated request to change a connection's schema -- see
+/// `Component::open_table_designer`. Lives here rather than in
+/// `tradar-query-workbench`, same reason as `CrudOp`: `Component` can't
+/// depend on a crate that depends on it, so the request stays a plain,
+/// dialect-agnostic description (table/column names only) and only the
+/// screen that opens it turns that into an actual `ALTER`/`CREATE TABLE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableDesignRequest {
+    AddColumn { table: String },
+    DropColumn { table: String, column: String },
+    RenameTable { table: String },
+    CreateTable,
+}
+
 pub trait Component {
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action>;
     /// Handles a click or scroll. Defaults to ignoring it: a component
@@ -158,6 +172,15 @@ pub trait Component {
     fn crud_snippet(&self, _name: &str, _op: CrudOp, _columns: &[String]) -> Option<String> {
         None
     }
+    /// Opens this screen's own table-designer overlay for `request`, if it
+    /// has one -- the navigator's `a`/`x`/`R`/`n` on a table/column/
+    /// connection row. A no-op by default: most screens have no notion of
+    /// schema DDL. A screen that does still may not be able to build the
+    /// statement (wrong dialect, driver doesn't support it) -- that's
+    /// discovered once the form is filled in and confirmed, not here, same
+    /// as `crud_snippet` finding out at `None`-return time rather than
+    /// gating what the navigator even offers.
+    fn open_table_designer(&mut self, _request: TableDesignRequest) {}
     /// Whether the schema behind `outline` failed to load, for the
     /// navigator to say so rather than showing an empty tree that looks
     /// like an empty database.

@@ -19,7 +19,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use tradar_core::action::{CrudOp, OutlineEntry};
+use tradar_core::action::{CrudOp, OutlineEntry, TableDesignRequest};
 use tradar_core::theme::theme;
 use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
@@ -87,6 +87,13 @@ pub enum NavOutcome {
         outline_a: Vec<OutlineEntry>,
         name_b: String,
         outline_b: Vec<OutlineEntry>,
+    },
+    /// Switch to `tab` and open its table-designer overlay for `request`
+    /// -- `a`/`x`/`R`/`n`, see `choose_add_column`/`choose_drop_column`/
+    /// `choose_rename_table`/`choose_create_table`.
+    TableDesign {
+        tab: usize,
+        request: TableDesignRequest,
     },
 }
 
@@ -419,6 +426,81 @@ impl NavigatorComponent {
             picker: ColumnPickerComponent::new(op, columns),
         });
         None
+    }
+
+    /// The table/collection row under the cursor, if there is one -- shared
+    /// by `choose_add_column`/`choose_rename_table`, which both need
+    /// exactly the same thing `choose_snippet` does (an `is_object` row and
+    /// the tab it's open on) before they can build their own
+    /// `TableDesignRequest`.
+    fn selected_table(&self, connections: &[NavConnection]) -> Option<(usize, String)> {
+        let Row::Entry { connection, entry } = self.selected_row(connections)? else {
+            return None;
+        };
+        let outline_entry = &connections[connection].outline[entry];
+        if !outline_entry.is_object {
+            return None;
+        }
+        let tab = connections[connection].tab?;
+        Some((tab, outline_entry.label.clone()))
+    }
+
+    /// `a` on a table row: open the table designer to add a column to it.
+    pub fn choose_add_column(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let (tab, table) = self.selected_table(connections)?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::AddColumn { table },
+        })
+    }
+
+    /// `R` on a table row: open the table designer to rename it.
+    pub fn choose_rename_table(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let (tab, table) = self.selected_table(connections)?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::RenameTable { table },
+        })
+    }
+
+    /// `x` on a column row: open the table designer to drop it. Unlike
+    /// `selected_table`, the selected row here *is* the column -- its
+    /// owning table is whatever `is_object` row precedes it, which is
+    /// always its direct parent (a table's own columns are never
+    /// interrupted by another grouping level -- see `push_table` in
+    /// `tradar-query-workbench`).
+    pub fn choose_drop_column(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let Row::Entry { connection, entry } = self.selected_row(connections)? else {
+            return None;
+        };
+        let outline = &connections[connection].outline;
+        let column_entry = &outline[entry];
+        if column_entry.is_object {
+            return None;
+        }
+        let table_entry = outline[..entry].iter().rev().find(|e| e.is_object)?;
+        let tab = connections[connection].tab?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::DropColumn {
+                table: table_entry.label.clone(),
+                column: column_entry.label.clone(),
+            },
+        })
+    }
+
+    /// `n`, anywhere under an open connection (its own row, or any row in
+    /// its tree): open the table designer to create a new table there.
+    pub fn choose_create_table(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let connection = match self.selected_row(connections)? {
+            Row::Connection(index) => index,
+            Row::Entry { connection, .. } => connection,
+        };
+        let tab = connections[connection].tab?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::CreateTable,
+        })
     }
 
     /// Whether the column picker is open, waiting on its own keys ahead of
@@ -840,6 +922,136 @@ mod tests {
             other => panic!("expected a snippet request aimed at the table's own tab: {other:?}"),
         }
         assert!(!navigator.is_picking_columns());
+    }
+
+    #[test]
+    fn a_on_a_table_row_requests_add_column_aimed_at_its_own_tab() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_add_column(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::AddColumn { table },
+            }) => assert_eq!((tab, table.as_str()), (0, "users")),
+            other => {
+                panic!("expected an AddColumn request aimed at the table's own tab: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_on_a_connection_row_does_nothing() {
+        let conns = connections();
+        let navigator = NavigatorComponent::new();
+
+        assert_eq!(navigator.choose_add_column(&conns), None);
+    }
+
+    #[test]
+    fn a_on_a_column_row_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        assert_eq!(
+            navigator.choose_add_column(&conns),
+            None,
+            "add-column targets a table, not one of its columns"
+        );
+    }
+
+    #[test]
+    fn shift_r_on_a_table_row_requests_rename_table() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_rename_table(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::RenameTable { table },
+            }) => assert_eq!((tab, table.as_str()), (0, "users")),
+            other => panic!("expected a RenameTable request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn x_on_a_column_row_requests_drop_column_naming_its_own_table() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_drop_column(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::DropColumn { table, column },
+            }) => assert_eq!((tab, table.as_str(), column.as_str()), (0, "users", "id")),
+            other => panic!("expected a DropColumn request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn x_on_a_table_row_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        assert_eq!(
+            navigator.choose_drop_column(&conns),
+            None,
+            "drop-column targets a column, not the table itself"
+        );
+    }
+
+    #[test]
+    fn n_on_an_open_connection_row_requests_create_table() {
+        let conns = connections();
+        let navigator = NavigatorComponent::new();
+
+        match navigator.choose_create_table(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::CreateTable,
+            }) => assert_eq!(tab, 0),
+            other => panic!("expected a CreateTable request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn n_on_a_connection_that_is_not_open_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.apply_move(VimMove::Bottom, &conns); // "remote", never connected
+
+        assert_eq!(
+            navigator.choose_create_table(&conns),
+            None,
+            "nothing to design on a connection with no schema loaded yet"
+        );
+    }
+
+    #[test]
+    fn n_anywhere_under_an_open_connection_s_tree_still_resolves_to_its_tab() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns); // the "users" table row, not the connection row
+
+        match navigator.choose_create_table(&conns) {
+            Some(NavOutcome::TableDesign { tab, .. }) => assert_eq!(tab, 0),
+            other => panic!("expected a CreateTable request: {other:?}"),
+        }
     }
 
     #[test]

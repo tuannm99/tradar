@@ -191,6 +191,11 @@ impl QueryEngine {
         self.driver.edit_sql(edit)
     }
 
+    /// This driver's statement for `op` -- see `QueryDriver::table_ddl`.
+    pub fn table_ddl(&self, op: &crate::query_driver::TableDesignerOp) -> Option<String> {
+        self.driver.table_ddl(op)
+    }
+
     /// The key column(s) for `source` -- see `QueryDriver::edit_key_columns`.
     pub fn edit_key_columns(&self, source: &str) -> Option<Vec<String>> {
         self.driver.edit_key_columns(source)

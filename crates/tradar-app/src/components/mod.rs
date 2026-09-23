@@ -418,6 +418,10 @@ impl RootComponent {
                 self.navigator.start_diff_picker(&connections);
                 None
             }
+            Command::TableDesignAddColumn => self.navigator.choose_add_column(&connections),
+            Command::TableDesignDropColumn => self.navigator.choose_drop_column(&connections),
+            Command::TableDesignRenameTable => self.navigator.choose_rename_table(&connections),
+            Command::TableDesignCreateTable => self.navigator.choose_create_table(&connections),
             Command::ToggleNavigator => {
                 self.toggle_navigator();
                 None
@@ -483,6 +487,14 @@ impl RootComponent {
                 let component = SchemaDiffComponent::new(&name_a, &outline_a, &name_b, &outline_b);
                 self.tabs[tab].screen = ScreenSlot::Active(Box::new(component));
                 self.tabs[tab].title = Some(format!("Diff: {name_a} vs {name_b}"));
+                self.navigator_focused = false;
+                None
+            }
+            NavOutcome::TableDesign { tab, request } => {
+                self.active_tab = tab;
+                if let ScreenSlot::Active(screen) = &mut self.tabs[tab].screen {
+                    screen.open_table_designer(request);
+                }
                 self.navigator_focused = false;
                 None
             }
@@ -1700,6 +1712,9 @@ mod tests {
         fn crud_snippet(&self, name: &str, op: CrudOp, _columns: &[String]) -> Option<String> {
             Some(format!("{name}:{op:?}"))
         }
+        fn open_table_designer(&mut self, request: tradar_core::action::TableDesignRequest) {
+            *self.inserted.borrow_mut() = format!("{request:?}");
+        }
         fn connection_alive(&self) -> Option<bool> {
             Some(true)
         }
@@ -1810,6 +1825,21 @@ mod tests {
         assert!(
             !root.navigator_focused,
             "focus goes back to where the text landed"
+        );
+    }
+
+    #[test]
+    fn pressing_a_on_a_table_in_the_navigator_opens_its_table_designer() {
+        let (mut root, inserted) = root_with_navigator();
+        root.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+
+        root.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        assert_eq!(inserted.borrow().as_str(), "AddColumn { table: \"users\" }");
+        assert!(
+            !root.navigator_focused,
+            "focus goes to the tab the designer opened on"
         );
     }
 

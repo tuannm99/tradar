@@ -11,7 +11,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
 use tradar_connector_spi::Session;
-use tradar_core::action::{Action, Component, OutlineEntry};
+use tradar_core::action::{Action, Component, OutlineEntry, TableDesignRequest};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::storage::SavedConnection;
 use tradar_core::ui;
@@ -27,6 +27,7 @@ use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent}
 use crate::components::results::ResultsComponent;
 use crate::components::row_edit::{RowEditComponent, RowEditOutcome};
 use crate::components::snippet_picker::{SnippetOutcome, SnippetPickerComponent};
+use crate::components::table_designer::{TableDesignerComponent, TableDesignerOutcome};
 use crate::query_driver::{RowChange, RowEdit, SchemaInfo};
 use crate::query_engine::{QueryEngine, QueryOutcome};
 
@@ -92,6 +93,9 @@ pub struct QueryScreenComponent {
     last_query: Option<String>,
     /// The edit-a-row overlay, when up.
     row_edit: Option<RowEditComponent>,
+    /// The table-designer overlay, when up -- see
+    /// `Component::open_table_designer`.
+    table_designer: Option<TableDesignerComponent>,
     /// The next result is a re-read of the same query after an edit, so the
     /// cell cursor should stay where it is instead of jumping to the top.
     refreshing: bool,
@@ -339,6 +343,7 @@ impl QueryScreenComponent {
             completion: None,
             last_query: None,
             row_edit: None,
+            table_designer: None,
             refreshing: false,
             search: None,
             buffer_search: None,
@@ -938,6 +943,38 @@ impl QueryScreenComponent {
         self.engine.submit_all(vec![sql, query]);
     }
 
+    fn handle_table_designer(&mut self, outcome: TableDesignerOutcome) {
+        match outcome {
+            TableDesignerOutcome::Cancelled => self.table_designer = None,
+            TableDesignerOutcome::OpReady(op) => {
+                let built = self.engine.table_ddl(&op);
+                if let Some(overlay) = &mut self.table_designer {
+                    match built {
+                        Some(sql) => overlay.show_statement(sql),
+                        None => overlay.show_problem(
+                            "this connection doesn't support the table designer".to_string(),
+                        ),
+                    }
+                }
+            }
+            TableDesignerOutcome::Confirmed(sql) => {
+                self.table_designer = None;
+                self.run_table_ddl(sql);
+            }
+        }
+    }
+
+    /// Runs a table-design statement on its own -- unlike `run_edit`,
+    /// there's no prior grid result to re-read afterwards (a schema change
+    /// isn't shown as rows), so this is a plain one-statement submission.
+    /// The navigator's own cached outline (`engine.schema()`, fetched once
+    /// at connect -- see `flatten_outline`'s doc comment) doesn't pick up
+    /// the change until the connection is reopened; a live refresh is a
+    /// separate, unscoped piece of work (`docs/backlog/table-designer.md`).
+    fn run_table_ddl(&mut self, sql: String) {
+        self.engine.submit_all(vec![sql]);
+    }
+
     /// Each column's declared type for the result currently on screen, for
     /// `ResultsComponent` to show in its header/preview -- see
     /// `query_driver::column_types`. Only meaningful for a `Table` result
@@ -1163,6 +1200,13 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        if let Some(table_designer) = self.table_designer.as_mut() {
+            if let Some(outcome) = table_designer.handle_key_event(code, modifiers) {
+                self.handle_table_designer(outcome);
+            }
+            return None;
+        }
+
         if let Some(picker) = self.picker.as_mut() {
             match picker.handle_key_event(code, modifiers) {
                 Some(PickerOutcome::Cancelled) => self.picker = None,
@@ -1354,6 +1398,7 @@ impl Component for QueryScreenComponent {
         if self.prompt.is_some()
             || self.picker.is_some()
             || self.row_edit.is_some()
+            || self.table_designer.is_some()
             || self.snippet_prompt.is_some()
         {
             return None;
@@ -1466,6 +1511,27 @@ impl Component for QueryScreenComponent {
         columns: &[String],
     ) -> Option<String> {
         self.engine.crud_snippet(name, op, columns)
+    }
+
+    fn open_table_designer(&mut self, request: TableDesignRequest) {
+        self.table_designer = Some(match request {
+            TableDesignRequest::AddColumn { table } => TableDesignerComponent::add_column(table),
+            TableDesignRequest::RenameTable { table } => {
+                TableDesignerComponent::rename_table(table)
+            }
+            TableDesignRequest::CreateTable => TableDesignerComponent::create_table(),
+            // No fields of its own to collect -- the navigator already named
+            // both the table and the column, so this goes straight to
+            // "here's what would run", same as `row_edit`'s delete.
+            TableDesignRequest::DropColumn { table, column } => {
+                let title = format!("Drop column {column}");
+                let op = crate::query_driver::TableDesignerOp::DropColumn { table, column };
+                let result = self.engine.table_ddl(&op).ok_or_else(|| {
+                    "this connection doesn't support the table designer".to_string()
+                });
+                TableDesignerComponent::confirm(title, result)
+            }
+        });
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -1660,6 +1726,12 @@ impl Component for QueryScreenComponent {
             row_edit.draw(frame, popup);
         }
 
+        if let Some(table_designer) = &self.table_designer {
+            let popup = ui::centered_rect(70, 60, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            table_designer.draw(frame, popup);
+        }
+
         if let Some(erd) = &mut self.erd {
             let popup = ui::centered_rect(92, 92, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
@@ -1756,6 +1828,9 @@ mod tests {
         }
         fn edit_sql(&self, edit: &crate::query_driver::RowEdit) -> Option<String> {
             Some(crate::query_driver::build_sql_edit(edit))
+        }
+        fn table_ddl(&self, op: &crate::query_driver::TableDesignerOp) -> Option<String> {
+            Some(crate::query_driver::build_table_ddl(op))
         }
         fn edit_source(&self, query: &str) -> Option<String> {
             crate::query_driver::single_table_source(query)
@@ -3474,6 +3549,83 @@ mod tests {
             screen.engine.history(),
             &["SELECT id, name FROM users"],
             "a cancelled delete must not have run anything"
+        );
+    }
+
+    #[test]
+    fn opening_the_table_designer_for_add_column_starts_its_own_overlay() {
+        let (mut screen, _rx) = screen();
+
+        screen.open_table_designer(TableDesignRequest::AddColumn {
+            table: "users".to_string(),
+        });
+
+        assert!(screen.table_designer.is_some());
+    }
+
+    #[tokio::test]
+    async fn filling_in_add_column_and_confirming_runs_the_alter_table() {
+        let (mut screen, _rx) = editable_screen();
+        screen.open_table_designer(TableDesignRequest::AddColumn {
+            table: "users".to_string(),
+        });
+
+        for c in "nickname".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        for c in "TEXT".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            screen.table_designer.is_some(),
+            "the built statement is shown before it runs"
+        );
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert!(
+            screen.table_designer.is_none(),
+            "the overlay closes once it runs"
+        );
+        assert_eq!(
+            screen.engine.history().last().map(String::as_str),
+            Some("ALTER TABLE \"users\" ADD COLUMN \"nickname\" TEXT")
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_column_goes_straight_to_a_confirm_with_no_fields_to_fill_in() {
+        let (mut screen, _rx) = editable_screen();
+
+        screen.open_table_designer(TableDesignRequest::DropColumn {
+            table: "users".to_string(),
+            column: "name".to_string(),
+        });
+        // Straight to confirm: `y` alone (no field-entry keys first) is
+        // enough to run it.
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert!(screen.table_designer.is_none());
+        assert_eq!(
+            screen.engine.history().last().map(String::as_str),
+            Some("ALTER TABLE \"users\" DROP COLUMN \"name\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_runs_from_the_table_designer_until_approved() {
+        let (mut screen, _rx) = editable_screen();
+        screen.open_table_designer(TableDesignRequest::RenameTable {
+            table: "users".to_string(),
+        });
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.table_designer.is_none());
+        assert!(
+            screen.engine.history().is_empty(),
+            "a cancelled table design must not have run anything"
         );
     }
 

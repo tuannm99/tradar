@@ -10,3 +10,4 @@ pub mod query_screen;
 pub mod results;
 pub mod row_edit;
 pub mod snippet_picker;
+pub mod table_designer;

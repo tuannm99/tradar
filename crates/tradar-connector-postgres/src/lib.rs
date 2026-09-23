@@ -233,6 +233,10 @@ impl QueryDriver for PostgresDriver {
         Some(query_driver::build_sql_edit(edit))
     }
 
+    fn table_ddl(&self, op: &query_driver::TableDesignerOp) -> Option<String> {
+        Some(query_driver::build_table_ddl(op))
+    }
+
     fn edit_source(&self, query: &str) -> Option<String> {
         query_driver::single_table_source(query)
     }
@@ -508,6 +512,19 @@ mod tests {
         assert_eq!(
             driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
             Some("SELECT * FROM \"users\" LIMIT 100;".to_string())
+        );
+    }
+
+    #[test]
+    fn table_ddl_delegates_to_the_shared_ddl_builder() {
+        let driver = PostgresDriver::new("postgres://user:pass@127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.table_ddl(&query_driver::TableDesignerOp::RenameTable {
+                table: "users".to_string(),
+                new_name: "accounts".to_string(),
+            }),
+            Some("ALTER TABLE \"users\" RENAME TO \"accounts\"".to_string())
         );
     }
 

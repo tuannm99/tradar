@@ -389,6 +389,120 @@ pub fn build_sql_edit(edit: &RowEdit) -> String {
     }
 }
 
+/// One column in a `TableDesignerOp::CreateTable`'s definition -- the
+/// table-designer form's own fields (name/type free text, nullable/primary
+/// key toggles), not yet turned into SQL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewColumn {
+    pub name: String,
+    /// The dialect's own type name, typed as-is (`INTEGER`, `VARCHAR(255)`,
+    /// `TIMESTAMP`...) -- no validation or mapping, since there is no type
+    /// list that's both complete and correct across every SQL dialect this
+    /// might grow to cover.
+    pub type_name: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+}
+
+/// A schema change requested through the table-designer overlay -- see
+/// `Component::open_table_designer`/`TableDesignRequest`. Unlike
+/// `TableDesignRequest` (table/column names only, so it can travel through
+/// the driver-agnostic `Component` trait), this already carries every field
+/// the *form* collected, ready for `build_table_ddl`/`QueryDriver::table_ddl`
+/// to turn into one dialect's actual statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableDesignerOp {
+    AddColumn {
+        table: String,
+        column: String,
+        type_name: String,
+        nullable: bool,
+        /// A raw SQL expression (`0`, `now()`, `'x'`...), not a value this
+        /// code quotes for you -- same reasoning as `NewColumn::type_name`:
+        /// there's no reliable way to guess whether a typed default is a
+        /// number, a string, or a function call, so it's sent through
+        /// exactly as typed. `None` omits `DEFAULT` entirely.
+        default: Option<String>,
+    },
+    DropColumn {
+        table: String,
+        column: String,
+    },
+    RenameTable {
+        table: String,
+        new_name: String,
+    },
+    CreateTable {
+        table: String,
+        columns: Vec<NewColumn>,
+    },
+}
+
+/// Turns a `TableDesignerOp` into standard DDL -- shared by the SQL
+/// connectors that opt into the table designer, same reason as
+/// `build_sql_edit`: both need the same answer and neither may depend on
+/// the other. A driver that hasn't been taught to run this yet (everything
+/// but Postgres, so far -- see `QueryDriver::table_ddl`) never calls it.
+pub fn build_table_ddl(op: &TableDesignerOp) -> String {
+    match op {
+        TableDesignerOp::AddColumn {
+            table,
+            column,
+            type_name,
+            nullable,
+            default,
+        } => {
+            let mut sql = format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                quote_identifier(table),
+                quote_identifier(column),
+                type_name.trim()
+            );
+            if !nullable {
+                sql.push_str(" NOT NULL");
+            }
+            if let Some(default) = default.as_deref().filter(|d| !d.trim().is_empty()) {
+                sql.push_str(" DEFAULT ");
+                sql.push_str(default.trim());
+            }
+            sql
+        }
+        TableDesignerOp::DropColumn { table, column } => format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            quote_identifier(table),
+            quote_identifier(column)
+        ),
+        TableDesignerOp::RenameTable { table, new_name } => format!(
+            "ALTER TABLE {} RENAME TO {}",
+            quote_identifier(table),
+            quote_identifier(new_name)
+        ),
+        TableDesignerOp::CreateTable { table, columns } => {
+            let column_lines: Vec<String> = columns
+                .iter()
+                .map(|c| {
+                    let mut line = format!("{} {}", quote_identifier(&c.name), c.type_name.trim());
+                    // A primary key is never null by definition -- stating
+                    // it again as a separate `NOT NULL` would be redundant,
+                    // not wrong, but this reads closer to how a hand-written
+                    // `CREATE TABLE` states it.
+                    if c.primary_key {
+                        line.push_str(" PRIMARY KEY");
+                    } else if !c.nullable {
+                        line.push_str(" NOT NULL");
+                    }
+                    line
+                })
+                .collect();
+            format!(
+                "CREATE TABLE {} (\n  {}\n)",
+                quote_identifier(table),
+                column_lines.join(",\n  ")
+            )
+        }
+    }
+}
+
 /// `columns` empty means "use `default`" -- every op's own natural
 /// default, preserved so a caller that passes `&[]` (every caller before
 /// the navigator grew a column picker) reproduces exactly the old
@@ -1068,6 +1182,18 @@ pub trait QueryDriver: Send + Sync {
     /// own syntax, so nothing outside one writes SQL; the SQL connectors
     /// all delegate to `build_sql_edit`.
     fn edit_sql(&self, _edit: &RowEdit) -> Option<String> {
+        None
+    }
+
+    /// This driver's statement for a table-designer change (see
+    /// `TableDesignerOp`). `None` -- the default -- means the table
+    /// designer form can be filled in and confirmed, but running it reports
+    /// "not supported on this connection" instead of a statement -- same
+    /// shape as `edit_sql`'s "read-only" default, and for the same reason:
+    /// only the driver knows whether/how its dialect can express this.
+    /// Postgres is the only override so far (`docs/backlog/table-designer.md`);
+    /// SQLite/Cassandra could add one later without anything here changing.
+    fn table_ddl(&self, _op: &TableDesignerOp) -> Option<String> {
         None
     }
 
@@ -1795,5 +1921,118 @@ mod tests {
             CompletionContext::None
         );
         assert_eq!(completion_context(""), CompletionContext::None);
+    }
+
+    #[test]
+    fn add_column_builds_a_nullable_column_with_no_default_by_default() {
+        let sql = build_table_ddl(&TableDesignerOp::AddColumn {
+            table: "users".to_string(),
+            column: "nickname".to_string(),
+            type_name: "TEXT".to_string(),
+            nullable: true,
+            default: None,
+        });
+
+        assert_eq!(sql, "ALTER TABLE \"users\" ADD COLUMN \"nickname\" TEXT");
+    }
+
+    #[test]
+    fn add_column_appends_not_null_and_a_raw_default_expression() {
+        let sql = build_table_ddl(&TableDesignerOp::AddColumn {
+            table: "users".to_string(),
+            column: "credits".to_string(),
+            type_name: "INTEGER".to_string(),
+            nullable: false,
+            default: Some("0".to_string()),
+        });
+
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"users\" ADD COLUMN \"credits\" INTEGER NOT NULL DEFAULT 0"
+        );
+    }
+
+    #[test]
+    fn add_column_treats_a_blank_default_as_no_default() {
+        let sql = build_table_ddl(&TableDesignerOp::AddColumn {
+            table: "users".to_string(),
+            column: "nickname".to_string(),
+            type_name: "TEXT".to_string(),
+            nullable: true,
+            default: Some("   ".to_string()),
+        });
+
+        assert_eq!(sql, "ALTER TABLE \"users\" ADD COLUMN \"nickname\" TEXT");
+    }
+
+    #[test]
+    fn drop_column_quotes_table_and_column() {
+        let sql = build_table_ddl(&TableDesignerOp::DropColumn {
+            table: "users".to_string(),
+            column: "nickname".to_string(),
+        });
+
+        assert_eq!(sql, "ALTER TABLE \"users\" DROP COLUMN \"nickname\"");
+    }
+
+    #[test]
+    fn rename_table_builds_rename_to() {
+        let sql = build_table_ddl(&TableDesignerOp::RenameTable {
+            table: "users".to_string(),
+            new_name: "accounts".to_string(),
+        });
+
+        assert_eq!(sql, "ALTER TABLE \"users\" RENAME TO \"accounts\"");
+    }
+
+    #[test]
+    fn create_table_lists_one_column_per_line_with_not_null_where_asked() {
+        let sql = build_table_ddl(&TableDesignerOp::CreateTable {
+            table: "accounts".to_string(),
+            columns: vec![
+                NewColumn {
+                    name: "id".to_string(),
+                    type_name: "INTEGER".to_string(),
+                    nullable: false,
+                    primary_key: true,
+                },
+                NewColumn {
+                    name: "email".to_string(),
+                    type_name: "TEXT".to_string(),
+                    nullable: false,
+                    primary_key: false,
+                },
+                NewColumn {
+                    name: "nickname".to_string(),
+                    type_name: "TEXT".to_string(),
+                    nullable: true,
+                    primary_key: false,
+                },
+            ],
+        });
+
+        assert_eq!(
+            sql,
+            "CREATE TABLE \"accounts\" (\n  \"id\" INTEGER PRIMARY KEY,\n  \"email\" TEXT NOT NULL,\n  \"nickname\" TEXT\n)"
+        );
+    }
+
+    #[test]
+    fn create_table_never_states_not_null_redundantly_on_a_primary_key() {
+        let sql = build_table_ddl(&TableDesignerOp::CreateTable {
+            table: "t".to_string(),
+            columns: vec![NewColumn {
+                name: "id".to_string(),
+                type_name: "INTEGER".to_string(),
+                nullable: false,
+                primary_key: true,
+            }],
+        });
+
+        assert!(sql.contains("PRIMARY KEY"));
+        assert!(
+            !sql.contains("NOT NULL"),
+            "PRIMARY KEY already implies it: {sql}"
+        );
     }
 }
