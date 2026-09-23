@@ -1197,6 +1197,18 @@ pub trait QueryDriver: Send + Sync {
         None
     }
 
+    /// Whether the migrations panel (`F1`) can run against this connection
+    /// -- `false` by default, since the panel's own BEGIN/COMMIT/tracking-
+    /// table SQL is plain ANSI SQL with nothing dialect-specific to build
+    /// (unlike `table_ddl`), there's nothing for a driver to *implement*
+    /// here; this is purely an opt-in flag. Postgres is the only override
+    /// so far (`docs/backlog/migrations.md`) -- the same "which drivers are
+    /// taught yet" gate `table_ddl`'s doc comment describes, just boolean
+    /// rather than `Option<String>` since there's no statement to build.
+    fn supports_migrations(&self) -> bool {
+        false
+    }
+
     /// The table a result came from, for `edit_sql` to aim at -- `None`
     /// when this driver can't tell, which keeps the grid read-only for that
     /// result. SQL connectors delegate to `single_table_source`.

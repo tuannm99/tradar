@@ -73,6 +73,31 @@ pub fn default_queries_dir() -> anyhow::Result<PathBuf> {
     Ok(dirs.config_dir().join("queries"))
 }
 
+/// Where one connection's migration files live: `migrations/<connection
+/// name>` under the same config directory as everything else tradar owns.
+/// Per connection, unlike `default_queries_dir()` -- a migration set is
+/// inherently tied to one database, not shared editing material the way
+/// saved queries are. The name is sanitized (anything that isn't
+/// alphanumeric, `-`, `_`, or `.` becomes `_`) since it's typed freely into
+/// the connection form and would otherwise let a name like `a/../../etc`
+/// escape the migrations directory or collide across platforms.
+pub fn default_migrations_dir(connection_name: &str) -> anyhow::Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "tradar").ok_or_else(|| {
+        anyhow::anyhow!("could not determine a config directory for this platform")
+    })?;
+    let sanitized: String = connection_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Ok(dirs.config_dir().join("migrations").join(sanitized))
+}
+
 /// Turns what the user typed in a save/open prompt into a path. A bare
 /// name, or a relative path with subfolders (e.g. `reports/first`), lands
 /// inside the queries directory and gains a `.sql` extension if it doesn't
@@ -576,6 +601,21 @@ mod tests {
         let path = default_snippets_path().unwrap();
 
         assert_eq!(path.file_name().unwrap(), "snippets.toml");
+    }
+
+    #[test]
+    fn default_migrations_dir_is_scoped_to_the_connection_name() {
+        let path = default_migrations_dir("prod-db").unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "prod-db");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "migrations");
+    }
+
+    #[test]
+    fn default_migrations_dir_sanitizes_an_unsafe_connection_name() {
+        let path = default_migrations_dir("a/../../etc").unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "a_.._.._etc");
     }
 
     #[test]

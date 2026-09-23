@@ -196,6 +196,12 @@ impl QueryEngine {
         self.driver.table_ddl(op)
     }
 
+    /// Whether the migrations panel can run here -- see
+    /// `QueryDriver::supports_migrations`.
+    pub fn supports_migrations(&self) -> bool {
+        self.driver.supports_migrations()
+    }
+
     /// The key column(s) for `source` -- see `QueryDriver::edit_key_columns`.
     pub fn edit_key_columns(&self, source: &str) -> Option<Vec<String>> {
         self.driver.edit_key_columns(source)

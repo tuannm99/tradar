@@ -237,6 +237,10 @@ impl QueryDriver for PostgresDriver {
         Some(query_driver::build_table_ddl(op))
     }
 
+    fn supports_migrations(&self) -> bool {
+        true
+    }
+
     fn edit_source(&self, query: &str) -> Option<String> {
         query_driver::single_table_source(query)
     }
@@ -526,6 +530,13 @@ mod tests {
             }),
             Some("ALTER TABLE \"users\" RENAME TO \"accounts\"".to_string())
         );
+    }
+
+    #[test]
+    fn supports_migrations_is_true() {
+        let driver = PostgresDriver::new("postgres://user:pass@127.0.0.1:1/db");
+
+        assert!(driver.supports_migrations());
     }
 
     #[test]

@@ -248,6 +248,9 @@ pub enum Command {
     /// Open the ERD overlay: pick a table, then see it and its immediate
     /// FK neighbors as a box-drawing diagram.
     ShowErd,
+    /// Open the migrations panel: pending/applied `.sql` files for this
+    /// connection, run every pending one in order.
+    ShowMigrations,
     ExportCurl,
     /// Export the current result to a CSV or JSON file -- format picked by
     /// the extension typed in the prompt, same idea as `SaveFile` picking a
@@ -439,6 +442,7 @@ impl Command {
             Self::DeleteSnippet => "delete-snippet",
             Self::RenameSnippet => "rename-snippet",
             Self::ShowErd => "show-erd",
+            Self::ShowMigrations => "show-migrations",
             Self::ExportCurl => "export-curl",
             Self::Export => "export",
             Self::Yank => "yank",
@@ -516,7 +520,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 96] = [
+    const ALL: [Self; 97] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -543,6 +547,7 @@ impl Command {
         Self::DeleteSnippet,
         Self::RenameSnippet,
         Self::ShowErd,
+        Self::ShowMigrations,
         Self::ExportCurl,
         Self::Export,
         Self::Yank,
@@ -644,6 +649,7 @@ impl Command {
             Self::DeleteSnippet => "Delete the selected snippet",
             Self::RenameSnippet => "Rename the selected snippet",
             Self::ShowErd => "Show a table's ERD (foreign-key neighborhood)",
+            Self::ShowMigrations => "Open the migrations panel",
             Self::ExportCurl => "Export the request as curl (Elasticsearch)",
             Self::Export => "Export the result to CSV/JSON",
             Self::Yank => "Copy the selected row/document",
@@ -864,6 +870,7 @@ impl Default for Keymap {
                 ("ctrl-k", Command::SaveSnippet),
                 ("ctrl-l", Command::OpenSnippets),
                 ("f4", Command::ShowErd),
+                ("f1", Command::ShowMigrations),
                 ("ctrl-y", Command::ExportCurl),
                 ("ctrl-e", Command::Export),
                 ("f2", Command::ToggleBrowseMode),
