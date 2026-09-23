@@ -5,6 +5,7 @@ pub mod file_picker;
 pub mod file_prompt;
 pub mod filter_conditions;
 pub mod history_picker;
+pub mod migrations;
 pub mod query_editor;
 pub mod query_screen;
 pub mod results;

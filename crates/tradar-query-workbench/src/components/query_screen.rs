@@ -13,7 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tradar_connector_spi::Session;
 use tradar_core::action::{Action, Component, OutlineEntry, TableDesignRequest};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
-use tradar_core::storage::SavedConnection;
+use tradar_core::storage::{SavedConnection, default_migrations_dir};
 use tradar_core::ui;
 use tradar_core::vim_list::VimMove;
 
@@ -23,6 +23,10 @@ use crate::components::file_picker::{FilePickerComponent, PickerOutcome};
 use crate::components::file_prompt::{FilePromptComponent, PromptKind, PromptOutcome};
 use crate::components::filter_conditions::{FilterConditionsComponent, FilterConditionsOutcome};
 use crate::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
+use crate::components::migrations::{
+    MigrationFile, MigrationsComponent, MigrationsOutcome, check_applied_sql, discover_migrations,
+    pending_of, wrap_migration,
+};
 use crate::components::query_editor::{Dialect, EditorMode, QueryEditorComponent};
 use crate::components::results::ResultsComponent;
 use crate::components::row_edit::{RowEditComponent, RowEditOutcome};
@@ -48,6 +52,21 @@ pub enum Focus {
 pub enum ScreenMode {
     Browse,
     Console,
+}
+
+/// What an in-flight submission started from the migrations panel is
+/// *for* -- `tick()` reads this (not the panel's own stage) to route the
+/// eventual outcome. `CheckApplied` carries every discovered file, so once
+/// the "which versions are already applied" query answers, `pending_of`
+/// can compute the list the panel opens on without discovering the
+/// directory a second time.
+enum MigrationsQuery {
+    CheckApplied(Vec<MigrationFile>),
+    RunFile(MigrationFile),
+    /// Sent after a file fails, to close out the aborted transaction. Its
+    /// own outcome (success or failure) changes nothing further -- the
+    /// failure is already on screen from `RunFile`'s handling.
+    Rollback,
 }
 
 pub struct QueryScreenComponent {
@@ -96,6 +115,17 @@ pub struct QueryScreenComponent {
     /// The table-designer overlay, when up -- see
     /// `Component::open_table_designer`.
     table_designer: Option<TableDesignerComponent>,
+    /// The migrations panel, when up (`F1`).
+    migrations: Option<MigrationsComponent>,
+    /// What the in-flight submission is *for*, while `migrations` is
+    /// driving one -- `tick()` uses this instead of `migrations.is_some()`
+    /// to decide where an outcome goes, specifically so dismissing the
+    /// panel mid-run (`migrations = None`) can't cause a migration's
+    /// result to fall through into the ordinary results grid: the
+    /// submission this names is still in flight either way, and its
+    /// outcome, when it lands, is simply dropped once there's no panel
+    /// left to show it to.
+    migrations_query: Option<MigrationsQuery>,
     /// The next result is a re-read of the same query after an edit, so the
     /// cell cursor should stay where it is instead of jumping to the top.
     refreshing: bool,
@@ -344,6 +374,8 @@ impl QueryScreenComponent {
             last_query: None,
             row_edit: None,
             table_designer: None,
+            migrations: None,
+            migrations_query: None,
             refreshing: false,
             search: None,
             buffer_search: None,
@@ -400,6 +432,7 @@ impl QueryScreenComponent {
             Command::SaveSnippet => self.open_snippet_prompt(),
             Command::OpenSnippets => self.open_snippet_picker(),
             Command::ShowErd => self.open_erd(),
+            Command::ShowMigrations => self.open_migrations(),
             Command::ExportCurl => self.export_curl(),
             Command::Export => self.open_export_prompt(),
             Command::Yank => {
@@ -975,6 +1008,137 @@ impl QueryScreenComponent {
         self.engine.submit_all(vec![sql]);
     }
 
+    /// `F1`: discovers this connection's migration files (a plain,
+    /// synchronous directory read -- see `discover_migrations`) and, if
+    /// the driver supports it and there's anything to check, kicks off the
+    /// "ensure the tracking table exists, then read what it already lists"
+    /// query. The panel itself doesn't open yet -- `handle_migrations_query_outcome`
+    /// opens it once that answers, so a slow connection shows nothing
+    /// rather than a list that's still `Loading` (this overlay has no such
+    /// stage; see `migrations.rs`'s doc comment).
+    fn open_migrations(&mut self) {
+        if !self.engine.supports_migrations() {
+            self.migrations = Some(MigrationsComponent::blocked(
+                "this connection doesn't support the migrations panel".to_string(),
+            ));
+            return;
+        }
+        let dir = match default_migrations_dir(&self.active_connection().name) {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.migrations = Some(MigrationsComponent::blocked(e.to_string()));
+                return;
+            }
+        };
+        let files = match discover_migrations(&dir) {
+            Ok(files) => files,
+            Err(e) => {
+                self.migrations = Some(MigrationsComponent::blocked(format!(
+                    "{}: {e}",
+                    dir.display()
+                )));
+                return;
+            }
+        };
+        if files.is_empty() {
+            self.migrations = Some(MigrationsComponent::blocked(format!(
+                "no migration files in {}",
+                dir.display()
+            )));
+            return;
+        }
+        self.migrations_query = Some(MigrationsQuery::CheckApplied(files));
+        self.engine.submit_all(check_applied_sql());
+    }
+
+    /// Reads `file`'s SQL, splits it the same way the editor would (so a
+    /// file with several statements runs them all, not just the first),
+    /// and submits it wrapped in its own transaction -- see
+    /// `migrations::wrap_migration`.
+    fn run_migration_file(&mut self, file: &MigrationFile) {
+        let sql = match std::fs::read_to_string(&file.path) {
+            Ok(sql) => sql,
+            Err(e) => {
+                if let Some(migrations) = &mut self.migrations {
+                    migrations.fail(format!("{}: {e}", file.name));
+                }
+                return;
+            }
+        };
+        let statements: Vec<String> = self
+            .engine
+            .split_statements(&sql)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        self.migrations_query = Some(MigrationsQuery::RunFile(file.clone()));
+        self.engine.submit_all(wrap_migration(file, &statements));
+    }
+
+    fn handle_migrations_panel_outcome(&mut self, outcome: MigrationsOutcome) {
+        match outcome {
+            MigrationsOutcome::Cancelled => self.migrations = None,
+            MigrationsOutcome::RunAll => {
+                let Some(migrations) = &mut self.migrations else {
+                    return;
+                };
+                if let Some(first) = migrations.start_running() {
+                    self.run_migration_file(&first);
+                }
+            }
+        }
+    }
+
+    /// What the submission `query` named turns into, now that its outcome
+    /// is in. `self.migrations` may already be `None` here (dismissed
+    /// mid-run -- see the field's own doc comment); every arm tolerates
+    /// that by simply not updating a panel that isn't there any more.
+    fn handle_migrations_query_outcome(&mut self, query: MigrationsQuery, outcome: QueryOutcome) {
+        match query {
+            MigrationsQuery::CheckApplied(files) => match outcome {
+                QueryOutcome::Completed {
+                    result: crate::query_driver::QueryResult::Table { rows, .. },
+                } => {
+                    let applied: Vec<String> = rows
+                        .into_iter()
+                        .filter_map(|row| row.into_iter().next())
+                        .collect();
+                    let pending: Vec<MigrationFile> =
+                        pending_of(&files, &applied).into_iter().cloned().collect();
+                    self.migrations = Some(MigrationsComponent::listing(pending, applied.len()));
+                }
+                QueryOutcome::Completed { .. } => {
+                    self.migrations = Some(MigrationsComponent::blocked(
+                        "unexpected result checking which migrations are already applied"
+                            .to_string(),
+                    ));
+                }
+                QueryOutcome::Failed { error } => {
+                    self.migrations = Some(MigrationsComponent::blocked(error));
+                }
+            },
+            MigrationsQuery::RunFile(file) => match outcome {
+                QueryOutcome::Completed { .. } => {
+                    let next = self
+                        .migrations
+                        .as_mut()
+                        .and_then(MigrationsComponent::advance);
+                    if let Some(next) = next {
+                        self.run_migration_file(&next);
+                    }
+                }
+                QueryOutcome::Failed { error } => {
+                    if let Some(migrations) = &mut self.migrations {
+                        migrations.fail(format!("{}: {error}", file.name));
+                    }
+                    self.migrations_query = Some(MigrationsQuery::Rollback);
+                    self.engine.submit_query("ROLLBACK".to_string());
+                }
+            },
+            MigrationsQuery::Rollback => {}
+        }
+    }
+
     /// Each column's declared type for the result currently on screen, for
     /// `ResultsComponent` to show in its header/preview -- see
     /// `query_driver::column_types`. Only meaningful for a `Table` result
@@ -1207,6 +1371,13 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        if let Some(migrations) = self.migrations.as_mut() {
+            if let Some(outcome) = migrations.handle_key_event(code) {
+                self.handle_migrations_panel_outcome(outcome);
+            }
+            return None;
+        }
+
         if let Some(picker) = self.picker.as_mut() {
             match picker.handle_key_event(code, modifiers) {
                 Some(PickerOutcome::Cancelled) => self.picker = None,
@@ -1399,6 +1570,7 @@ impl Component for QueryScreenComponent {
             || self.picker.is_some()
             || self.row_edit.is_some()
             || self.table_designer.is_some()
+            || self.migrations.is_some()
             || self.snippet_prompt.is_some()
         {
             return None;
@@ -1554,21 +1726,25 @@ impl Component for QueryScreenComponent {
         // every time).
         let changed = self.engine.tick();
         if let Some(outcome) = self.engine.take_outcome() {
-            let refreshing = std::mem::take(&mut self.refreshing);
-            match outcome {
-                QueryOutcome::Completed { result } if refreshing => {
-                    self.results.set_result_keeping_cursor(result)
+            if let Some(query) = self.migrations_query.take() {
+                self.handle_migrations_query_outcome(query, outcome);
+            } else {
+                let refreshing = std::mem::take(&mut self.refreshing);
+                match outcome {
+                    QueryOutcome::Completed { result } if refreshing => {
+                        self.results.set_result_keeping_cursor(result)
+                    }
+                    QueryOutcome::Completed { result } => self.results.set_result(result),
+                    QueryOutcome::Failed { error } => self.results.set_error(error),
                 }
-                QueryOutcome::Completed { result } => self.results.set_result(result),
-                QueryOutcome::Failed { error } => self.results.set_error(error),
+                // Recomputed only now that the result actually changed, not
+                // every `draw()` frame -- nothing it depends on (`last_query`,
+                // the just-set result, the schema) moves between outcomes, and
+                // a query left running redraws ~20x/second for the spinner
+                // alone (see `QueryEngine::tick`), which would otherwise mean
+                // rebuilding this for no reason on every one of those frames.
+                self.results.set_column_types(self.column_types());
             }
-            // Recomputed only now that the result actually changed, not
-            // every `draw()` frame -- nothing it depends on (`last_query`,
-            // the just-set result, the schema) moves between outcomes, and
-            // a query left running redraws ~20x/second for the spinner
-            // alone (see `QueryEngine::tick`), which would otherwise mean
-            // rebuilding this for no reason on every one of those frames.
-            self.results.set_column_types(self.column_types());
         }
         changed
     }
@@ -1730,6 +1906,12 @@ impl Component for QueryScreenComponent {
             let popup = ui::centered_rect(70, 60, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             table_designer.draw(frame, popup);
+        }
+
+        if let Some(migrations) = &self.migrations {
+            let popup = ui::centered_rect(70, 60, area);
+            frame.render_widget(ratatui::widgets::Clear, popup);
+            migrations.draw(frame, popup);
         }
 
         if let Some(erd) = &mut self.erd {
@@ -3626,6 +3808,160 @@ mod tests {
         assert!(
             screen.engine.history().is_empty(),
             "a cancelled table design must not have run anything"
+        );
+    }
+
+    #[test]
+    fn opening_the_migrations_panel_on_an_unsupported_driver_is_blocked_immediately() {
+        let (mut screen, _rx) = screen();
+
+        screen.open_migrations();
+
+        assert!(screen.migrations.is_some());
+        assert!(
+            screen.migrations_query.is_none(),
+            "a driver that doesn't support this is never even asked"
+        );
+        assert!(screen.engine.history().is_empty());
+    }
+
+    fn migration_file(version: &str, name: &str) -> crate::components::migrations::MigrationFile {
+        crate::components::migrations::MigrationFile {
+            version: version.to_string(),
+            name: name.to_string(),
+            path: std::path::PathBuf::from(format!("/tmp/does-not-exist-{version}.sql")),
+        }
+    }
+
+    fn applied_versions_result(versions: &[&str]) -> QueryResult {
+        QueryResult::Table {
+            columns: vec!["version".to_string()],
+            rows: versions.iter().map(|v| vec![v.to_string()]).collect(),
+            truncated: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn checking_applied_versions_opens_the_panel_with_only_what_s_left_pending() {
+        let (mut screen, _rx) = screen_with(fake_engine(applied_versions_result(&["001"])));
+        let files = vec![
+            migration_file("001", "create users"),
+            migration_file("002", "add email"),
+        ];
+
+        screen.migrations_query = Some(MigrationsQuery::CheckApplied(files));
+        screen.engine.submit_all(check_applied_sql());
+        while screen.engine.is_pending() {
+            tokio::task::yield_now().await;
+            screen.tick();
+        }
+
+        let Some(migrations) = &screen.migrations else {
+            panic!("expected the panel to open");
+        };
+        // Draw it -- the only externally observable way to read the panel's
+        // stage without exposing its private fields to this test module.
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| migrations.draw(frame, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("1 applied"), "buffer was: {text}");
+        assert!(text.contains("add email"), "buffer was: {text}");
+        assert!(
+            !text.contains("create users"),
+            "001 is already applied, so it shouldn't be offered again: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_a_migration_that_succeeds_advances_to_the_next_one() {
+        let (mut screen, _rx) = screen_with(fake_engine(QueryResult::Affected { rows: 0 }));
+        let tmp = tempfile::tempdir().unwrap();
+        let path_a = tmp.path().join("001_a.sql");
+        let path_b = tmp.path().join("002_b.sql");
+        std::fs::write(&path_a, "CREATE TABLE a (id INT)").unwrap();
+        std::fs::write(&path_b, "CREATE TABLE b (id INT)").unwrap();
+        let pending = vec![
+            crate::components::migrations::MigrationFile {
+                version: "001".to_string(),
+                name: "a".to_string(),
+                path: path_a,
+            },
+            crate::components::migrations::MigrationFile {
+                version: "002".to_string(),
+                name: "b".to_string(),
+                path: path_b,
+            },
+        ];
+        screen.migrations = Some(MigrationsComponent::listing(pending, 0));
+
+        screen.handle_migrations_panel_outcome(MigrationsOutcome::RunAll);
+        assert!(matches!(
+            screen.migrations_query,
+            Some(MigrationsQuery::RunFile(ref f)) if f.version == "001"
+        ));
+        // Runs to full completion -- both files, one after the other, each
+        // its own `submit_all` triggered from inside the previous one's
+        // outcome. There's no reliable point to catch "001 done, 002 not
+        // yet" from outside (both settle within the same tokio task
+        // scheduling window), so this waits for everything and checks the
+        // end state instead: both files' statements ran, in order, and the
+        // run finished with nothing left queued.
+        while screen.engine.is_pending() {
+            tokio::task::yield_now().await;
+            screen.tick();
+        }
+
+        assert!(
+            screen.migrations_query.is_none(),
+            "nothing left to run once both files finish"
+        );
+        assert_eq!(
+            screen.engine.history(),
+            &[
+                "BEGIN",
+                "CREATE TABLE a (id INT)",
+                "INSERT INTO _tradar_migrations (version, name) VALUES ('001', 'a')",
+                "COMMIT",
+                "BEGIN",
+                "CREATE TABLE b (id INT)",
+                "INSERT INTO _tradar_migrations (version, name) VALUES ('002', 'b')",
+                "COMMIT",
+            ],
+            "each file's own statements ran inside its own transaction, in order"
+        );
+        let Some(migrations) = &screen.migrations else {
+            panic!("expected the panel still open, showing Done");
+        };
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| migrations.draw(frame, frame.area()))
+            .unwrap();
+        assert!(buffer_text(terminal.backend().buffer()).contains("Applied 2"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_migration_rolls_back_and_stops_the_run() {
+        let (mut screen, _rx) = screen_with(fake_engine(QueryResult::Affected { rows: 0 }));
+        let pending = vec![migration_file("001", "a"), migration_file("002", "b")];
+        screen.migrations = Some(MigrationsComponent::listing(pending, 0));
+        screen.handle_migrations_query_outcome(
+            MigrationsQuery::RunFile(migration_file("001", "a")),
+            QueryOutcome::Failed {
+                error: "syntax error".to_string(),
+            },
+        );
+
+        assert!(matches!(
+            screen.migrations_query,
+            Some(MigrationsQuery::Rollback)
+        ));
+        assert_eq!(
+            screen.engine.history().last().map(String::as_str),
+            Some("ROLLBACK")
         );
     }
 

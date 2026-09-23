@@ -28,5 +28,6 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`mongo-chaining.md`](mongo-chaining.md) — Mongo: chain `sort`/`limit`/`skip`/`count()` sau `find()`, lệnh mới `findOne`/`countDocuments`, `find()` nhận projection — parser đổi sang `Vec<MethodCall>`, cộng fix bug có sẵn trong `split_top_level_args` (không bỏ qua nội dung chuỗi JSON khi đếm độ sâu ngoặc).
 - [`schema-diff.md`](schema-diff.md) — so schema 2 connection đã mở (`D` trong navigator), dựa trên `Component::outline()` thay vì `SchemaInfo` trực tiếp để không phá luật phụ thuộc `tradar-core`/`tradar-query-workbench`; tab riêng, read-only, chưa sinh DDL đồng bộ.
 - [`table-designer.md`](table-designer.md) — thêm/xoá cột, đổi tên bảng, tạo bảng mới qua form nhiều field trong navigator (`a`/`x`/`R`/`n`), chỉ Postgres ở v1; `QueryDriver::table_ddl` mới cùng khuôn `edit_sql`, form đầu tiên trong app có nhiều hơn 3 field.
+- [`migrations.md`](migrations.md) — panel migration kiểu Flyway/Alembic (`F1`), file `.sql` đánh số trong `~/.config/tradar/migrations/<connection>/`, track qua bảng `_tradar_migrations` trong chính DB, chỉ Postgres, độc lập với table designer; tái dùng nguyên `submit_all`/`submit_query` sẵn có, không cần hạ tầng engine mới.
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.
