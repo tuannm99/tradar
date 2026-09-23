@@ -186,6 +186,22 @@ fn last_used_dir(recent: &[String], queries_dir: &std::path::Path) -> std::path:
         .unwrap_or_else(|| queries_dir.to_path_buf())
 }
 
+/// The row-edit overlay's warning line for `editable_row`'s
+/// no-declared-primary-key fallback (every column in the result used as
+/// the `WHERE` key instead) -- `None` for the ordinary, real-primary-key
+/// case, so the overlay shows no warning line at all. Read `docs/backlog/no-pk-row-edit.md`
+/// for why this is judged safe to allow rather than refuse outright: it's
+/// still one known table (`single_table_source` already ruled out a join/
+/// view/subquery), so the only remaining risk is two rows identical across
+/// every column shown here, not the wrong table being written to.
+fn fallback_key_warning(uses_fallback_key: bool) -> Option<String> {
+    uses_fallback_key.then(|| {
+        "no primary key — every column shown is used to find the row, so this could affect \
+         more than one if any are exact duplicates"
+            .to_string()
+    })
+}
+
 /// `schema`, flattened for the navigator, grouped by `SchemaInfo::schema`
 /// then by `SchemaInfo::object_kind` before each table/collection and its
 /// columns -- either grouping level is skipped when every entry in the
@@ -312,6 +328,10 @@ fn push_table(entries: &mut Vec<OutlineEntry>, depth: u8, table: &SchemaInfo) {
         });
     }
 }
+
+/// `editable_row`'s return: the table, its key columns (name, value), and
+/// whether that key is `editable_row`'s no-declared-PK fallback.
+type EditableRow = (String, Vec<(String, String)>, bool);
 
 impl QueryScreenComponent {
     /// `_action_tx` is part of `Session::build_screen`'s contract (a screen
@@ -838,11 +858,17 @@ impl QueryScreenComponent {
         }
     }
 
-    /// The table the result on screen can be edited through, and the
-    /// key columns identifying the selected row. `Err` carries the reason
-    /// it can't be, phrased for the user -- a grid that refuses a keystroke
-    /// without saying why reads as broken.
-    fn editable_row(&self) -> Result<(String, Vec<(String, String)>), String> {
+    /// The table the result on screen can be edited through, the key
+    /// columns identifying the selected row, and whether that key is a
+    /// real primary key or a fallback -- every column in the result, used
+    /// when `table` declares no primary key at all (see
+    /// `docs/backlog/no-pk-row-edit.md`: still one known table, so the only
+    /// risk left is two rows identical across every one of those columns,
+    /// which `build_edit`'s caller surfaces as an explicit warning rather
+    /// than hiding). `Err` carries the reason it can't be, phrased for the
+    /// user -- a grid that refuses a keystroke without saying why reads as
+    /// broken.
+    fn editable_row(&self) -> Result<EditableRow, String> {
         let query = self
             .last_query
             .as_deref()
@@ -859,33 +885,37 @@ impl QueryScreenComponent {
         // names `_id` directly instead, since it's metadata no index
         // mapping ever declares -- see `QueryDriver::edit_key_columns`'s own
         // doc comment.
-        let key_columns: Vec<String> = match self.engine.edit_key_columns(&table) {
-            Some(columns) => columns,
-            None => {
-                let schema = self
-                    .engine
-                    .schema()
-                    .as_ref()
-                    .map_err(|e| format!("the schema for this connection wasn't read: {e}"))?;
-                // A Postgres source is schema-qualified (`public.users`)
-                // while the sidebar lists bare names, so match on the last
-                // part.
-                let bare = table.rsplit('.').next().unwrap_or(&table);
-                let info = schema
-                    .iter()
-                    .find(|entry| entry.name.eq_ignore_ascii_case(bare))
-                    .ok_or_else(|| format!("'{table}' isn't in this connection's schema"))?;
-                info.columns
-                    .iter()
-                    .filter(|column| column.primary_key)
-                    .map(|column| column.name.clone())
-                    .collect()
-            }
-        };
+        let (key_columns, uses_fallback_key): (Vec<String>, bool) =
+            match self.engine.edit_key_columns(&table) {
+                Some(columns) => (columns, false),
+                None => {
+                    let schema =
+                        self.engine.schema().as_ref().map_err(|e| {
+                            format!("the schema for this connection wasn't read: {e}")
+                        })?;
+                    // A Postgres source is schema-qualified (`public.users`)
+                    // while the sidebar lists bare names, so match on the last
+                    // part.
+                    let bare = table.rsplit('.').next().unwrap_or(&table);
+                    let info = schema
+                        .iter()
+                        .find(|entry| entry.name.eq_ignore_ascii_case(bare))
+                        .ok_or_else(|| format!("'{table}' isn't in this connection's schema"))?;
+                    let declared: Vec<String> = info
+                        .columns
+                        .iter()
+                        .filter(|column| column.primary_key)
+                        .map(|column| column.name.clone())
+                        .collect();
+                    if declared.is_empty() {
+                        (self.results.columns().to_vec(), true)
+                    } else {
+                        (declared, false)
+                    }
+                }
+            };
         if key_columns.is_empty() {
-            return Err(format!(
-                "'{table}' has no primary key — there is no WHERE clause that names exactly one row"
-            ));
+            return Err(format!("'{table}' has no columns to identify a row by"));
         }
 
         let columns = self.results.columns();
@@ -901,7 +931,7 @@ impl QueryScreenComponent {
             let value = row.get(index).cloned().unwrap_or_default();
             key.push((name.clone(), value));
         }
-        Ok((table, key))
+        Ok((table, key, uses_fallback_key))
     }
 
     fn begin_edit_cell(&mut self) {
@@ -923,18 +953,26 @@ impl QueryScreenComponent {
             return;
         }
         self.row_edit = Some(match self.build_edit(RowChange::DeleteRow) {
-            Ok(sql) => RowEditComponent::confirm("Delete row", sql),
+            Ok((sql, uses_fallback_key)) => RowEditComponent::confirm(
+                "Delete row",
+                sql,
+                fallback_key_warning(uses_fallback_key),
+            ),
             Err(reason) => RowEditComponent::blocked("Delete row", reason),
         });
     }
 
     /// The statement for `change` against the selected row, as this
-    /// driver would write it.
-    fn build_edit(&self, change: RowChange) -> Result<String, String> {
-        let (table, key) = self.editable_row()?;
-        self.engine
+    /// driver would write it, plus whether it's keyed by a real primary
+    /// key or by `editable_row`'s no-declared-PK fallback (every column in
+    /// the result) -- see that method's own doc comment.
+    fn build_edit(&self, change: RowChange) -> Result<(String, bool), String> {
+        let (table, key, uses_fallback_key) = self.editable_row()?;
+        let sql = self
+            .engine
             .edit_sql(&RowEdit { table, key, change })
-            .ok_or_else(|| "this connection's results can't be edited in place".to_string())
+            .ok_or_else(|| "this connection's results can't be edited in place".to_string())?;
+        Ok((sql, uses_fallback_key))
     }
 
     fn handle_row_edit(&mut self, outcome: RowEditOutcome) {
@@ -951,7 +989,9 @@ impl QueryScreenComponent {
                 });
                 if let Some(overlay) = &mut self.row_edit {
                     match built {
-                        Ok(sql) => overlay.show_statement(sql),
+                        Ok((sql, uses_fallback_key)) => {
+                            overlay.show_statement(sql, fallback_key_warning(uses_fallback_key))
+                        }
                         Err(reason) => overlay.show_problem(reason),
                     }
                 }
@@ -3731,6 +3771,78 @@ mod tests {
             screen.engine.history(),
             &["SELECT id, name FROM users"],
             "a cancelled delete must not have run anything"
+        );
+    }
+
+    /// A screen whose driver returns a two-column `events` table and whose
+    /// schema declares *no* primary key at all -- the setup for the
+    /// no-declared-PK fallback (see `docs/backlog/no-pk-row-edit.md`).
+    fn no_pk_screen() -> (QueryScreenComponent, mpsc::UnboundedReceiver<Action>) {
+        let result = QueryResult::Table {
+            columns: vec!["kind".to_string(), "payload".to_string()],
+            rows: vec![
+                vec!["click".to_string(), "a".to_string()],
+                vec!["click".to_string(), "b".to_string()],
+            ],
+            truncated: false,
+        };
+        let schema = vec![SchemaInfo {
+            name: "events".to_string(),
+            columns: vec![
+                crate::query_driver::ColumnInfo::new("kind", "TEXT"),
+                crate::query_driver::ColumnInfo::new("payload", "TEXT"),
+            ],
+            kind: None,
+            ttl: None,
+            schema: None,
+            object_kind: None,
+        }];
+        screen_with(fake_engine_with_schema(result, Ok(schema)))
+    }
+
+    #[tokio::test]
+    async fn deleting_a_row_with_no_declared_primary_key_keys_on_every_column_shown() {
+        let (mut screen, _rx) = no_pk_screen();
+        submit_and_settle(&mut screen, "SELECT kind, payload FROM events").await;
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+
+        assert!(
+            screen.row_edit.is_some(),
+            "a no-PK table is now allowed, not refused outright"
+        );
+        screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::NONE);
+
+        assert_eq!(
+            screen.engine.history()[1],
+            "DELETE FROM \"events\" WHERE \"kind\" = 'click' AND \"payload\" = 'a'",
+            "every column in the result is used as the key, not just kind"
+        );
+    }
+
+    #[test]
+    fn deleting_a_row_with_no_declared_primary_key_shows_a_warning_before_running() {
+        let (mut screen, _rx) = no_pk_screen();
+        screen.last_query = Some("SELECT kind, payload FROM events".to_string());
+        screen.results.set_result(QueryResult::Table {
+            columns: vec!["kind".to_string(), "payload".to_string()],
+            rows: vec![vec!["click".to_string(), "a".to_string()]],
+            truncated: false,
+        });
+        screen.focus = Focus::Results;
+
+        screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("no primary key"),
+            "the overlay must warn before running: {text}"
         );
     }
 

@@ -32,8 +32,13 @@ pub enum RowEditOutcome {
 enum Stage {
     /// Typing a replacement value.
     Value(TextInput),
-    /// Showing the statement, waiting for a yes.
-    Confirm(String),
+    /// Showing the statement, waiting for a yes. `warning` is `Some` when
+    /// the key in `statement`'s `WHERE` isn't a real primary key -- see
+    /// `docs/backlog/no-pk-row-edit.md`.
+    Confirm {
+        statement: String,
+        warning: Option<String>,
+    },
     /// Nothing can run, and why. Dismiss only.
     Blocked(String),
 }
@@ -54,10 +59,10 @@ impl RowEditComponent {
 
     /// Skips straight to approving `statement` -- a delete has no value to
     /// type.
-    pub fn confirm(title: &str, statement: String) -> Self {
+    pub fn confirm(title: &str, statement: String, warning: Option<String>) -> Self {
         Self {
             title: title.to_string(),
-            stage: Stage::Confirm(statement),
+            stage: Stage::Confirm { statement, warning },
         }
     }
 
@@ -71,8 +76,8 @@ impl RowEditComponent {
     }
 
     /// Moves from typing a value to approving the statement built from it.
-    pub fn show_statement(&mut self, statement: String) {
-        self.stage = Stage::Confirm(statement);
+    pub fn show_statement(&mut self, statement: String, warning: Option<String>) {
+        self.stage = Stage::Confirm { statement, warning };
     }
 
     /// Reports a failure to build the statement, in place, rather than
@@ -100,7 +105,7 @@ impl RowEditComponent {
             // A plain `y`, the same answer the connection picker's delete
             // asks for -- and anything else cancels, so a stray key can
             // never write to the database.
-            Stage::Confirm(statement) => match code {
+            Stage::Confirm { statement, .. } => match code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     Some(RowEditOutcome::Confirmed(statement.clone()))
                 }
@@ -128,23 +133,33 @@ impl RowEditComponent {
                     Style::default().fg(theme.text_dim),
                 )),
             ],
-            Stage::Confirm(statement) => vec![
-                Line::from(Span::styled(
-                    "This will run:",
-                    Style::default().fg(theme.text_dim),
-                )),
-                Line::from(Span::styled(
-                    statement.clone(),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
+            Stage::Confirm { statement, warning } => {
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        "This will run:",
+                        Style::default().fg(theme.text_dim),
+                    )),
+                    Line::from(Span::styled(
+                        statement.clone(),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                ];
+                if let Some(warning) = warning {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        warning.clone(),
+                        Style::default().fg(theme.error),
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
                     "y to run, any other key to cancel",
                     Style::default().fg(theme.warning),
-                )),
-            ],
+                )));
+                lines
+            }
             Stage::Blocked(reason) => vec![
                 Line::from(Span::styled(
                     reason.clone(),
@@ -199,8 +214,11 @@ mod tests {
 
     #[test]
     fn the_statement_has_to_be_approved_with_y_before_it_runs() {
-        let mut component =
-            RowEditComponent::confirm("Delete row", "DELETE FROM t WHERE id = '1'".to_string());
+        let mut component = RowEditComponent::confirm(
+            "Delete row",
+            "DELETE FROM t WHERE id = '1'".to_string(),
+            None,
+        );
 
         let text = draw(&component);
         assert!(
@@ -218,12 +236,43 @@ mod tests {
 
     #[test]
     fn any_other_key_cancels_rather_than_running_the_statement() {
-        let mut component = RowEditComponent::confirm("Delete row", "DELETE FROM t".to_string());
+        let mut component =
+            RowEditComponent::confirm("Delete row", "DELETE FROM t".to_string(), None);
 
         assert!(matches!(
             component.handle_key_event(KeyCode::Char('n'), KeyModifiers::NONE),
             Some(RowEditOutcome::Cancelled)
         ));
+    }
+
+    #[test]
+    fn a_confirm_with_a_warning_shows_it_alongside_the_statement() {
+        let component = RowEditComponent::confirm(
+            "Delete row",
+            "DELETE FROM t WHERE a = '1' AND b = '2'".to_string(),
+            Some("no primary key -- this may affect more than one row".to_string()),
+        );
+
+        let text = draw(&component);
+
+        assert!(text.contains("DELETE FROM t WHERE a = '1' AND b = '2'"));
+        assert!(
+            text.contains("may affect more than one row"),
+            "buffer was: {text}"
+        );
+    }
+
+    #[test]
+    fn a_confirm_with_no_warning_shows_none() {
+        let component = RowEditComponent::confirm(
+            "Delete row",
+            "DELETE FROM t WHERE id = '1'".to_string(),
+            None,
+        );
+
+        let text = draw(&component);
+
+        assert!(!text.contains("primary key"), "buffer was: {text}");
     }
 
     #[test]
