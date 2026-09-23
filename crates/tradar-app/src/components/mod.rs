@@ -21,6 +21,7 @@ use tradar_core::vim_list::VimMove;
 
 use crate::components::connection_picker::ConnectionPickerComponent;
 use crate::components::navigator::{NavConnection, NavOutcome, NavigatorComponent};
+use crate::components::schema_diff::SchemaDiffComponent;
 
 pub enum ScreenSlot {
     ConnectionPicker,
@@ -364,6 +365,15 @@ impl RootComponent {
             return outcome.and_then(|o| self.apply_nav_outcome(o));
         }
 
+        // Same idiom, for the schema-diff picker's two picks.
+        if self.navigator.is_picking_diff() {
+            let connections = self.nav_connections();
+            let outcome = self
+                .navigator
+                .diff_picker_key_event(code, modifiers, &connections);
+            return outcome.and_then(|o| self.apply_nav_outcome(o));
+        }
+
         // The filter bar, while open, gets every key -- same idiom as the
         // query screen's own search bars: it has to see letters the
         // keymap would otherwise treat as commands (`j`, `g`, ...).
@@ -404,6 +414,14 @@ impl RootComponent {
             Command::CrudRead => self.navigator.choose_snippet(&connections, CrudOp::Read),
             Command::CrudUpdate => self.navigator.choose_snippet(&connections, CrudOp::Update),
             Command::CrudDelete => self.navigator.choose_snippet(&connections, CrudOp::Delete),
+            Command::ShowSchemaDiff => {
+                self.navigator.start_diff_picker(&connections);
+                None
+            }
+            Command::TableDesignAddColumn => self.navigator.choose_add_column(&connections),
+            Command::TableDesignDropColumn => self.navigator.choose_drop_column(&connections),
+            Command::TableDesignRenameTable => self.navigator.choose_rename_table(&connections),
+            Command::TableDesignCreateTable => self.navigator.choose_create_table(&connections),
             Command::ToggleNavigator => {
                 self.toggle_navigator();
                 None
@@ -454,6 +472,28 @@ impl RootComponent {
                     && let Some(text) = screen.crud_snippet(&name, op, &columns)
                 {
                     screen.insert_text(&text);
+                }
+                self.navigator_focused = false;
+                None
+            }
+            NavOutcome::Diff {
+                name_a,
+                outline_a,
+                name_b,
+                outline_b,
+            } => {
+                self.new_tab();
+                let tab = self.active_tab;
+                let component = SchemaDiffComponent::new(&name_a, &outline_a, &name_b, &outline_b);
+                self.tabs[tab].screen = ScreenSlot::Active(Box::new(component));
+                self.tabs[tab].title = Some(format!("Diff: {name_a} vs {name_b}"));
+                self.navigator_focused = false;
+                None
+            }
+            NavOutcome::TableDesign { tab, request } => {
+                self.active_tab = tab;
+                if let ScreenSlot::Active(screen) = &mut self.tabs[tab].screen {
+                    screen.open_table_designer(request);
                 }
                 self.navigator_focused = false;
                 None
@@ -814,6 +854,7 @@ pub mod column_picker;
 pub mod connection_form;
 pub mod connection_picker;
 pub mod navigator;
+pub mod schema_diff;
 
 #[cfg(test)]
 mod tests {
@@ -1671,6 +1712,9 @@ mod tests {
         fn crud_snippet(&self, name: &str, op: CrudOp, _columns: &[String]) -> Option<String> {
             Some(format!("{name}:{op:?}"))
         }
+        fn open_table_designer(&mut self, request: tradar_core::action::TableDesignRequest) {
+            *self.inserted.borrow_mut() = format!("{request:?}");
+        }
         fn connection_alive(&self) -> Option<bool> {
             Some(true)
         }
@@ -1785,6 +1829,21 @@ mod tests {
     }
 
     #[test]
+    fn pressing_a_on_a_table_in_the_navigator_opens_its_table_designer() {
+        let (mut root, inserted) = root_with_navigator();
+        root.handle_key_event(KeyCode::Char('l'), KeyModifiers::NONE);
+        root.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+
+        root.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        assert_eq!(inserted.borrow().as_str(), "AddColumn { table: \"users\" }");
+        assert!(
+            !root.navigator_focused,
+            "focus goes to the tab the designer opened on"
+        );
+    }
+
+    #[test]
     fn pressing_c_on_a_connection_row_does_nothing() {
         let (mut root, inserted) = root_with_navigator();
 
@@ -1868,5 +1927,50 @@ mod tests {
 
         assert!(!root.navigator_focused, "must not trap the keys");
         assert!(root.navigator_open, "but the panel itself stays up");
+    }
+
+    #[test]
+    fn pressing_shift_d_in_the_navigator_opens_a_schema_diff_tab_for_two_open_connections() {
+        let (mut root, _) = root_with_navigator();
+        root.new_tab();
+        root.tabs[1].screen = ScreenSlot::Active(Box::new(OutlineScreen {
+            inserted: Rc::new(std::cell::RefCell::new(String::new())),
+        }));
+        root.tabs[1].title = Some("local-postgres".to_string());
+        root.active_tab = 0;
+        root.navigator_open = true;
+        root.navigator_focused = true;
+
+        root.handle_key_event(KeyCode::Char('D'), KeyModifiers::NONE);
+        assert!(
+            root.navigator.is_picking_diff(),
+            "D opens the two-step connection picker"
+        );
+        root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE); // pick A
+        root.handle_key_event(KeyCode::Enter, KeyModifiers::NONE); // pick B
+
+        assert_eq!(root.tabs.len(), 3, "the diff opens in a tab of its own");
+        let diff_tab = root.tabs.last().unwrap();
+        assert_eq!(
+            diff_tab.title.as_deref(),
+            Some("Diff: local-sqlite vs local-postgres")
+        );
+        assert!(matches!(diff_tab.screen, ScreenSlot::Active(_)));
+        assert_eq!(
+            root.active_tab,
+            root.tabs.len() - 1,
+            "focus switches to the new diff tab, unlike a plain Insert/Snippet"
+        );
+        assert!(!root.navigator.is_picking_diff());
+    }
+
+    #[test]
+    fn the_diff_picker_is_a_no_op_with_only_one_connection_open() {
+        let (mut root, _) = root_with_navigator();
+
+        root.handle_key_event(KeyCode::Char('D'), KeyModifiers::NONE);
+
+        assert!(!root.navigator.is_picking_diff());
+        assert_eq!(root.tabs.len(), 1, "nothing opened, nothing to diff");
     }
 }

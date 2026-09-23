@@ -116,6 +116,13 @@ pub enum Context {
     /// reason `Snippets` isn't `Prompt` -- `d` has to be a plain key here
     /// too.
     FilterConditions,
+    /// The table-designer overlay (`a`/`x`/`R`/`n` in `Context::Navigator`)
+    /// -- add/drop a column, rename a table, or create one. Combined with
+    /// `Prompt` for the shared Confirm/Cancel/NextField/PrevField bindings
+    /// every text-entry overlay already has; holds only the one binding
+    /// that's genuinely new here (committing one column and starting the
+    /// next while building a `CREATE TABLE`).
+    TableDesigner,
 }
 
 impl Context {
@@ -139,6 +146,7 @@ impl Context {
             Self::HttpRequests => "http-requests",
             Self::ColumnPicker => "column-picker",
             Self::FilterConditions => "filter-conditions",
+            Self::TableDesigner => "table-designer",
         }
     }
 
@@ -162,12 +170,13 @@ impl Context {
             "http-requests" => Self::HttpRequests,
             "column-picker" => Self::ColumnPicker,
             "filter-conditions" => Self::FilterConditions,
+            "table-designer" => Self::TableDesigner,
             _ => return None,
         })
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 18] {
+    pub fn all() -> [Self; 19] {
         [
             Self::Global,
             Self::Picker,
@@ -187,6 +196,7 @@ impl Context {
             Self::Snippets,
             Self::ColumnPicker,
             Self::FilterConditions,
+            Self::TableDesigner,
         ]
     }
 }
@@ -292,6 +302,21 @@ pub enum Command {
     /// Open/close a node in the navigator tree.
     Expand,
     Collapse,
+    /// Open the schema-diff picker: pick two already-open connections and
+    /// compare their schemas (columns/types) in a new tab.
+    ShowSchemaDiff,
+    /// Open the table designer on the selected table, to add a column.
+    TableDesignAddColumn,
+    /// Open the table designer on the selected column, to drop it.
+    TableDesignDropColumn,
+    /// Open the table designer on the selected table, to rename it.
+    TableDesignRenameTable,
+    /// Open the table designer on the selected connection, to create a new
+    /// table.
+    TableDesignCreateTable,
+    /// Inside the table designer's "create table" form: commit the column
+    /// just typed and start entering the next one.
+    TableDesignerCommitColumn,
     /// Switch a Redis query screen between browse mode (key sidebar) and
     /// console mode (raw command editor). No-op for every other connector.
     ToggleBrowseMode,
@@ -434,6 +459,12 @@ impl Command {
             Self::ToggleResultView => "toggle-result-view",
             Self::Expand => "expand",
             Self::Collapse => "collapse",
+            Self::ShowSchemaDiff => "show-schema-diff",
+            Self::TableDesignAddColumn => "table-design-add-column",
+            Self::TableDesignDropColumn => "table-design-drop-column",
+            Self::TableDesignRenameTable => "table-design-rename-table",
+            Self::TableDesignCreateTable => "table-design-create-table",
+            Self::TableDesignerCommitColumn => "table-designer-commit-column",
             Self::ToggleBrowseMode => "toggle-browse-mode",
             Self::BrowseOpen => "browse-open",
             Self::ToggleRabbitMode => "toggle-rabbit-mode",
@@ -485,7 +516,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 90] = [
+    const ALL: [Self; 96] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -532,6 +563,12 @@ impl Command {
         Self::ToggleResultView,
         Self::Expand,
         Self::Collapse,
+        Self::ShowSchemaDiff,
+        Self::TableDesignAddColumn,
+        Self::TableDesignDropColumn,
+        Self::TableDesignRenameTable,
+        Self::TableDesignCreateTable,
+        Self::TableDesignerCommitColumn,
         Self::ToggleBrowseMode,
         Self::BrowseOpen,
         Self::ToggleRabbitMode,
@@ -627,6 +664,12 @@ impl Command {
             Self::ToggleResultView => "Switch a document result between table and JSON view",
             Self::Expand => "Open the selected node",
             Self::Collapse => "Close the selected node",
+            Self::ShowSchemaDiff => "Compare schemas of two open connections",
+            Self::TableDesignAddColumn => "Add a column to the selected table",
+            Self::TableDesignDropColumn => "Drop the selected column",
+            Self::TableDesignRenameTable => "Rename the selected table",
+            Self::TableDesignCreateTable => "Create a new table",
+            Self::TableDesignerCommitColumn => "Commit this column and start the next one",
             Self::ToggleBrowseMode => "Switch between Redis browse and console mode",
             Self::BrowseOpen => "Open the selected key",
             Self::ToggleRabbitMode => "Switch between RabbitMQ Queues and Exchanges",
@@ -904,10 +947,19 @@ impl Default for Keymap {
                 ("r", Command::CrudRead),
                 ("u", Command::CrudUpdate),
                 ("d", Command::CrudDelete),
+                ("D", Command::ShowSchemaDiff),
+                ("a", Command::TableDesignAddColumn),
+                ("x", Command::TableDesignDropColumn),
+                ("R", Command::TableDesignRenameTable),
+                ("n", Command::TableDesignCreateTable),
                 ("/", Command::Search),
                 ("esc", Command::Back),
                 ("?", Command::Help),
             ]),
+        );
+        bindings.insert(
+            Context::TableDesigner,
+            parse_defaults(&[("ctrl-a", Command::TableDesignerCommitColumn)]),
         );
         bindings.insert(
             Context::Results,

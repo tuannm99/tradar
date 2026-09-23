@@ -26,5 +26,7 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`multi-filter.md`](multi-filter.md) — filter kết quả mở rộng cú pháp `cột:giá_trị` + `AND`/`OR` (`ParsedFilter`, module `filter.rs` mới), panel `F3` xem/xoá từng điều kiện đã tách ra.
 - [`mongo-es-row-edit.md`](mongo-es-row-edit.md) — mở row-edit (sửa cell/xoá row) cho MongoDB (`find()` đơn giản, khoá `_id`) và Elasticsearch (`_search` 1 index, khoá `_id`) — suy luận kiểu JSON từ text gõ vào, `QueryDriver::edit_key_columns` mới, và `execute()` của ES đổi sang tách `_search` thành 1 document/hit.
 - [`mongo-chaining.md`](mongo-chaining.md) — Mongo: chain `sort`/`limit`/`skip`/`count()` sau `find()`, lệnh mới `findOne`/`countDocuments`, `find()` nhận projection — parser đổi sang `Vec<MethodCall>`, cộng fix bug có sẵn trong `split_top_level_args` (không bỏ qua nội dung chuỗi JSON khi đếm độ sâu ngoặc).
+- [`schema-diff.md`](schema-diff.md) — so schema 2 connection đã mở (`D` trong navigator), dựa trên `Component::outline()` thay vì `SchemaInfo` trực tiếp để không phá luật phụ thuộc `tradar-core`/`tradar-query-workbench`; tab riêng, read-only, chưa sinh DDL đồng bộ.
+- [`table-designer.md`](table-designer.md) — thêm/xoá cột, đổi tên bảng, tạo bảng mới qua form nhiều field trong navigator (`a`/`x`/`R`/`n`), chỉ Postgres ở v1; `QueryDriver::table_ddl` mới cùng khuôn `edit_sql`, form đầu tiên trong app có nhiều hơn 3 field.
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.

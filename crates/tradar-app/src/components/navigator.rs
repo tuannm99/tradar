@@ -19,10 +19,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use tradar_core::action::{CrudOp, OutlineEntry};
+use tradar_core::action::{CrudOp, OutlineEntry, TableDesignRequest};
 use tradar_core::theme::theme;
 use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
+use tradar_query_workbench::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 
 use crate::components::column_picker::{ColumnPickerComponent, ColumnPickerOutcome, PickerColumn};
 
@@ -76,6 +77,24 @@ pub enum NavOutcome {
         op: CrudOp,
         columns: Vec<String>,
     },
+    /// Build a schema-diff tab from these two already-open connections'
+    /// outlines -- `D`, after both picks in `diff_picker_key_event`
+    /// resolve. Outlines travel here by value rather than by tab index:
+    /// `RootComponent` builds `SchemaDiffComponent` synchronously from
+    /// them, so there's nothing to look up again once this fires.
+    Diff {
+        name_a: String,
+        outline_a: Vec<OutlineEntry>,
+        name_b: String,
+        outline_b: Vec<OutlineEntry>,
+    },
+    /// Switch to `tab` and open its table-designer overlay for `request`
+    /// -- `a`/`x`/`R`/`n`, see `choose_add_column`/`choose_drop_column`/
+    /// `choose_rename_table`/`choose_create_table`.
+    TableDesign {
+        tab: usize,
+        request: TableDesignRequest,
+    },
 }
 
 /// A `c`/`r`/`u`/`d` request waiting on the column picker before it can
@@ -85,6 +104,21 @@ struct PendingSnippet {
     name: String,
     op: CrudOp,
     picker: ColumnPickerComponent,
+}
+
+/// State machine for `D` (schema diff): pick connection A, then connection
+/// B, from every connection that's currently open -- see
+/// `start_diff_picker`/`diff_picker_key_event`. Only open connections are
+/// offered because `outline()` (what a diff compares) only exists once a
+/// connection has a screen; this never connects one on the user's behalf
+/// the way choosing an unopened row elsewhere in the navigator does.
+enum PendingDiff {
+    PickingA(HistoryPickerComponent),
+    PickingB {
+        name_a: String,
+        outline_a: Vec<OutlineEntry>,
+        picker: HistoryPickerComponent,
+    },
 }
 
 #[derive(Default)]
@@ -115,6 +149,9 @@ pub struct NavigatorComponent {
     /// before `choose_snippet`'s request can turn into a `NavOutcome` --
     /// see `column_picker_key_event`.
     pending_snippet: Option<PendingSnippet>,
+    /// `Some` while the schema-diff picker is open -- see
+    /// `start_diff_picker`/`diff_picker_key_event`.
+    pending_diff: Option<PendingDiff>,
 }
 
 impl NavigatorComponent {
@@ -391,6 +428,81 @@ impl NavigatorComponent {
         None
     }
 
+    /// The table/collection row under the cursor, if there is one -- shared
+    /// by `choose_add_column`/`choose_rename_table`, which both need
+    /// exactly the same thing `choose_snippet` does (an `is_object` row and
+    /// the tab it's open on) before they can build their own
+    /// `TableDesignRequest`.
+    fn selected_table(&self, connections: &[NavConnection]) -> Option<(usize, String)> {
+        let Row::Entry { connection, entry } = self.selected_row(connections)? else {
+            return None;
+        };
+        let outline_entry = &connections[connection].outline[entry];
+        if !outline_entry.is_object {
+            return None;
+        }
+        let tab = connections[connection].tab?;
+        Some((tab, outline_entry.label.clone()))
+    }
+
+    /// `a` on a table row: open the table designer to add a column to it.
+    pub fn choose_add_column(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let (tab, table) = self.selected_table(connections)?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::AddColumn { table },
+        })
+    }
+
+    /// `R` on a table row: open the table designer to rename it.
+    pub fn choose_rename_table(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let (tab, table) = self.selected_table(connections)?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::RenameTable { table },
+        })
+    }
+
+    /// `x` on a column row: open the table designer to drop it. Unlike
+    /// `selected_table`, the selected row here *is* the column -- its
+    /// owning table is whatever `is_object` row precedes it, which is
+    /// always its direct parent (a table's own columns are never
+    /// interrupted by another grouping level -- see `push_table` in
+    /// `tradar-query-workbench`).
+    pub fn choose_drop_column(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let Row::Entry { connection, entry } = self.selected_row(connections)? else {
+            return None;
+        };
+        let outline = &connections[connection].outline;
+        let column_entry = &outline[entry];
+        if column_entry.is_object {
+            return None;
+        }
+        let table_entry = outline[..entry].iter().rev().find(|e| e.is_object)?;
+        let tab = connections[connection].tab?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::DropColumn {
+                table: table_entry.label.clone(),
+                column: column_entry.label.clone(),
+            },
+        })
+    }
+
+    /// `n`, anywhere under an open connection (its own row, or any row in
+    /// its tree): open the table designer to create a new table there.
+    pub fn choose_create_table(&self, connections: &[NavConnection]) -> Option<NavOutcome> {
+        let connection = match self.selected_row(connections)? {
+            Row::Connection(index) => index,
+            Row::Entry { connection, .. } => connection,
+        };
+        let tab = connections[connection].tab?;
+        Some(NavOutcome::TableDesign {
+            tab,
+            request: TableDesignRequest::CreateTable,
+        })
+    }
+
     /// Whether the column picker is open, waiting on its own keys ahead of
     /// the tree's -- same "modal steals input" idiom as `is_filtering`.
     pub fn is_picking_columns(&self) -> bool {
@@ -422,6 +534,95 @@ impl NavigatorComponent {
                 })
             }
             None => None,
+        }
+    }
+
+    /// Whether the schema-diff picker is open, waiting on its own keys
+    /// ahead of the tree's -- same "modal steals input" idiom as
+    /// `is_picking_columns`.
+    pub fn is_picking_diff(&self) -> bool {
+        self.pending_diff.is_some()
+    }
+
+    /// Starts the "pick connection A, then B" flow for `D`. A no-op with
+    /// fewer than two open connections -- nothing to compare yet, and
+    /// there's no unopened-connection fallback here the way `choose` has
+    /// (see `PendingDiff`'s doc comment for why).
+    pub fn start_diff_picker(&mut self, connections: &[NavConnection]) {
+        let open_names: Vec<String> = connections
+            .iter()
+            .filter(|c| c.tab.is_some())
+            .map(|c| c.name.clone())
+            .collect();
+        if open_names.len() < 2 {
+            return;
+        }
+        self.pending_diff = Some(PendingDiff::PickingA(
+            HistoryPickerComponent::new(open_names).with_title("Schema diff — pick connection A"),
+        ));
+    }
+
+    /// One key while the schema-diff picker has the keys -- see
+    /// `is_picking_diff`. Picking A moves to picking B (offering every
+    /// other open connection); picking B turns both choices into a
+    /// `NavOutcome::Diff`. Cancelling either step drops the whole flow.
+    pub fn diff_picker_key_event(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        connections: &[NavConnection],
+    ) -> Option<NavOutcome> {
+        match self.pending_diff.as_mut()? {
+            PendingDiff::PickingA(picker) => match picker.handle_key_event(code, modifiers)? {
+                HistoryOutcome::Cancelled => {
+                    self.pending_diff = None;
+                    None
+                }
+                HistoryOutcome::Selected(name_a) => {
+                    let outline_a = connections
+                        .iter()
+                        .find(|c| c.name == name_a)
+                        .map(|c| c.outline.clone())
+                        .unwrap_or_default();
+                    let other_names: Vec<String> = connections
+                        .iter()
+                        .filter(|c| c.tab.is_some() && c.name != name_a)
+                        .map(|c| c.name.clone())
+                        .collect();
+                    self.pending_diff = Some(PendingDiff::PickingB {
+                        name_a,
+                        outline_a,
+                        picker: HistoryPickerComponent::new(other_names)
+                            .with_title("Schema diff — pick connection B"),
+                    });
+                    None
+                }
+            },
+            PendingDiff::PickingB {
+                name_a,
+                outline_a,
+                picker,
+            } => match picker.handle_key_event(code, modifiers)? {
+                HistoryOutcome::Cancelled => {
+                    self.pending_diff = None;
+                    None
+                }
+                HistoryOutcome::Selected(name_b) => {
+                    let outline_b = connections
+                        .iter()
+                        .find(|c| c.name == name_b)
+                        .map(|c| c.outline.clone())
+                        .unwrap_or_default();
+                    let outcome = NavOutcome::Diff {
+                        name_a: name_a.clone(),
+                        outline_a: outline_a.clone(),
+                        name_b,
+                        outline_b,
+                    };
+                    self.pending_diff = None;
+                    Some(outcome)
+                }
+            },
         }
     }
 
@@ -560,6 +761,13 @@ impl NavigatorComponent {
 
         if let Some(pending) = &mut self.pending_snippet {
             pending.picker.draw(frame, area);
+        }
+
+        if let Some(pending) = &mut self.pending_diff {
+            match pending {
+                PendingDiff::PickingA(picker) => picker.draw(frame, area),
+                PendingDiff::PickingB { picker, .. } => picker.draw(frame, area),
+            }
         }
     }
 }
@@ -714,6 +922,136 @@ mod tests {
             other => panic!("expected a snippet request aimed at the table's own tab: {other:?}"),
         }
         assert!(!navigator.is_picking_columns());
+    }
+
+    #[test]
+    fn a_on_a_table_row_requests_add_column_aimed_at_its_own_tab() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_add_column(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::AddColumn { table },
+            }) => assert_eq!((tab, table.as_str()), (0, "users")),
+            other => {
+                panic!("expected an AddColumn request aimed at the table's own tab: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_on_a_connection_row_does_nothing() {
+        let conns = connections();
+        let navigator = NavigatorComponent::new();
+
+        assert_eq!(navigator.choose_add_column(&conns), None);
+    }
+
+    #[test]
+    fn a_on_a_column_row_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        assert_eq!(
+            navigator.choose_add_column(&conns),
+            None,
+            "add-column targets a table, not one of its columns"
+        );
+    }
+
+    #[test]
+    fn shift_r_on_a_table_row_requests_rename_table() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_rename_table(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::RenameTable { table },
+            }) => assert_eq!((tab, table.as_str()), (0, "users")),
+            other => panic!("expected a RenameTable request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn x_on_a_column_row_requests_drop_column_naming_its_own_table() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        match navigator.choose_drop_column(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::DropColumn { table, column },
+            }) => assert_eq!((tab, table.as_str(), column.as_str()), (0, "users", "id")),
+            other => panic!("expected a DropColumn request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn x_on_a_table_row_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns);
+
+        assert_eq!(
+            navigator.choose_drop_column(&conns),
+            None,
+            "drop-column targets a column, not the table itself"
+        );
+    }
+
+    #[test]
+    fn n_on_an_open_connection_row_requests_create_table() {
+        let conns = connections();
+        let navigator = NavigatorComponent::new();
+
+        match navigator.choose_create_table(&conns) {
+            Some(NavOutcome::TableDesign {
+                tab,
+                request: TableDesignRequest::CreateTable,
+            }) => assert_eq!(tab, 0),
+            other => panic!("expected a CreateTable request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn n_on_a_connection_that_is_not_open_does_nothing() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.apply_move(VimMove::Bottom, &conns); // "remote", never connected
+
+        assert_eq!(
+            navigator.choose_create_table(&conns),
+            None,
+            "nothing to design on a connection with no schema loaded yet"
+        );
+    }
+
+    #[test]
+    fn n_anywhere_under_an_open_connection_s_tree_still_resolves_to_its_tab() {
+        let conns = connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.expand(&conns);
+        navigator.apply_move(VimMove::Down, &conns); // the "users" table row, not the connection row
+
+        match navigator.choose_create_table(&conns) {
+            Some(NavOutcome::TableDesign { tab, .. }) => assert_eq!(tab, 0),
+            other => panic!("expected a CreateTable request: {other:?}"),
+        }
     }
 
     #[test]
@@ -1018,5 +1356,114 @@ mod tests {
         navigator.open_filter();
 
         assert_eq!(navigator.filter_input.as_ref().unwrap().text(), "x");
+    }
+
+    /// Two open connections (`dev`, `prod`, both with a `users` table) plus
+    /// one never-connected `staging` -- what the diff picker needs at least
+    /// two of to offer anything.
+    fn two_open_connections() -> Vec<NavConnection> {
+        vec![
+            NavConnection {
+                name: "dev".to_string(),
+                tab: Some(0),
+                outline: vec![entry(0, "users", true, true), entry(1, "id", false, false)],
+                error: None,
+                alive: Some(true),
+            },
+            NavConnection {
+                name: "prod".to_string(),
+                tab: Some(1),
+                outline: vec![entry(0, "users", true, true), entry(1, "id", false, false)],
+                error: None,
+                alive: Some(true),
+            },
+            NavConnection {
+                name: "staging".to_string(),
+                tab: None,
+                outline: Vec::new(),
+                error: None,
+                alive: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn starting_the_diff_picker_with_fewer_than_two_open_connections_is_a_no_op() {
+        let conns = connections(); // only "local" is open
+        let mut navigator = NavigatorComponent::new();
+
+        navigator.start_diff_picker(&conns);
+
+        assert!(!navigator.is_picking_diff());
+    }
+
+    #[test]
+    fn the_diff_picker_only_offers_open_connections() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+
+        navigator.start_diff_picker(&conns);
+
+        assert!(navigator.is_picking_diff());
+        let PendingDiff::PickingA(picker) = navigator.pending_diff.as_ref().unwrap() else {
+            panic!("expected the first pick");
+        };
+        assert_eq!(picker.selected_entry(), Some("dev"));
+    }
+
+    #[test]
+    fn picking_both_connections_reports_a_diff_outcome_with_both_outlines() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.start_diff_picker(&conns);
+
+        let after_a = navigator.diff_picker_key_event(KeyCode::Enter, KeyModifiers::NONE, &conns);
+        assert_eq!(after_a, None, "picking A doesn't resolve yet");
+        assert!(navigator.is_picking_diff());
+
+        let outcome = navigator
+            .diff_picker_key_event(KeyCode::Enter, KeyModifiers::NONE, &conns)
+            .expect("both picks made");
+
+        match outcome {
+            NavOutcome::Diff {
+                name_a,
+                outline_a,
+                name_b,
+                outline_b,
+            } => {
+                assert_eq!(name_a, "dev");
+                assert_eq!(name_b, "prod");
+                assert_eq!(outline_a, conns[0].outline);
+                assert_eq!(outline_b, conns[1].outline);
+            }
+            other => panic!("expected a Diff outcome: {other:?}"),
+        }
+        assert!(!navigator.is_picking_diff());
+    }
+
+    #[test]
+    fn the_second_pick_never_offers_the_first_connection_again() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.start_diff_picker(&conns);
+        navigator.diff_picker_key_event(KeyCode::Enter, KeyModifiers::NONE, &conns);
+
+        let PendingDiff::PickingB { picker, .. } = navigator.pending_diff.as_ref().unwrap() else {
+            panic!("expected the second pick");
+        };
+        assert_eq!(picker.selected_entry(), Some("prod"));
+    }
+
+    #[test]
+    fn esc_on_either_pick_cancels_the_whole_diff_flow() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.start_diff_picker(&conns);
+
+        let outcome = navigator.diff_picker_key_event(KeyCode::Esc, KeyModifiers::NONE, &conns);
+
+        assert_eq!(outcome, None);
+        assert!(!navigator.is_picking_diff());
     }
 }
