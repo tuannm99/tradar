@@ -30,5 +30,6 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`table-designer.md`](table-designer.md) — thêm/xoá cột, đổi tên bảng, tạo bảng mới qua form nhiều field trong navigator (`a`/`x`/`R`/`n`), chỉ Postgres ở v1; `QueryDriver::table_ddl` mới cùng khuôn `edit_sql`, form đầu tiên trong app có nhiều hơn 3 field.
 - [`migrations.md`](migrations.md) — panel migration kiểu Flyway/Alembic (`F1`), file `.sql` đánh số trong `~/.config/tradar/migrations/<connection>/`, track qua bảng `_tradar_migrations` trong chính DB, chỉ Postgres, độc lập với table designer; tái dùng nguyên `submit_all`/`submit_query` sẵn có, không cần hạ tầng engine mới.
 - [`no-pk-row-edit.md`](no-pk-row-edit.md) — edit-cell/delete-row mở rộng cho bảng không có PK khai báo (SQL): fallback dùng toàn bộ cột kết quả làm khoá `WHERE`, luôn hiện cảnh báo tĩnh trong overlay confirm; JOIN vẫn bị từ chối như cũ, không mở rộng.
+- [`theme-presets.md`](theme-presets.md) — 2 preset dựng sẵn (Dracula, Nord) qua `preset` trong `[theme]`, `Theme::by_preset_name`, layer preset làm nền + override từng role đè lên trên; dark-only, không làm theme sáng.
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.

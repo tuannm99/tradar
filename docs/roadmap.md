@@ -33,7 +33,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 
 **Gap nhỏ, chưa scope**
 
-- [ ] Nhiều theme preset dựng sẵn (đã gỡ chặn — xem ghi chú bên dưới)
+- [x] Nhiều theme preset dựng sẵn — xong (2026-09-23), xem `docs/backlog/theme-presets.md`
 - [ ] Remap phím vim bên trong editor
 - [ ] Resize cột bằng tay trong results grid
 - [ ] Visual mode search-as-motion trong query editor
@@ -48,7 +48,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 
 ## Gap nhỏ, chưa được scope
 
-- Nhiều theme preset dựng sẵn (hiện: một theme dark + override từng màu). **Đã gỡ chặn 2026-09-03**: khảo sát mục này phát hiện 8 role `syntax_*` của `Theme` là dead code — `sql_highlight.rs`'s `color_for` hardcode màu ANSI thay vì đọc `theme()`, nên một preset sẽ không đổi được màu syntax highlighting dù có viết ra. Đã fix (xem `docs/backlog/known-issues.md`), giờ preset chỉ còn là việc thêm vài palette + một key `preset` trong `[theme]`. **Vẫn cần chốt trước khi code**: preset nào (light? nord/dracula? high-contrast?), và preset có kết hợp được với override từng role không (nên: preset làm nền, override đè lên trên).
+- ~~Nhiều theme preset dựng sẵn~~ — xong (2026-09-23), xem `docs/backlog/theme-presets.md`. Chốt qua `AskUserQuestion`: 2 preset **Dracula + Nord** (dark-only, không làm theme sáng/Gruvbox/Solarized), `preset` trong `[theme]` chọn bảng nền, override từng role vẫn đè lên trên như trước.
 - Cho phép remap cả phím vim *bên trong* editor (hiện cố định theo vim chuẩn — xem ghi chú phạm vi ở đầu `crates/tradar-core/src/keymap.rs`).
 - Cột trong bảng kết quả resize được bằng tay (hiện tự tính theo giá trị rộng nhất, cap 40 ký tự).
 - **Visual mode search-as-motion** trong query editor — thật vim hỗ trợ `/pattern` làm motion trong Visual mode, editor tự viết ở đây cố tình chưa làm (`open_buffer_search` chỉ hoạt động ở Normal mode).

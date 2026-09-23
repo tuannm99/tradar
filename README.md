@@ -70,8 +70,10 @@ Tuỳ chọn, nằm ở `~/.config/tradar/config.toml`. Không có file thì dù
 
 ```toml
 [theme]
+preset = "dracula"            # tuỳ chọn: "dracula" hoặc "nord" làm bảng màu nền; bỏ trống dùng mặc định (dark, indexed 256-color)
 # Màu theo vai trò, không phải theo tên màu cụ thể. Giá trị nhận tên màu
 # ("red", "bright-blue"), mã hex ("#89b4fa"), hoặc chỉ số 256-color ("75").
+# Override từng vai trò vẫn áp dụng đè lên trên preset (hoặc lên mặc định nếu không có preset).
 border-focused = "#89b4fa"
 error = "red"
 syntax-keyword = "176"
