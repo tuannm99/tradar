@@ -292,6 +292,9 @@ pub enum Command {
     /// Open/close a node in the navigator tree.
     Expand,
     Collapse,
+    /// Open the schema-diff picker: pick two already-open connections and
+    /// compare their schemas (columns/types) in a new tab.
+    ShowSchemaDiff,
     /// Switch a Redis query screen between browse mode (key sidebar) and
     /// console mode (raw command editor). No-op for every other connector.
     ToggleBrowseMode,
@@ -434,6 +437,7 @@ impl Command {
             Self::ToggleResultView => "toggle-result-view",
             Self::Expand => "expand",
             Self::Collapse => "collapse",
+            Self::ShowSchemaDiff => "show-schema-diff",
             Self::ToggleBrowseMode => "toggle-browse-mode",
             Self::BrowseOpen => "browse-open",
             Self::ToggleRabbitMode => "toggle-rabbit-mode",
@@ -485,7 +489,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 90] = [
+    const ALL: [Self; 91] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -532,6 +536,7 @@ impl Command {
         Self::ToggleResultView,
         Self::Expand,
         Self::Collapse,
+        Self::ShowSchemaDiff,
         Self::ToggleBrowseMode,
         Self::BrowseOpen,
         Self::ToggleRabbitMode,
@@ -627,6 +632,7 @@ impl Command {
             Self::ToggleResultView => "Switch a document result between table and JSON view",
             Self::Expand => "Open the selected node",
             Self::Collapse => "Close the selected node",
+            Self::ShowSchemaDiff => "Compare schemas of two open connections",
             Self::ToggleBrowseMode => "Switch between Redis browse and console mode",
             Self::BrowseOpen => "Open the selected key",
             Self::ToggleRabbitMode => "Switch between RabbitMQ Queues and Exchanges",
@@ -904,6 +910,7 @@ impl Default for Keymap {
                 ("r", Command::CrudRead),
                 ("u", Command::CrudUpdate),
                 ("d", Command::CrudDelete),
+                ("D", Command::ShowSchemaDiff),
                 ("/", Command::Search),
                 ("esc", Command::Back),
                 ("?", Command::Help),

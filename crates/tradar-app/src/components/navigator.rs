@@ -23,6 +23,7 @@ use tradar_core::action::{CrudOp, OutlineEntry};
 use tradar_core::theme::theme;
 use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
+use tradar_query_workbench::components::history_picker::{HistoryOutcome, HistoryPickerComponent};
 
 use crate::components::column_picker::{ColumnPickerComponent, ColumnPickerOutcome, PickerColumn};
 
@@ -76,6 +77,17 @@ pub enum NavOutcome {
         op: CrudOp,
         columns: Vec<String>,
     },
+    /// Build a schema-diff tab from these two already-open connections'
+    /// outlines -- `D`, after both picks in `diff_picker_key_event`
+    /// resolve. Outlines travel here by value rather than by tab index:
+    /// `RootComponent` builds `SchemaDiffComponent` synchronously from
+    /// them, so there's nothing to look up again once this fires.
+    Diff {
+        name_a: String,
+        outline_a: Vec<OutlineEntry>,
+        name_b: String,
+        outline_b: Vec<OutlineEntry>,
+    },
 }
 
 /// A `c`/`r`/`u`/`d` request waiting on the column picker before it can
@@ -85,6 +97,21 @@ struct PendingSnippet {
     name: String,
     op: CrudOp,
     picker: ColumnPickerComponent,
+}
+
+/// State machine for `D` (schema diff): pick connection A, then connection
+/// B, from every connection that's currently open -- see
+/// `start_diff_picker`/`diff_picker_key_event`. Only open connections are
+/// offered because `outline()` (what a diff compares) only exists once a
+/// connection has a screen; this never connects one on the user's behalf
+/// the way choosing an unopened row elsewhere in the navigator does.
+enum PendingDiff {
+    PickingA(HistoryPickerComponent),
+    PickingB {
+        name_a: String,
+        outline_a: Vec<OutlineEntry>,
+        picker: HistoryPickerComponent,
+    },
 }
 
 #[derive(Default)]
@@ -115,6 +142,9 @@ pub struct NavigatorComponent {
     /// before `choose_snippet`'s request can turn into a `NavOutcome` --
     /// see `column_picker_key_event`.
     pending_snippet: Option<PendingSnippet>,
+    /// `Some` while the schema-diff picker is open -- see
+    /// `start_diff_picker`/`diff_picker_key_event`.
+    pending_diff: Option<PendingDiff>,
 }
 
 impl NavigatorComponent {
@@ -425,6 +455,95 @@ impl NavigatorComponent {
         }
     }
 
+    /// Whether the schema-diff picker is open, waiting on its own keys
+    /// ahead of the tree's -- same "modal steals input" idiom as
+    /// `is_picking_columns`.
+    pub fn is_picking_diff(&self) -> bool {
+        self.pending_diff.is_some()
+    }
+
+    /// Starts the "pick connection A, then B" flow for `D`. A no-op with
+    /// fewer than two open connections -- nothing to compare yet, and
+    /// there's no unopened-connection fallback here the way `choose` has
+    /// (see `PendingDiff`'s doc comment for why).
+    pub fn start_diff_picker(&mut self, connections: &[NavConnection]) {
+        let open_names: Vec<String> = connections
+            .iter()
+            .filter(|c| c.tab.is_some())
+            .map(|c| c.name.clone())
+            .collect();
+        if open_names.len() < 2 {
+            return;
+        }
+        self.pending_diff = Some(PendingDiff::PickingA(
+            HistoryPickerComponent::new(open_names).with_title("Schema diff — pick connection A"),
+        ));
+    }
+
+    /// One key while the schema-diff picker has the keys -- see
+    /// `is_picking_diff`. Picking A moves to picking B (offering every
+    /// other open connection); picking B turns both choices into a
+    /// `NavOutcome::Diff`. Cancelling either step drops the whole flow.
+    pub fn diff_picker_key_event(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        connections: &[NavConnection],
+    ) -> Option<NavOutcome> {
+        match self.pending_diff.as_mut()? {
+            PendingDiff::PickingA(picker) => match picker.handle_key_event(code, modifiers)? {
+                HistoryOutcome::Cancelled => {
+                    self.pending_diff = None;
+                    None
+                }
+                HistoryOutcome::Selected(name_a) => {
+                    let outline_a = connections
+                        .iter()
+                        .find(|c| c.name == name_a)
+                        .map(|c| c.outline.clone())
+                        .unwrap_or_default();
+                    let other_names: Vec<String> = connections
+                        .iter()
+                        .filter(|c| c.tab.is_some() && c.name != name_a)
+                        .map(|c| c.name.clone())
+                        .collect();
+                    self.pending_diff = Some(PendingDiff::PickingB {
+                        name_a,
+                        outline_a,
+                        picker: HistoryPickerComponent::new(other_names)
+                            .with_title("Schema diff — pick connection B"),
+                    });
+                    None
+                }
+            },
+            PendingDiff::PickingB {
+                name_a,
+                outline_a,
+                picker,
+            } => match picker.handle_key_event(code, modifiers)? {
+                HistoryOutcome::Cancelled => {
+                    self.pending_diff = None;
+                    None
+                }
+                HistoryOutcome::Selected(name_b) => {
+                    let outline_b = connections
+                        .iter()
+                        .find(|c| c.name == name_b)
+                        .map(|c| c.outline.clone())
+                        .unwrap_or_default();
+                    let outcome = NavOutcome::Diff {
+                        name_a: name_a.clone(),
+                        outline_a: outline_a.clone(),
+                        name_b,
+                        outline_b,
+                    };
+                    self.pending_diff = None;
+                    Some(outcome)
+                }
+            },
+        }
+    }
+
     /// Selects whatever row was clicked. Returns whether this was a second
     /// click on that same row within the double-click window -- the host
     /// treats that the same as `Enter` (see `choose`).
@@ -560,6 +679,13 @@ impl NavigatorComponent {
 
         if let Some(pending) = &mut self.pending_snippet {
             pending.picker.draw(frame, area);
+        }
+
+        if let Some(pending) = &mut self.pending_diff {
+            match pending {
+                PendingDiff::PickingA(picker) => picker.draw(frame, area),
+                PendingDiff::PickingB { picker, .. } => picker.draw(frame, area),
+            }
         }
     }
 }
@@ -1018,5 +1144,114 @@ mod tests {
         navigator.open_filter();
 
         assert_eq!(navigator.filter_input.as_ref().unwrap().text(), "x");
+    }
+
+    /// Two open connections (`dev`, `prod`, both with a `users` table) plus
+    /// one never-connected `staging` -- what the diff picker needs at least
+    /// two of to offer anything.
+    fn two_open_connections() -> Vec<NavConnection> {
+        vec![
+            NavConnection {
+                name: "dev".to_string(),
+                tab: Some(0),
+                outline: vec![entry(0, "users", true, true), entry(1, "id", false, false)],
+                error: None,
+                alive: Some(true),
+            },
+            NavConnection {
+                name: "prod".to_string(),
+                tab: Some(1),
+                outline: vec![entry(0, "users", true, true), entry(1, "id", false, false)],
+                error: None,
+                alive: Some(true),
+            },
+            NavConnection {
+                name: "staging".to_string(),
+                tab: None,
+                outline: Vec::new(),
+                error: None,
+                alive: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn starting_the_diff_picker_with_fewer_than_two_open_connections_is_a_no_op() {
+        let conns = connections(); // only "local" is open
+        let mut navigator = NavigatorComponent::new();
+
+        navigator.start_diff_picker(&conns);
+
+        assert!(!navigator.is_picking_diff());
+    }
+
+    #[test]
+    fn the_diff_picker_only_offers_open_connections() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+
+        navigator.start_diff_picker(&conns);
+
+        assert!(navigator.is_picking_diff());
+        let PendingDiff::PickingA(picker) = navigator.pending_diff.as_ref().unwrap() else {
+            panic!("expected the first pick");
+        };
+        assert_eq!(picker.selected_entry(), Some("dev"));
+    }
+
+    #[test]
+    fn picking_both_connections_reports_a_diff_outcome_with_both_outlines() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.start_diff_picker(&conns);
+
+        let after_a = navigator.diff_picker_key_event(KeyCode::Enter, KeyModifiers::NONE, &conns);
+        assert_eq!(after_a, None, "picking A doesn't resolve yet");
+        assert!(navigator.is_picking_diff());
+
+        let outcome = navigator
+            .diff_picker_key_event(KeyCode::Enter, KeyModifiers::NONE, &conns)
+            .expect("both picks made");
+
+        match outcome {
+            NavOutcome::Diff {
+                name_a,
+                outline_a,
+                name_b,
+                outline_b,
+            } => {
+                assert_eq!(name_a, "dev");
+                assert_eq!(name_b, "prod");
+                assert_eq!(outline_a, conns[0].outline);
+                assert_eq!(outline_b, conns[1].outline);
+            }
+            other => panic!("expected a Diff outcome: {other:?}"),
+        }
+        assert!(!navigator.is_picking_diff());
+    }
+
+    #[test]
+    fn the_second_pick_never_offers_the_first_connection_again() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.start_diff_picker(&conns);
+        navigator.diff_picker_key_event(KeyCode::Enter, KeyModifiers::NONE, &conns);
+
+        let PendingDiff::PickingB { picker, .. } = navigator.pending_diff.as_ref().unwrap() else {
+            panic!("expected the second pick");
+        };
+        assert_eq!(picker.selected_entry(), Some("prod"));
+    }
+
+    #[test]
+    fn esc_on_either_pick_cancels_the_whole_diff_flow() {
+        let conns = two_open_connections();
+        let mut navigator = NavigatorComponent::new();
+        navigator.start_diff_picker(&conns);
+
+        let outcome = navigator.diff_picker_key_event(KeyCode::Esc, KeyModifiers::NONE, &conns);
+
+        assert_eq!(outcome, None);
+        assert!(!navigator.is_picking_diff());
     }
 }
