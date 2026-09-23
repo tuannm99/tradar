@@ -14,8 +14,8 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Tier 3 — #5 ERD
 - [x] Tier 4 — #7 Generate SQL từ UI (column picker)
 - [x] Tier 4 — #10 Multi-filter kết hợp
-- [ ] Tier 5 — #2 Table designer
 - [ ] Tier 5 — #3 Schema diff/compare
+- [ ] Tier 5 — #2 Table designer
 - [ ] Tier 5 — #4 Migration/version-control
 - [ ] Tier 6 — #11 Group-by trong grid
 - [ ] Tier 6 — #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK
@@ -86,8 +86,8 @@ Rà lại toàn bộ tính năng hiện có so với 3 IDE database tham chiếu
 - **Tier 2 (nền tảng)**: #1 Navigator schema/database + nhóm object — xong, `docs/backlog/navigator-schema-level.md`.
 - **Tier 3 (dùng chung dữ liệu FK vừa thêm ở #1)**: #6 Autocomplete ngữ cảnh sâu — xong, #5 ERD — xong, cả hai `docs/backlog/fk-autocomplete-and-erd.md`.
 - **Tier 4 (cần chốt phạm vi trước khi code)**: #7 Generate SQL từ UI — xong, `docs/backlog/crud-snippet-column-picker.md`. #10 Multi-filter kết hợp — xong, `docs/backlog/multi-filter.md`.
-- **Tier 5 (lớn, tách nhiều bước nhỏ)**: #2 Table designer → #3 Schema diff/compare → #4 Migration/version-control.
-- **Tier 6 (để cuối, #12 cần bàn lại có đáng làm không)**: #11 Group-by trong grid → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK.
+- **Tier 5 (lớn, tách nhiều bước nhỏ)**: #3 Schema diff/compare → #2 Table designer → #4 Migration/version-control. **Đảo thứ tự 2026-09-23** (ban đầu #2 → #3 → #4): user yêu cầu ưu tiên Postgres/Mongo/Elasticsearch trong 3 mục Tier 5 — #3 là mục duy nhất phục vụ được cả ba (schema info đã có sẵn cho cả ba: Postgres qua PK khai báo, Mongo qua suy luận từ `list_schema`, Elasticsearch qua mapping REST API), trong khi #2 Table designer sinh DDL (`ALTER TABLE`...) chỉ có ý nghĩa cho Postgres/SQLite/Cassandra — Mongo và Elasticsearch schemaless, không có khái niệm DDL tương đương. #4 vẫn xếp cuối vì chưa chốt phạm vi.
+- **Tier 6 (để cuối, #12 cần bàn lại có đáng làm không)**: #11 Group-by trong grid → #12 Mở rộng edit-cell/delete-row ngoài single-table-with-PK. Giữ nguyên thứ tự — cả #11 (generic, mọi driver) và #12 (mở rộng cơ chế `build_sql_edit` vốn chỉ áp dụng Postgres/SQLite; Mongo/Elasticsearch đã có edit-cell riêng qua `updateOne`/`_update` từ 2026-09-07) đều không có mục nào ưu tiên rõ rệt hơn cho riêng Postgres/Mongo/Elasticsearch.
 
 ## `tradar` CLI: import/export (ý tưởng mới, 2026-08-19) — tier thấp, để sau
 
