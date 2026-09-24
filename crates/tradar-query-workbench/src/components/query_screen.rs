@@ -454,6 +454,7 @@ impl QueryScreenComponent {
             Command::ShowErd => self.open_erd(),
             Command::ShowMigrations => self.open_migrations(),
             Command::ExportCurl => self.export_curl(),
+            Command::YankCurl => self.yank_curl(),
             Command::Export => self.open_export_prompt(),
             Command::Yank => {
                 if let Some(text) = self.results.selected_text() {
@@ -512,6 +513,18 @@ impl QueryScreenComponent {
         };
         let script = format!("#!/usr/bin/env bash\n{curl}\n");
         let _ = std::fs::write("./tradar-query.sh", script);
+    }
+
+    /// `Ctrl+G`: same `curl` this driver would write to `./tradar-query.sh`
+    /// for `Ctrl+Y`, straight to the clipboard instead -- no shebang, since
+    /// this is meant to be pasted straight into a shell, not saved and run
+    /// as a script.
+    fn yank_curl(&self) {
+        let query = self.query_editor.text();
+        let Some(curl) = self.engine.export_curl(&query) else {
+            return;
+        };
+        ui::yank_to_clipboard(&curl);
     }
 
     fn open_prompt(&mut self, kind: PromptKind) {
@@ -2396,6 +2409,24 @@ mod tests {
         // just confirming the key is consumed here rather than falling
         // through to the results pane's own key handling.
         let action = screen.handle_key_event(KeyCode::Char('y'), KeyModifiers::CONTROL);
+
+        assert!(action.is_none());
+        assert_eq!(screen.query_editor.text(), "select 1");
+    }
+
+    #[test]
+    fn ctrl_g_yanks_curl_even_while_the_results_pane_has_focus() {
+        let (mut screen, _rx) = screen_with(fake_engine_with_schema(empty_result(), Ok(schema())));
+        screen.focus = Focus::Results;
+        screen.query_editor.insert_at_cursor("select 1");
+
+        // Same reasoning as the `ctrl-y` test right above: the fake
+        // driver's `export_curl` defaults to `None`, so this only confirms
+        // the key is consumed here rather than falling through to the
+        // results pane's own key handling (which has no `ctrl-g` of its
+        // own, so it would otherwise just be ignored rather than break
+        // loudly -- a false pass this test would miss).
+        let action = screen.handle_key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
 
         assert!(action.is_none());
         assert_eq!(screen.query_editor.text(), "select 1");

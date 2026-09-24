@@ -33,5 +33,6 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`theme-presets.md`](theme-presets.md) — 2 preset dựng sẵn (Dracula, Nord) qua `preset` trong `[theme]`, `Theme::by_preset_name`, layer preset làm nền + override từng role đè lên trên; dark-only, không làm theme sáng.
 - [`keymap-tab-nav-2026-09-24.md`](keymap-tab-nav-2026-09-24.md) — phản hồi dùng thử: đổi default `Ctrl+B` → `Ctrl+N` cho navigator, thêm `Ctrl+H`/`Ctrl+L` chuyển tab kiểu vim, `Ctrl+1`..`Ctrl+9` nhảy thẳng tới tab theo số; dời 3 binding bị `Context::Global` mới đè lên (`OpenSnippets`/`HttpOpenRequests` → `F7`, `HttpNextMethod` → `F3`).
 - [`json-view-line-scroll-2026-09-24.md`](json-view-line-scroll-2026-09-24.md) — JSON view của kết quả `Documents` (Mongo/Elasticsearch) đổi từ `j`/`k` nhảy theo document sang cuộn từng dòng kiểu vim buffer thật, vẫn dùng chung `List`/`ListState` (chỉ đổi đơn vị 1 `ListItem` từ 1 document xuống 1 dòng) — sửa được vấn đề document dài hơn panel không cuộn xem hết được; `y` đổi nghĩa sang chỉ yank đúng 1 dòng.
+- [`yank-curl-2026-09-24.md`](yank-curl-2026-09-24.md) — `Ctrl+G` mới (context `QueryScreen`) yank curl thẳng vào clipboard (OSC52), giữ nguyên `Ctrl+Y` ghi file `./tradar-query.sh` như cũ — hai phím riêng, không đổi hành vi cũ.
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.

@@ -267,6 +267,11 @@ pub enum Command {
     /// connection, run every pending one in order.
     ShowMigrations,
     ExportCurl,
+    /// `Ctrl+G`: like `ExportCurl`, but straight to the clipboard (OSC52)
+    /// instead of `./tradar-query.sh` -- a separate command/key rather than
+    /// changing what `ExportCurl` does, so the file it already writes stays
+    /// exactly as reliable as before.
+    YankCurl,
     /// Export the current result to a CSV or JSON file -- format picked by
     /// the extension typed in the prompt, same idea as `SaveFile` picking a
     /// query's own format.
@@ -468,6 +473,7 @@ impl Command {
             Self::ShowErd => "show-erd",
             Self::ShowMigrations => "show-migrations",
             Self::ExportCurl => "export-curl",
+            Self::YankCurl => "yank-curl",
             Self::Export => "export",
             Self::Yank => "yank",
             Self::InsertName => "insert-name",
@@ -544,7 +550,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 106] = [
+    const ALL: [Self; 107] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -582,6 +588,7 @@ impl Command {
         Self::ShowErd,
         Self::ShowMigrations,
         Self::ExportCurl,
+        Self::YankCurl,
         Self::Export,
         Self::Yank,
         Self::InsertName,
@@ -693,6 +700,7 @@ impl Command {
             Self::ShowErd => "Show a table's ERD (foreign-key neighborhood)",
             Self::ShowMigrations => "Open the migrations panel",
             Self::ExportCurl => "Export the request as curl (Elasticsearch)",
+            Self::YankCurl => "Copy the request as curl to the clipboard (Elasticsearch)",
             Self::Export => "Export the result to CSV/JSON",
             Self::Yank => "Copy the selected row/document",
             Self::InsertName => "Insert the selected name into the query",
@@ -937,6 +945,12 @@ impl Default for Keymap {
                 ("f4", Command::ShowErd),
                 ("f1", Command::ShowMigrations),
                 ("ctrl-y", Command::ExportCurl),
+                // `g` for no strong mnemonic of its own -- every letter/F-key
+                // with a real "yank"/"curl" tie is already taken, and this
+                // is the nearest free `ctrl-` combo (see the note on
+                // `Context::Global`'s tab-switching binding table for the
+                // others that were freed the same way).
+                ("ctrl-g", Command::YankCurl),
                 ("ctrl-e", Command::Export),
                 ("f2", Command::ToggleBrowseMode),
                 ("f6", Command::ToggleSplitOrientation),
@@ -1401,6 +1415,21 @@ mod tests {
         assert_eq!(
             keymap.resolve(Context::Global, &mut pending, ctrl('n')),
             Resolution::Command(Command::ToggleNavigator)
+        );
+    }
+
+    #[test]
+    fn ctrl_g_yanks_curl_alongside_ctrl_y_exporting_it_to_a_file() {
+        let keymap = Keymap::default();
+        let mut pending = None;
+
+        assert_eq!(
+            keymap.resolve(Context::QueryScreen, &mut pending, ctrl('y')),
+            Resolution::Command(Command::ExportCurl)
+        );
+        assert_eq!(
+            keymap.resolve(Context::QueryScreen, &mut pending, ctrl('g')),
+            Resolution::Command(Command::YankCurl)
         );
     }
 
