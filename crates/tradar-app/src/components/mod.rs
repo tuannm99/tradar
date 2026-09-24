@@ -167,6 +167,14 @@ impl RootComponent {
         self.active_tab = self.active_tab.saturating_sub(1);
     }
 
+    /// `n` is 1-indexed, matching the tab bar's own numbering and the
+    /// `Ctrl+1`..`Ctrl+9` keys bound to `GoToTab1`..`GoToTab9`. Past the
+    /// last open tab clamps to it rather than doing nothing, same as
+    /// `next_tab` clamping instead of refusing to move.
+    fn go_to_tab(&mut self, n: usize) {
+        self.active_tab = (n - 1).min(self.tabs.len() - 1);
+    }
+
     /// Recreates tabs for a previously-saved session, each immediately
     /// requesting a connect to its saved connection -- synthesizing the
     /// exact `Action::OpenRequested` a real `Enter` keypress on that tab's
@@ -526,6 +534,15 @@ impl Component for RootComponent {
                 Command::CloseTab => self.close_active_tab(),
                 Command::NextTab => self.next_tab(),
                 Command::PrevTab => self.prev_tab(),
+                Command::GoToTab1 => self.go_to_tab(1),
+                Command::GoToTab2 => self.go_to_tab(2),
+                Command::GoToTab3 => self.go_to_tab(3),
+                Command::GoToTab4 => self.go_to_tab(4),
+                Command::GoToTab5 => self.go_to_tab(5),
+                Command::GoToTab6 => self.go_to_tab(6),
+                Command::GoToTab7 => self.go_to_tab(7),
+                Command::GoToTab8 => self.go_to_tab(8),
+                Command::GoToTab9 => self.go_to_tab(9),
                 Command::ToggleNavigator => self.toggle_navigator(),
                 _ => {}
             }
@@ -1400,6 +1417,38 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_h_and_ctrl_l_switch_tabs_the_same_way_as_ctrl_left_and_ctrl_right() {
+        let mut root = root();
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 2);
+
+        root.handle_key_event(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 1);
+
+        root.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 2);
+    }
+
+    #[test]
+    fn ctrl_digit_jumps_straight_to_that_tab() {
+        let mut root = root();
+        for _ in 0..3 {
+            root.handle_key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        }
+        assert_eq!(root.tabs.len(), 4);
+
+        root.handle_key_event(KeyCode::Char('1'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 0);
+
+        root.handle_key_event(KeyCode::Char('3'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 2);
+
+        root.handle_key_event(KeyCode::Char('9'), KeyModifiers::CONTROL);
+        assert_eq!(root.active_tab, 3, "past the last tab clamps to it");
+    }
+
+    #[test]
     fn opened_for_a_background_tab_does_not_switch_the_active_tab() {
         let mut root = root();
         // Tab 0 starts connecting to A ...
@@ -1730,7 +1779,7 @@ mod tests {
             inserted: Rc::clone(&inserted),
         }));
         root.tabs[0].title = Some("local-sqlite".to_string());
-        root.handle_key_event(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
         (root, inserted)
     }
 
@@ -1739,10 +1788,10 @@ mod tests {
         let mut root = root();
         assert!(!root.navigator_open);
 
-        root.handle_key_event(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
         assert!(root.navigator_open && root.navigator_focused);
 
-        root.handle_key_event(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        root.handle_key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
         assert!(
             !root.navigator_open && !root.navigator_focused,
             "the same key has to get you back where you were"

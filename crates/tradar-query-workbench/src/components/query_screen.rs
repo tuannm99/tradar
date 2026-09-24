@@ -2589,14 +2589,17 @@ mod tests {
             .map(str::to_string);
         assert!(first.is_some());
 
-        screen.handle_key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        // Not ctrl-n: `Context::Global` claims that for `ToggleNavigator`
+        // now (see `keymap.rs`'s default bindings), so `down` is the one
+        // that still reaches `NextCompletion`.
+        screen.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
         let second = screen
             .completion
             .as_ref()
             .and_then(|p| p.selected_text())
             .map(str::to_string);
 
-        assert_ne!(first, second, "ctrl-n should move to another suggestion");
+        assert_ne!(first, second, "down should move to another suggestion");
     }
 
     #[tokio::test]
@@ -3289,10 +3292,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_l_opens_the_snippet_picker() {
+    fn f7_opens_the_snippet_picker() {
         let (mut screen, _rx) = screen();
 
-        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::F(7), KeyModifiers::NONE);
 
         assert!(screen.snippet_picker.is_some());
     }
@@ -3300,7 +3303,7 @@ mod tests {
     #[test]
     fn esc_cancels_the_snippet_picker() {
         let (mut screen, _rx) = screen();
-        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::F(7), KeyModifiers::NONE);
 
         screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
@@ -3316,7 +3319,7 @@ mod tests {
             truncated: false,
         });
         screen.focus = Focus::Editor;
-        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        screen.handle_key_event(KeyCode::F(7), KeyModifiers::NONE);
         assert!(screen.snippet_picker.is_some());
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
