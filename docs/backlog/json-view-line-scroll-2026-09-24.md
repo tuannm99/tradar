@@ -1,0 +1,17 @@
+# Cuộn từng dòng kiểu vim trong JSON view (Mongo/Elasticsearch) — xong (2026-09-24)
+
+Phản hồi trực tiếp sau khi dùng thử. Chốt qua `AskUserQuestion` (2 câu) trước khi code.
+
+**Vấn đề thật đằng sau câu hỏi**: JSON view của kết quả `Documents` (Mongo/Elasticsearch, phím `t` chuyển qua lại với table view) trước đây vẽ bằng `List<ListItem>` với **mỗi document là một `ListItem`** (nguyên khối pretty-print JSON, có thể dài nhiều dòng). `j`/`k` (`apply_move`) di chuyển `self.selected` — nhưng vì mỗi item là một document, `j` nhảy thẳng sang document kế tiếp chứ không cuộn xuống trong document hiện tại. Hệ quả: một document dài hơn chiều cao panel thì phần đuôi của nó **không cách nào xem được** — không có cơ chế nào cuộn tới đó.
+
+**Chốt phạm vi**: đổi hẳn sang cuộn **từng dòng** kiểu vim buffer thật — `j`/`k` = 1 dòng, giống hệt cơ chế đã có cho Results context (`gg`/`G`/`Ctrl+d`/`Ctrl+u` không đổi gì, đã tự động hoạt động đúng vì dùng chung `vim_list::apply`). Khi đổi, `y` (yank) đổi nghĩa: trước đây copy nguyên document đang chọn, giờ **chỉ copy đúng dòng con trỏ đang đứng** (giống `yy` của vim trên 1 dòng text) — chốt vậy vì một khi đã là buffer cuộn tự do, "document đang chọn" không còn là khái niệm rõ ràng nữa khi con trỏ đứng giữa chừng một document dài.
+
+**Cách làm — vẫn tái dùng nguyên `List`/`ListState`, không viết cơ chế cuộn tay mới**: thay vì đổi hẳn sang `Paragraph` + tự quản lý scroll offset, chỉ đổi **đơn vị của một `ListItem`** từ "1 document" xuống "1 dòng text" — `json_lines(docs, visible)` (hàm mới, đặt cạnh `documents_as_table`) flatten các document đã qua filter thành `Vec<String>`, mỗi document ngăn cách bằng 1 dòng trống để mắt còn phân biệt được ranh giới khi giờ chúng chỉ là các dòng liên tiếp trong một luồng cuộn chung. `ListState` của ratatui đã tự lo cuộn-để-giữ-item-đang-chọn-trong-tầm-nhìn — không cần code cuộn tay nào cả, chỉ cần đổi input đưa vào `List::new()`.
+
+**`cursor_count()` mới, tách khỏi `item_count()`**: `item_count()` (đếm document, dùng cho tiêu đề "N of M documents") phải giữ nguyên ý nghĩa cũ; số bước `self.selected` được phép di chuyển giờ khác hẳn (số dòng, không phải số document) cho riêng trường hợp `Documents` + `DocumentView::Json`. `apply_move`/`click()`/`set_filter`/`set_result_keeping_cursor` đổi từ `item_count()` sang `cursor_count()` — 4 chỗ duy nhất cần số đếm đúng để cursor không đứng ngoài bounds sau khi lọc/refresh/click.
+
+**`toggle_document_view()` giờ reset cả `selected` về 0** (trước đây chỉ reset `selected_col`/`col_offset`/`preview_open`) — bảng (row index) và JSON (line index) là hai đơn vị lệch nhau quá xa để giữ nguyên số cũ có ý nghĩa gì, về đầu trang ít gây bất ngờ hơn là rơi vào một dòng/hàng ngẫu nhiên.
+
+**Test**: `crates/tradar-query-workbench/src/components/results.rs` — `json_view_can_scroll_far_enough_to_see_every_line_of_a_tall_document` (test chính cho tính năng: document 20 field cao hơn panel, xác nhận field cuối không thấy được lúc đầu nhưng `move_down()` đủ nhiều lần thì thấy), `selected_text_yanks_only_the_current_line_in_json_view` (thay `selected_text_pretty_prints_the_selected_document` cũ), `documents_are_filtered_on_their_json_text` (sửa lại để khớp `y` giờ trả về đúng 1 dòng thay vì cả document).
+
+**Chưa làm** (để lại, không tự chốt trước): tô màu khác cho dòng ngăn cách giữa 2 document (hiện chỉ là dòng trống trơn, không style riêng); cú pháp jump-tới-document-kế-tiếp/trước riêng (vd `}`/`{` kiểu vim nhảy qua đoạn) nếu sau này thấy cuộn từng dòng qua document dài là chậm trong thực tế dùng.

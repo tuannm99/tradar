@@ -5,7 +5,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::Span;
 use ratatui::widgets::{Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
 
 use tradar_core::theme::theme;
@@ -153,6 +153,30 @@ fn documents_as_table(docs: &[serde_json::Value]) -> (Vec<String>, Vec<Vec<Strin
         })
         .collect();
     (columns, rows)
+}
+
+/// The JSON view's own line-by-line vim scrolling: `docs` flattened into
+/// individual text lines, in the order `visible` (already-filtered document
+/// indices from `visible_items()`) lists them -- `j`/`k` there move one
+/// *line*, not one whole document (see `ResultsComponent::cursor_count`), so
+/// this is what the cursor actually walks. A blank line separates
+/// consecutive documents so the eye can still tell where one ends and the
+/// next begins once they're just consecutive lines in one scrollable
+/// buffer, rather than visually distinct list items the way they used to
+/// be.
+fn json_lines(docs: &[serde_json::Value], visible: &[usize]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (i, &index) in visible.iter().enumerate() {
+        if i > 0 {
+            lines.push(String::new());
+        }
+        let Some(doc) = docs.get(index) else {
+            continue;
+        };
+        let pretty = serde_json::to_string_pretty(doc).unwrap_or_default();
+        lines.extend(pretty.lines().map(str::to_string));
+    }
+    lines
 }
 
 /// Rows given to the cell-preview panel when it's open, capped so it can
@@ -408,7 +432,7 @@ impl ResultsComponent {
         self.set_result(result);
         self.filter = filter;
         self.sort = sort;
-        self.selected = row.min(self.item_count().saturating_sub(1));
+        self.selected = row.min(self.cursor_count().saturating_sub(1));
         self.selected_col = column.min(self.column_count().saturating_sub(1));
     }
 
@@ -431,9 +455,9 @@ impl ResultsComponent {
     /// anywhere in them. An empty string shows everything again.
     pub fn set_filter(&mut self, filter: &str) {
         self.filter = filter.to_string();
-        // The row that was under the cursor may not be in the new set, and
-        // a cursor pointing past the end selects nothing at all.
-        self.selected = self.selected.min(self.item_count().saturating_sub(1));
+        // The row/line that was under the cursor may not be in the new
+        // set, and a cursor pointing past the end selects nothing at all.
+        self.selected = self.selected.min(self.cursor_count().saturating_sub(1));
     }
 
     pub fn filter(&self) -> &str {
@@ -514,13 +538,24 @@ impl ResultsComponent {
         }
     }
 
-    /// For `Documents` `visible_height`-based half-page scrolling is an
-    /// approximation (items can span multiple rows), same tradeoff as the
-    /// row-count-based scrolling in `SchemaSidebarComponent`.
+    /// How many steps `self.selected` can move across right now -- lines
+    /// for a `Documents` result in JSON view (`json_lines`), otherwise the
+    /// same as `item_count()` (rows/documents). Split from `item_count()`
+    /// because the title bar's "N of M documents" always counts documents,
+    /// even while the JSON view's own cursor moves line by line.
+    fn cursor_count(&self) -> usize {
+        match &self.last_result {
+            Some(QueryResult::Documents(docs)) if self.doc_view == DocumentView::Json => {
+                json_lines(docs, &self.visible_items()).len()
+            }
+            _ => self.item_count(),
+        }
+    }
+
     /// `pub` because `QueryScreenComponent` resolves the key (it owns
     /// focus) and hands the movement down.
     pub fn apply_move(&mut self, mv: VimMove) {
-        let count = self.item_count();
+        let count = self.cursor_count();
         vim_list::apply(mv, &mut self.selected, count, self.visible_height);
         self.preview_open = false;
     }
@@ -534,11 +569,14 @@ impl ResultsComponent {
         }
     }
 
-    /// Switches a `Documents` result between its pretty-printed JSON list
+    /// Switches a `Documents` result between its pretty-printed JSON view
     /// and a flattened table (see `documents_as_table`) -- a no-op for a
-    /// `Table` or `Affected` result, which have nothing to toggle. The
-    /// cell cursor resets rather than carrying over: JSON view has no
-    /// column for it to mean the same thing in.
+    /// `Table` or `Affected` result, which have nothing to toggle. The row
+    /// cursor resets too, not just the cell cursor: JSON view's `selected`
+    /// indexes *lines* (`json_lines`) while table view's indexes rows, two
+    /// scales far enough apart that carrying a number across means nothing
+    /// -- landing back at the top is less surprising than landing on an
+    /// arbitrary row/line the toggle happens to share an index with.
     pub fn toggle_document_view(&mut self) {
         if !matches!(self.last_result, Some(QueryResult::Documents(_))) {
             return;
@@ -547,6 +585,7 @@ impl ResultsComponent {
             DocumentView::Json => DocumentView::Table,
             DocumentView::Table => DocumentView::Json,
         };
+        self.selected = 0;
         self.selected_col = 0;
         self.col_offset = 0;
         self.preview_open = false;
@@ -645,7 +684,7 @@ impl ResultsComponent {
             }
             _ => self.table_state.offset(),
         };
-        if let Some(index) = ui::index_at(self.rows_area, offset, row, self.item_count()) {
+        if let Some(index) = ui::index_at(self.rows_area, offset, row, self.cursor_count()) {
             self.selected = index;
         }
         // Clicking to the left of the first column (the row-number gutter)
@@ -683,25 +722,32 @@ impl ResultsComponent {
         true
     }
 
-    /// Plain-text form of the currently selected row/document, ready to
-    /// yank to the clipboard. `None` when there's nothing to select (no
-    /// result yet, or the last response was an error). Table rows are
-    /// tab-separated, matching what spreadsheets expect when pasted.
+    /// Plain-text form of what's under the cursor, ready to yank to the
+    /// clipboard. `None` when there's nothing to select (no result yet, or
+    /// the last response was an error). Table rows are tab-separated,
+    /// matching what spreadsheets expect when pasted.
     pub fn selected_text(&self) -> Option<String> {
+        // JSON view's cursor is a *line* (`json_lines`), not a document --
+        // `y` yanks exactly that line, vim `yy`-on-a-line-of-text style,
+        // not the whole document it happens to be part of.
+        if let Some(QueryResult::Documents(docs)) = self.last_result.as_ref()
+            && self.doc_view == DocumentView::Json
+        {
+            return json_lines(docs, &self.visible_items())
+                .get(self.selected)
+                .cloned();
+        }
         let index = self.selected_item()?;
         match self.last_result.as_ref()? {
             QueryResult::Table { rows, .. } => rows.get(index).map(|row| row.join("\t")),
-            // Matches whatever's actually on screen: tab-separated like any
-            // other table in table view, pretty JSON in JSON view.
-            QueryResult::Documents(_) if self.doc_view == DocumentView::Table => self
+            // Table view of a `Documents` result: tab-separated like any
+            // other table.
+            QueryResult::Documents(_) => self
                 .doc_table
                 .as_ref()?
                 .1
                 .get(index)
                 .map(|row| row.join("\t")),
-            QueryResult::Documents(docs) => docs
-                .get(index)
-                .map(|doc| serde_json::to_string_pretty(doc).unwrap_or_default()),
             QueryResult::Affected { .. } => None,
         }
     }
@@ -898,23 +944,21 @@ impl ResultsComponent {
             QueryResult::Documents(docs) => {
                 self.visible_height = inner.height as usize;
 
-                let visible = self.visible_items();
-                let items: Vec<ListItem> = visible
+                // One `ListItem` per *line*, not per document (a blank line
+                // separates consecutive documents, see `json_lines`) -- so
+                // `j`/`k` (`apply_move` via `cursor_count`) scroll through a
+                // long document's own body a line at a time, the same as
+                // any other vim buffer, instead of jumping straight past it
+                // to the next document once it no longer fits on screen.
+                let lines = json_lines(docs, &self.visible_items());
+                let items: Vec<ListItem> = lines
                     .iter()
-                    .map(|&index| {
-                        let doc = &docs[index];
-                        let pretty = serde_json::to_string_pretty(doc).unwrap_or_default();
-                        ListItem::new(Text::from(
-                            pretty
-                                .lines()
-                                .map(|line| Line::from(line.to_string()))
-                                .collect::<Vec<_>>(),
-                        ))
-                    })
+                    .map(|line| ListItem::new(line.as_str()))
                     .collect();
-                if visible.is_empty() {
+                if items.is_empty() {
                     self.list_state.select(None);
                 } else {
+                    self.selected = self.selected.min(items.len() - 1);
                     self.list_state.select(Some(self.selected));
                 }
                 self.rows_area = inner;
@@ -1594,21 +1638,24 @@ mod tests {
     }
 
     #[test]
-    fn selected_text_pretty_prints_the_selected_document() {
+    fn selected_text_yanks_only_the_current_line_in_json_view() {
         let mut results = ResultsComponent::new();
         results.set_result(QueryResult::Documents(vec![
             serde_json::json!({"a": 1}),
             serde_json::json!({"b": 2}),
         ]));
-        results.move_down();
 
         assert_eq!(
             results.selected_text().as_deref(),
-            Some(
-                serde_json::to_string_pretty(&serde_json::json!({"b": 2}))
-                    .unwrap()
-                    .as_str()
-            )
+            Some("{"),
+            "the cursor starts on the first document's first line"
+        );
+
+        results.move_down();
+        assert_eq!(
+            results.selected_text().as_deref(),
+            Some("  \"a\": 1"),
+            "j moves one line, not one whole document"
         );
     }
 
@@ -1636,6 +1683,35 @@ mod tests {
         let text = draw_component(&mut results, 40, 10);
 
         assert!(text.contains("Ada"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn json_view_can_scroll_far_enough_to_see_every_line_of_a_tall_document() {
+        let mut results = ResultsComponent::new();
+        let mut doc = serde_json::Map::new();
+        for i in 0..20 {
+            doc.insert(format!("field{i:02}"), serde_json::json!(i));
+        }
+        results.set_result(QueryResult::Documents(vec![serde_json::Value::Object(doc)]));
+
+        // A panel far too short to show all 20 fields (plus the braces) at
+        // once -- before this, `j` jumped straight to the next document
+        // once the current one stopped fitting, so the tail of a document
+        // taller than the panel could never be seen at all.
+        let text = draw_component(&mut results, 40, 10);
+        assert!(
+            !text.contains("field19"),
+            "the last field shouldn't be visible before scrolling: {text}"
+        );
+
+        for _ in 0..25 {
+            results.move_down();
+        }
+        let text = draw_component(&mut results, 40, 10);
+        assert!(
+            text.contains("field19"),
+            "j must be able to reach every line of a document taller than the panel: {text}"
+        );
     }
 
     #[test]
@@ -1894,10 +1970,16 @@ mod tests {
 
         results.set_filter("lin");
 
-        assert_eq!(results.item_count(), 1);
-        assert!(
-            results.selected_text().unwrap().contains("Lin"),
-            "the surviving document has to be the matching one"
+        assert_eq!(
+            results.item_count(),
+            1,
+            "only the matching document counts toward the total"
+        );
+        results.move_down();
+        assert_eq!(
+            results.selected_text().as_deref(),
+            Some("  \"name\": \"Lin\""),
+            "the surviving document's own line must still be reachable after filtering"
         );
     }
 
