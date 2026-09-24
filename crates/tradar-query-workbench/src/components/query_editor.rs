@@ -12,6 +12,17 @@
 //! movement (`j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u`) reuses
 //! `tradar_core::vim_list`, the same module every list-rendering component
 //! in the app shares.
+//!
+//! Normal- and Visual-mode keys are resolved against
+//! `tradar_core::keymap` (`Context::VimNormal`/`VimVisual`/`VimMotion`)
+//! instead of matching `KeyCode` inline, so they're remappable from
+//! `~/.config/tradar/config.toml` like every other binding in the app --
+//! see `docs/backlog/vim-remap-2026-09-24.md`. Insert mode stays a direct
+//! `KeyCode` match: it's plain text entry (arrows, Backspace, typed
+//! characters), not vim commands, so there's nothing there to remap. `Esc`
+//! is the one Normal/Visual-adjacent key that also isn't remappable --
+//! `QueryScreenComponent` forwards it straight here before the keymap ever
+//! sees it, matching real vim's own `Esc` (always exits, never rebound).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -23,6 +34,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use tradar_core::keymap::{self, Command, Context, KeyPress, Resolution};
 use tradar_core::theme::theme;
 use tradar_core::ui;
 use tradar_core::vim_list;
@@ -130,10 +142,13 @@ pub struct QueryEditorComponent {
     lines: Vec<Vec<char>>,
     cursor_row: usize,
     cursor_col: usize,
-    pending_g: bool,
-    pending_d: bool,
-    pending_y: bool,
-    pending_z: bool,
+    /// The shared two-key-sequence slot (`dd`, `yy`, `za`, `gg`) threaded
+    /// through `keymap().resolve_in` -- see that method's own doc comment.
+    /// One field rather than a bool per combo (the old `pending_d`/
+    /// `pending_y`/`pending_z`/`pending_g`) because the keymap module
+    /// already tracks "which key started a sequence", not just "is one
+    /// pending".
+    pending: Option<KeyPress>,
     /// Where `v`/`V` was pressed -- `Some` only while `mode` is `Visual`/
     /// `VisualLine`, cleared the moment either exits (`Esc`, or `y`/`d`/
     /// `x`/`c` finishing the selection).
@@ -205,10 +220,7 @@ impl QueryEditorComponent {
             lines: vec![Vec::new()],
             cursor_row: 0,
             cursor_col: 0,
-            pending_g: false,
-            pending_d: false,
-            pending_y: false,
-            pending_z: false,
+            pending: None,
             visual_anchor: None,
             register: None,
             scroll: 0,
@@ -275,10 +287,7 @@ impl QueryEditorComponent {
         self.cursor_col = 0;
         self.scroll = 0;
         self.mode = EditorMode::Normal;
-        self.pending_g = false;
-        self.pending_d = false;
-        self.pending_y = false;
-        self.pending_z = false;
+        self.pending = None;
         self.visual_anchor = None;
         // A freshly loaded buffer (a file, a history entry, a restored
         // session) has no relationship to whatever was undoable before --
@@ -833,27 +842,28 @@ impl QueryEditorComponent {
         self.clamp_col();
     }
 
-    /// Movement-only keys, shared by Normal and Visual/VisualLine mode:
+    /// Movement-only commands, shared by Normal and Visual/VisualLine mode:
     /// `h`/`l`/`0`/`$` here, plus `j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u` via
-    /// `vim_list`. Returns whether `code` was one of them, so a caller can
-    /// fall through to its own mode-specific keys otherwise.
-    fn handle_motion_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        if let Some(mv) = vim_list::recognize(code, modifiers, &mut self.pending_g) {
+    /// `Command::as_vim_move`/`vim_list`. Returns whether `command` was one
+    /// of them, so a caller can fall through to its own mode-specific
+    /// commands otherwise.
+    fn apply_motion_command(&mut self, command: Command) -> bool {
+        if let Some(mv) = command.as_vim_move() {
             let mut row = self.cursor_row;
             vim_list::apply(mv, &mut row, self.lines.len(), self.visible_height);
             self.move_row_to(row);
             return true;
         }
-        match code {
-            KeyCode::Left | KeyCode::Char('h') => {
+        match command {
+            Command::EditorMoveLeft => {
                 self.cursor_col = self.cursor_col.saturating_sub(1);
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            Command::EditorMoveRight => {
                 let max = self.current_line_len().saturating_sub(1);
                 self.cursor_col = (self.cursor_col + 1).min(max);
             }
-            KeyCode::Char('0') => self.cursor_col = 0,
-            KeyCode::Char('$') => {
+            Command::EditorLineStart => self.cursor_col = 0,
+            Command::EditorLineEnd => {
                 self.cursor_col = self.current_line_len().saturating_sub(1);
             }
             _ => return false,
@@ -862,84 +872,66 @@ impl QueryEditorComponent {
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        // `dd` deletes the current line -- the one operator+motion combo
-        // supported. Any key other than a second `d` cancels it (already
-        // consumed via `take` above, same "any other key cancels" rule as
-        // a pending `g`).
-        if std::mem::take(&mut self.pending_d) {
-            if code == KeyCode::Char('d') {
-                self.checkpoint();
-                self.delete_current_line();
-            }
+        let key = KeyPress::new(code, modifiers);
+        let command = match keymap::keymap().resolve_in(
+            &[Context::VimNormal, Context::VimMotion],
+            &mut self.pending,
+            key,
+        ) {
+            Resolution::Command(command) => command,
+            // Mid-sequence (the first key of `dd`/`yy`/`za`/`gg`), or not
+            // bound at all -- either way there's nothing to do yet.
+            Resolution::Pending | Resolution::None => return,
+        };
+
+        if self.apply_motion_command(command) {
             return;
         }
 
-        // `yy` copies the current line -- no checkpoint, nothing mutates.
-        if std::mem::take(&mut self.pending_y) {
-            if code == KeyCode::Char('y') {
-                self.yank_current_line();
-            }
-            return;
-        }
-
-        // `za` toggles the fold under the cursor -- real vim's binding for
-        // it, kept even though this editor has no other `z`-prefixed folds
-        // command (`zo`/`zc`/`zR`/`zM`...) so a vim user's first guess works.
-        if std::mem::take(&mut self.pending_z) {
-            if code == KeyCode::Char('a') {
-                self.toggle_fold();
-            }
-            return;
-        }
-
-        if self.handle_motion_key(code, modifiers) {
-            return;
-        }
-
-        match code {
-            KeyCode::Char('i') => {
+        match command {
+            Command::EditorEnterInsert => {
                 self.checkpoint();
                 self.mode = EditorMode::Insert;
             }
-            KeyCode::Char('a') => {
+            Command::EditorAppend => {
                 self.checkpoint();
                 if self.current_line_len() > 0 {
                     self.cursor_col += 1;
                 }
                 self.mode = EditorMode::Insert;
             }
-            KeyCode::Char('I') => {
+            Command::EditorInsertLineStart => {
                 self.checkpoint();
                 self.cursor_col = 0;
                 self.mode = EditorMode::Insert;
             }
-            KeyCode::Char('A') => {
+            Command::EditorAppendLineEnd => {
                 self.checkpoint();
                 self.cursor_col = self.current_line_len();
                 self.mode = EditorMode::Insert;
             }
-            KeyCode::Char('o') => {
+            Command::EditorOpenBelow => {
                 self.checkpoint();
                 self.lines.insert(self.cursor_row + 1, Vec::new());
                 self.cursor_row += 1;
                 self.cursor_col = 0;
                 self.mode = EditorMode::Insert;
             }
-            KeyCode::Char('O') => {
+            Command::EditorOpenAbove => {
                 self.checkpoint();
                 self.lines.insert(self.cursor_row, Vec::new());
                 self.cursor_col = 0;
                 self.mode = EditorMode::Insert;
             }
-            KeyCode::Char('v') => {
+            Command::EditorEnterVisual => {
                 self.visual_anchor = Some((self.cursor_row, self.cursor_col));
                 self.mode = EditorMode::Visual;
             }
-            KeyCode::Char('V') => {
+            Command::EditorEnterVisualLine => {
                 self.visual_anchor = Some((self.cursor_row, self.cursor_col));
                 self.mode = EditorMode::VisualLine;
             }
-            KeyCode::Char('x') => {
+            Command::EditorDeleteChar => {
                 if self.cursor_col < self.current_line_len() {
                     self.checkpoint();
                     let removed = self.lines[self.cursor_row].remove(self.cursor_col);
@@ -947,19 +939,23 @@ impl QueryEditorComponent {
                     self.clamp_col();
                 }
             }
-            KeyCode::Char('p') => self.paste(false),
-            KeyCode::Char('P') => self.paste(true),
-            KeyCode::Char('d') => self.pending_d = true,
-            KeyCode::Char('y') => self.pending_y = true,
-            KeyCode::Char('z') => self.pending_z = true,
+            Command::EditorPasteAfter => self.paste(false),
+            Command::EditorPasteBefore => self.paste(true),
+            // `dd`/`yy`/`za` arrive as already-completed two-key sequences
+            // (`Context::VimNormal`'s own bindings) -- no separate pending
+            // flags needed, `keymap().resolve_in` above did that.
+            Command::EditorDeleteLine => {
+                self.checkpoint();
+                self.delete_current_line();
+            }
+            Command::EditorYankLine => self.yank_current_line(),
+            Command::EditorToggleFold => self.toggle_fold(),
             // Real vim's redo key, `ctrl-r`, is already query-screen's
             // "open history" and is intercepted before it ever reaches
             // this editor (see `Context::QueryScreen` in
-            // `tradar_core::keymap`) -- `U` is the substitute. `u` itself
-            // is free: `vim_list::recognize` only claims `ctrl-u`
-            // (half-page-up), not the bare key.
-            KeyCode::Char('u') => self.undo(),
-            KeyCode::Char('U') => self.redo(),
+            // `tradar_core::keymap`) -- `U` is the substitute.
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
             _ => {}
         }
     }
@@ -1065,14 +1061,31 @@ impl QueryEditorComponent {
     }
 
     fn handle_visual_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        match code {
-            KeyCode::Esc => self.exit_visual(),
-            KeyCode::Char('y') => self.yank_selection(),
-            KeyCode::Char('d') | KeyCode::Char('x') => self.delete_selection(false),
-            KeyCode::Char('c') => self.delete_selection(true),
-            _ => {
-                self.handle_motion_key(code, modifiers);
-            }
+        // Not remappable, same as vim itself -- see the doc comment on
+        // `Context::VimVisual`.
+        if code == KeyCode::Esc {
+            self.exit_visual();
+            return;
+        }
+        let key = KeyPress::new(code, modifiers);
+        let command = match keymap::keymap().resolve_in(
+            &[Context::VimVisual, Context::VimMotion],
+            &mut self.pending,
+            key,
+        ) {
+            Resolution::Command(command) => command,
+            Resolution::Pending | Resolution::None => return,
+        };
+
+        if self.apply_motion_command(command) {
+            return;
+        }
+
+        match command {
+            Command::EditorYankSelection => self.yank_selection(),
+            Command::EditorDeleteSelection => self.delete_selection(false),
+            Command::EditorChangeSelection => self.delete_selection(true),
+            _ => {}
         }
     }
 
@@ -1842,6 +1855,46 @@ mod tests {
         editor.forward_key(key(KeyCode::Char('j')));
 
         assert_eq!(editor.text(), "a\nb\nc", "the line must not be deleted");
+    }
+
+    #[test]
+    fn a_pending_d_followed_by_a_bound_key_falls_through_and_runs_it() {
+        // `keymap().resolve_in`'s shared pending-sequence mechanism (also
+        // used for `gg` elsewhere) tries the second key on its own once it
+        // doesn't complete `dd` -- so `d` then `i` cancels the pending `d`
+        // and enters Insert, rather than swallowing `i` silently the way
+        // the old hand-rolled `pending_d` flag did.
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("ab");
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        assert_eq!(editor.mode, EditorMode::Insert);
+        assert_eq!(editor.text(), "ab", "d itself deleted nothing");
+    }
+
+    #[test]
+    fn dd_yy_and_za_still_work_as_two_key_sequences_through_the_keymap() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select 1;\nselect 2;\nselect 3;");
+
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('p')));
+        assert_eq!(
+            editor.text(),
+            "select 1;\nselect 1;\nselect 2;\nselect 3;",
+            "yy then p pastes the copied line back"
+        );
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('d')));
+        assert_eq!(
+            editor.text(),
+            "select 1;\nselect 2;\nselect 3;",
+            "dd deleted the line yy/p had just duplicated"
+        );
     }
 
     #[test]

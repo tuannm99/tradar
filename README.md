@@ -90,12 +90,12 @@ close-tab = []                # rỗng = gỡ bỏ phím
 vim-mode = true                # mặc định false (soạn thảo kiểu textbox thường)
 ```
 
-Context gồm `global`, `picker`, `query-screen`, `navigator`, `results`, `list`, `prompt`, `completion`, `editor` (`undo`/`redo`/search-trong-buffer) — bấm `?` trong app để xem toàn bộ lệnh và phím hiện hành của từng context. Chỉ những lệnh đó remap được.
+Context gồm `global`, `picker`, `query-screen`, `navigator`, `results`, `list`, `prompt`, `completion`, `editor` (`undo`/`redo`/search-trong-buffer/`:` command line), `vim-normal`, `vim-visual`, `vim-motion` (phím vim *bên trong* editor khi `vim-mode = true` — xem ngay dưới) — bấm `?` trong app để xem toàn bộ lệnh và phím hiện hành của từng context. Chỉ những lệnh đó remap được.
 
 `vim-mode` chọn giữa 2 chế độ soạn thảo cho query editor, không đổi được lúc đang chạy (chỉ qua config, khởi động lại mới áp dụng):
 
 - **`false` (mặc định)** — soạn thảo kiểu textbox thường: gõ là chèn ngay, không cần bấm `i` trước, phím mũi tên di chuyển, `Backspace` xoá. `Esc` thoát thẳng về picker. Undo/redo qua `Ctrl+Z`/`Ctrl+J` (mỗi phím gõ là 1 bước undo riêng, không gộp theo phiên như vim).
-- **`true`** — soạn thảo vim-modal như trước giờ: `Normal`/`Insert`/`Visual`/`VisualLine`, `i`/`a`/`o`/`O`/`x`/`dd`/`yy`/`p`/`hjkl`... cố định theo vim chuẩn (không remap được qua `[keymap]`), `u`/`U` undo/redo theo phiên gõ (`U` thay vì `Ctrl-R` của vim thật). `Esc` cần bấm khi đang ở Insert để về Normal trước, bấm lần nữa mới về picker.
+- **`true`** — soạn thảo vim-modal như trước giờ: `Normal`/`Insert`/`Visual`/`VisualLine`, `i`/`a`/`o`/`O`/`x`/`dd`/`yy`/`p`/`hjkl`... theo mặc định vim chuẩn, nhưng **remap được** qua `[keymap.vim-normal]`/`[keymap.vim-visual]`/`[keymap.vim-motion]` giống mọi context khác (`u`/`U` undo/redo theo phiên gõ, `U` thay vì `Ctrl-R` của vim thật). Chỉ `Esc` không remap được — luôn thoát Insert/Visual về Normal (bấm lần nữa mới về picker), đúng quy ước vim thật.
 
 Cả 2 chế độ đều tự đóng ngoặc/quote khi gõ (`(`, `[`, `{`, `"`, `'`) và bỏ qua thay vì chèn lặp khi gõ đúng ký tự đóng vừa tự chèn.
 

@@ -34,7 +34,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 **Gap nhỏ, chưa scope**
 
 - [x] Nhiều theme preset dựng sẵn — xong (2026-09-23), xem `docs/backlog/theme-presets.md`
-- [ ] Remap phím vim bên trong editor
+- [x] Remap phím vim bên trong editor — xong (2026-09-24), xem `docs/backlog/vim-remap-2026-09-24.md`
 - [x] Resize cột bằng tay trong results grid — xong (2026-09-24), xem `docs/backlog/column-resize-2026-09-24.md`
 - [x] Visual mode search-as-motion trong query editor — xong (2026-09-24), xem `docs/backlog/visual-mode-search-motion-2026-09-24.md`
 - [x] `:s/pat/repl/` trong query editor — xong (2026-09-24), xem `docs/backlog/command-line-substitute-2026-09-24.md`
@@ -49,7 +49,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 ## Gap nhỏ, chưa được scope
 
 - ~~Nhiều theme preset dựng sẵn~~ — xong (2026-09-23), xem `docs/backlog/theme-presets.md`. Chốt qua `AskUserQuestion`: 2 preset **Dracula + Nord** (dark-only, không làm theme sáng/Gruvbox/Solarized), `preset` trong `[theme]` chọn bảng nền, override từng role vẫn đè lên trên như trước.
-- Cho phép remap cả phím vim *bên trong* editor (hiện cố định theo vim chuẩn — xem ghi chú phạm vi ở đầu `crates/tradar-core/src/keymap.rs`).
+- ~~Cho phép remap cả phím vim *bên trong* editor~~ — xong (2026-09-24), xem `docs/backlog/vim-remap-2026-09-24.md`. Chốt qua `AskUserQuestion`: remap **toàn bộ** (kể cả `dd`/`yy`/`i`/`a`/`o`/...), không chỉ motion đơn giản — `QueryEditorComponent` giờ resolve qua `Context::VimNormal`/`VimVisual`/`VimMotion` mới trong `tradar_core::keymap`, y hệt mọi component khác.
 - ~~Cột trong bảng kết quả resize được bằng tay~~ — xong (2026-09-24), xem `docs/backlog/column-resize-2026-09-24.md`. Chốt qua `AskUserQuestion`: phím tắt `<`/`>` trên cột đang chọn (không phải kéo chuột), reset khi có kết quả mới (không nhớ theo tên cột xuyên session).
 - ~~**Visual mode search-as-motion** trong query editor~~ — xong (2026-09-24), xem `docs/backlog/visual-mode-search-motion-2026-09-24.md`. `find()` chưa từng đụng `visual_anchor` nên chỉ cần nới guard "chỉ Normal" thành "trừ Insert" ở `open_buffer_search`/`repeat_buffer_search`.
 - ~~**`:s/pat/repl/` (replace) trong query editor**~~ — xong (2026-09-24), xem `docs/backlog/command-line-substitute-2026-09-24.md`. Chốt qua `AskUserQuestion`: theo đúng vim thật (không tiền tố = dòng hiện tại, `%s` = toàn buffer), pattern literal substring như `/` search (không phải regex, không thêm dependency).
