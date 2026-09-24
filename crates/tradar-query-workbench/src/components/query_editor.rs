@@ -2365,6 +2365,33 @@ mod tests {
     }
 
     #[test]
+    fn a_search_in_visual_mode_extends_the_selection_to_the_match() {
+        // `find` (what `QueryScreenComponent::open_buffer_search`/
+        // `repeat_buffer_search` call for `/`/`n`/`N`) only ever moves the
+        // cursor, never touches `visual_anchor` -- so calling it while in
+        // Visual mode is exactly vim's "search as a motion": the selection
+        // grows to the match instead of the search being blocked.
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abcdefFOOghi");
+
+        editor.forward_key(key(KeyCode::Char('v')));
+        assert!(editor.find("FOO", false));
+        assert_eq!(
+            editor.mode,
+            EditorMode::Visual,
+            "search must not exit Visual mode -- it's a motion, not a command that ends it"
+        );
+
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('P')));
+
+        // The anchor stayed at column 0, `find` moved the cursor to "FOO"'s
+        // first character (column 6) -- an inclusive charwise selection
+        // from column 0 through 6 is "abcdefF".
+        assert_eq!(editor.text(), "abcdefFabcdefFOOghi");
+    }
+
+    #[test]
     fn visual_charwise_delete_spanning_lines_joins_the_remainder() {
         let mut editor = QueryEditorComponent::new();
         editor.set_text("hello\nworld");

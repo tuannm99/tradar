@@ -765,23 +765,29 @@ impl QueryScreenComponent {
     }
 
     /// `/` while the editor has focus: opens the incremental buffer-search
-    /// bar. Only from the editor's own Normal mode -- typing `/` in Insert
-    /// mode is already handled as a literal character before this is ever
-    /// reached (see the plain-char-in-Insert passthrough), and Visual mode
-    /// deliberately doesn't support search-as-a-motion (real vim does;
-    /// out of scope here -- see `docs/roadmap.md`).
+    /// bar. Works from Normal, Visual, and Visual Line -- typing `/` in
+    /// Insert mode is already handled as a literal character before this is
+    /// ever reached (see the plain-char-in-Insert passthrough), so `Insert`
+    /// is the only mode this actually excludes. In Visual/VisualLine, this
+    /// is search-*as-a-motion*, real vim's own term for it: `find` (called
+    /// below, on every keystroke and again on `Enter`) only ever moves
+    /// `query_editor`'s cursor, never touches `visual_anchor`, so a search
+    /// started mid-selection extends that selection to the match exactly
+    /// the way any other cursor motion would -- nothing extra to wire up
+    /// here for that.
     fn open_buffer_search(&mut self) {
-        if self.query_editor.mode != EditorMode::Normal {
+        if self.query_editor.mode == EditorMode::Insert {
             return;
         }
         self.search_origin = Some(self.query_editor.cursor());
         self.buffer_search = Some(ui::TextInput::new(""));
     }
 
-    /// `n`/`N`: repeats `last_search`, same Normal-mode-only restriction as
-    /// `open_buffer_search`. A no-op if nothing's been searched yet.
+    /// `n`/`N`: repeats `last_search`, same restriction (and same
+    /// works-as-a-motion-in-Visual reasoning) as `open_buffer_search`. A
+    /// no-op if nothing's been searched yet.
     fn repeat_buffer_search(&mut self, backwards: bool) {
-        if self.query_editor.mode != EditorMode::Normal {
+        if self.query_editor.mode == EditorMode::Insert {
             return;
         }
         let Some(pattern) = self.last_search.clone() else {
@@ -3708,6 +3714,37 @@ mod tests {
             screen.query_editor.cursor(),
             (0, 0),
             "n wraps back around to the first occurrence"
+        );
+    }
+
+    #[test]
+    fn slash_in_visual_mode_searches_as_a_motion_instead_of_being_blocked() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("select * from users");
+
+        screen.handle_key_event(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(screen.query_editor.mode, EditorMode::Visual);
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(
+            screen.buffer_search.is_some(),
+            "unlike Insert mode, Visual mode must not block the search bar"
+        );
+        for c in "from".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.buffer_search.is_none(), "the bar closes");
+        assert_eq!(
+            screen.query_editor.cursor(),
+            (0, 9),
+            "cursor moved to the match"
+        );
+        assert_eq!(
+            screen.query_editor.mode,
+            EditorMode::Visual,
+            "confirming the search must not exit Visual mode -- it's a motion"
         );
     }
 
