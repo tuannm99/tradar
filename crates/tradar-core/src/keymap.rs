@@ -5,11 +5,13 @@
 //! component code -- and lets the help overlay list the bindings actually
 //! in effect rather than a hand-maintained cheatsheet that drifts.
 //!
-//! Scope note: the vim keys *inside* the query editor (`i`/`a`/`o`/`x`/`dd`/
-//! `hjkl`) are deliberately **not** remappable -- they're standard vim, and
-//! leaving them fixed keeps the config small and un-footgunny. Everything
-//! else (tabs, quit, run, save/open, history, yank, focus, and list
-//! navigation) goes through here.
+//! The vim keys *inside* the query editor (`i`/`a`/`o`/`x`/`dd`/`hjkl`/...)
+//! go through here too, via `Context::VimNormal`/`Context::VimVisual`/
+//! `Context::VimMotion` -- `QueryEditorComponent` resolves its own Normal-
+//! and Visual-mode keys against these instead of matching `KeyCode` inline,
+//! the same way every other component does. They used to be a deliberate
+//! exception (fixed, not remappable, to keep the config small); that
+//! changed 2026-09-24 -- see `docs/backlog/vim-remap-2026-09-24.md`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -123,6 +125,25 @@ pub enum Context {
     /// that's genuinely new here (committing one column and starting the
     /// next while building a `CREATE TABLE`).
     TableDesigner,
+    /// Query editor, Normal mode only -- mode-entry (`i`/`a`/`I`/`A`/`o`/
+    /// `O`/`v`/`V`), single-key edits (`x`/`p`/`P`), the `dd`/`yy`/`za`
+    /// two-key combos, and `u`/`U` undo/redo. Combined with `VimMotion` by
+    /// `QueryEditorComponent` when resolving a Normal-mode key, the same way
+    /// `QueryScreen` combines with `Editor` -- split out from `VimMotion`
+    /// because Visual mode shares the motions but not these.
+    VimNormal,
+    /// Query editor, Visual/VisualLine mode only -- `y`/`d`/`x`/`c` acting
+    /// on the selection. `Esc` isn't here: `QueryScreenComponent` forwards
+    /// it straight to the editor before the keymap ever sees it (same as
+    /// vim itself, where `Esc` always exits rather than being a rebindable
+    /// command).
+    VimVisual,
+    /// Query editor, shared by Normal and Visual/VisualLine mode --
+    /// `h`/`l`/`0`/`$` plus `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` (the latter
+    /// six reuse `Command::MoveDown`/`MoveUp`/`MoveTop`/`MoveBottom`/
+    /// `HalfPageDown`/`HalfPageUp`, exactly like `Context::List`, via
+    /// `Command::as_vim_move`).
+    VimMotion,
 }
 
 impl Context {
@@ -147,6 +168,9 @@ impl Context {
             Self::ColumnPicker => "column-picker",
             Self::FilterConditions => "filter-conditions",
             Self::TableDesigner => "table-designer",
+            Self::VimNormal => "vim-normal",
+            Self::VimVisual => "vim-visual",
+            Self::VimMotion => "vim-motion",
         }
     }
 
@@ -171,12 +195,15 @@ impl Context {
             "column-picker" => Self::ColumnPicker,
             "filter-conditions" => Self::FilterConditions,
             "table-designer" => Self::TableDesigner,
+            "vim-normal" => Self::VimNormal,
+            "vim-visual" => Self::VimVisual,
+            "vim-motion" => Self::VimMotion,
             _ => return None,
         })
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 19] {
+    pub fn all() -> [Self; 22] {
         [
             Self::Global,
             Self::Picker,
@@ -184,6 +211,9 @@ impl Context {
             Self::Navigator,
             Self::Results,
             Self::Editor,
+            Self::VimNormal,
+            Self::VimVisual,
+            Self::VimMotion,
             Self::Browse,
             Self::Rabbit,
             Self::Kafka,
@@ -283,6 +313,11 @@ pub enum Command {
     /// scrolls to follow it, so this covers horizontal scrolling too.
     PrevColumn,
     NextColumn,
+    /// `<`/`>`: manually shrink/grow the selected column past what
+    /// auto-sizing picked -- see `ResultsComponent::narrow_column`/
+    /// `widen_column`.
+    NarrowColumn,
+    WidenColumn,
     /// Change the selected cell's value, by generating and running the
     /// statement that does it.
     EditCell,
@@ -396,6 +431,10 @@ pub enum Command {
     /// `/` in the editor: incremental search over the buffer -- distinct
     /// from `Search` (the results-grid filter), see `Context::Editor`.
     SearchInBuffer,
+    /// `:` in the editor, Normal mode only: opens vim's own command line --
+    /// currently only understands `s`/`%s` (substitute), see
+    /// `tradar-query-workbench`'s `query_screen::parse_substitute`.
+    EnterCommandLine,
     /// `n`: repeat the last buffer search forward.
     SearchNext,
     /// `N`: repeat the last buffer search backward.
@@ -408,6 +447,48 @@ pub enum Command {
     /// own doc comment and the binding's comment in `Context::Editor` for
     /// why not a more conventional key.
     Redo,
+    /// `h`/`left` in the query editor: move the cursor left one column.
+    EditorMoveLeft,
+    /// `l`/`right` in the query editor: move the cursor right one column.
+    EditorMoveRight,
+    /// `0` in the query editor: jump to the start of the line.
+    EditorLineStart,
+    /// `$` in the query editor: jump to the end of the line.
+    EditorLineEnd,
+    /// `i`: enter Insert mode at the cursor.
+    EditorEnterInsert,
+    /// `a`: enter Insert mode one column after the cursor.
+    EditorAppend,
+    /// `I`: enter Insert mode at the start of the line.
+    EditorInsertLineStart,
+    /// `A`: enter Insert mode at the end of the line.
+    EditorAppendLineEnd,
+    /// `o`: open a new line below the cursor and enter Insert mode there.
+    EditorOpenBelow,
+    /// `O`: open a new line above the cursor and enter Insert mode there.
+    EditorOpenAbove,
+    /// `v`: enter Visual (charwise) mode.
+    EditorEnterVisual,
+    /// `V`: enter Visual Line mode.
+    EditorEnterVisualLine,
+    /// `x`: delete the character under the cursor.
+    EditorDeleteChar,
+    /// `p`: paste the last yank/delete after the cursor.
+    EditorPasteAfter,
+    /// `P`: paste the last yank/delete before the cursor.
+    EditorPasteBefore,
+    /// `dd`: delete the current line.
+    EditorDeleteLine,
+    /// `yy`: copy the current line.
+    EditorYankLine,
+    /// `za`: open/close the fold under the cursor.
+    EditorToggleFold,
+    /// `y` in Visual/VisualLine mode: copy the selection.
+    EditorYankSelection,
+    /// `d`/`x` in Visual/VisualLine mode: delete the selection.
+    EditorDeleteSelection,
+    /// `c` in Visual/VisualLine mode: delete the selection and enter Insert.
+    EditorChangeSelection,
     /// Toggle the highlighted column's checkbox in the navigator's column
     /// picker (see `Context::ColumnPicker`).
     ToggleColumn,
@@ -480,6 +561,8 @@ impl Command {
             Self::Help => "help",
             Self::PrevColumn => "prev-column",
             Self::NextColumn => "next-column",
+            Self::NarrowColumn => "narrow-column",
+            Self::WidenColumn => "widen-column",
             Self::EditCell => "edit-cell",
             Self::DeleteRow => "delete-row",
             Self::SortColumn => "sort-column",
@@ -524,10 +607,32 @@ impl Command {
             Self::CrudUpdate => "crud-update",
             Self::CrudDelete => "crud-delete",
             Self::SearchInBuffer => "search-in-buffer",
+            Self::EnterCommandLine => "enter-command-line",
             Self::SearchNext => "search-next",
             Self::SearchPrev => "search-prev",
             Self::Undo => "undo",
             Self::Redo => "redo",
+            Self::EditorMoveLeft => "editor-move-left",
+            Self::EditorMoveRight => "editor-move-right",
+            Self::EditorLineStart => "editor-line-start",
+            Self::EditorLineEnd => "editor-line-end",
+            Self::EditorEnterInsert => "editor-enter-insert",
+            Self::EditorAppend => "editor-append",
+            Self::EditorInsertLineStart => "editor-insert-line-start",
+            Self::EditorAppendLineEnd => "editor-append-line-end",
+            Self::EditorOpenBelow => "editor-open-below",
+            Self::EditorOpenAbove => "editor-open-above",
+            Self::EditorEnterVisual => "editor-enter-visual",
+            Self::EditorEnterVisualLine => "editor-enter-visual-line",
+            Self::EditorDeleteChar => "editor-delete-char",
+            Self::EditorPasteAfter => "editor-paste-after",
+            Self::EditorPasteBefore => "editor-paste-before",
+            Self::EditorDeleteLine => "editor-delete-line",
+            Self::EditorYankLine => "editor-yank-line",
+            Self::EditorToggleFold => "editor-toggle-fold",
+            Self::EditorYankSelection => "editor-yank-selection",
+            Self::EditorDeleteSelection => "editor-delete-selection",
+            Self::EditorChangeSelection => "editor-change-selection",
             Self::ToggleColumn => "toggle-column",
             Self::ToggleAllColumns => "toggle-all-columns",
             Self::MoveDown => "move-down",
@@ -550,7 +655,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 107] = [
+    const ALL: [Self; 131] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -595,6 +700,8 @@ impl Command {
         Self::Help,
         Self::PrevColumn,
         Self::NextColumn,
+        Self::NarrowColumn,
+        Self::WidenColumn,
         Self::EditCell,
         Self::DeleteRow,
         Self::SortColumn,
@@ -639,10 +746,32 @@ impl Command {
         Self::CrudUpdate,
         Self::CrudDelete,
         Self::SearchInBuffer,
+        Self::EnterCommandLine,
         Self::SearchNext,
         Self::SearchPrev,
         Self::Undo,
         Self::Redo,
+        Self::EditorMoveLeft,
+        Self::EditorMoveRight,
+        Self::EditorLineStart,
+        Self::EditorLineEnd,
+        Self::EditorEnterInsert,
+        Self::EditorAppend,
+        Self::EditorInsertLineStart,
+        Self::EditorAppendLineEnd,
+        Self::EditorOpenBelow,
+        Self::EditorOpenAbove,
+        Self::EditorEnterVisual,
+        Self::EditorEnterVisualLine,
+        Self::EditorDeleteChar,
+        Self::EditorPasteAfter,
+        Self::EditorPasteBefore,
+        Self::EditorDeleteLine,
+        Self::EditorYankLine,
+        Self::EditorToggleFold,
+        Self::EditorYankSelection,
+        Self::EditorDeleteSelection,
+        Self::EditorChangeSelection,
         Self::ToggleColumn,
         Self::ToggleAllColumns,
         Self::MoveDown,
@@ -707,6 +836,8 @@ impl Command {
             Self::Help => "Show this help",
             Self::PrevColumn => "Move to the previous column",
             Self::NextColumn => "Move to the next column",
+            Self::NarrowColumn => "Shrink the selected column",
+            Self::WidenColumn => "Grow the selected column",
             Self::EditCell => "Edit the selected cell",
             Self::DeleteRow => "Delete the selected row",
             Self::SortColumn => "Sort by the selected column (asc/desc/off)",
@@ -751,10 +882,32 @@ impl Command {
             Self::CrudUpdate => "Insert an Update snippet for the selected table",
             Self::CrudDelete => "Insert a Delete snippet for the selected table",
             Self::SearchInBuffer => "Search the buffer",
+            Self::EnterCommandLine => "Open the : command line (substitute)",
             Self::SearchNext => "Repeat the last search forward",
             Self::SearchPrev => "Repeat the last search backward",
             Self::Undo => "Undo the last edit",
             Self::Redo => "Redo the last undone edit",
+            Self::EditorMoveLeft => "Move left",
+            Self::EditorMoveRight => "Move right",
+            Self::EditorLineStart => "Jump to the start of the line",
+            Self::EditorLineEnd => "Jump to the end of the line",
+            Self::EditorEnterInsert => "Insert at the cursor",
+            Self::EditorAppend => "Insert after the cursor",
+            Self::EditorInsertLineStart => "Insert at the start of the line",
+            Self::EditorAppendLineEnd => "Insert at the end of the line",
+            Self::EditorOpenBelow => "Open a new line below",
+            Self::EditorOpenAbove => "Open a new line above",
+            Self::EditorEnterVisual => "Enter Visual mode",
+            Self::EditorEnterVisualLine => "Enter Visual Line mode",
+            Self::EditorDeleteChar => "Delete the character under the cursor",
+            Self::EditorPasteAfter => "Paste after the cursor",
+            Self::EditorPasteBefore => "Paste before the cursor",
+            Self::EditorDeleteLine => "Delete the current line",
+            Self::EditorYankLine => "Copy the current line",
+            Self::EditorToggleFold => "Open/close the fold under the cursor",
+            Self::EditorYankSelection => "Copy the selection",
+            Self::EditorDeleteSelection => "Delete the selection",
+            Self::EditorChangeSelection => "Delete the selection and insert",
             Self::ToggleColumn => "Toggle the highlighted column",
             Self::ToggleAllColumns => "Toggle all columns",
             Self::MoveDown => "Move down",
@@ -1056,6 +1209,8 @@ impl Default for Keymap {
                 ("left", Command::PrevColumn),
                 ("l", Command::NextColumn),
                 ("right", Command::NextColumn),
+                ("<", Command::NarrowColumn),
+                (">", Command::WidenColumn),
                 ("enter", Command::EditCell),
                 ("d", Command::DeleteRow),
                 ("s", Command::SortColumn),
@@ -1072,6 +1227,7 @@ impl Default for Keymap {
             Context::Editor,
             parse_defaults(&[
                 ("/", Command::SearchInBuffer),
+                (":", Command::EnterCommandLine),
                 ("n", Command::SearchNext),
                 ("N", Command::SearchPrev),
                 // Reachable regardless of vim mode -- unlike `u`/`U`
@@ -1086,6 +1242,62 @@ impl Default for Keymap {
                 // nearest free key to `ctrl-z` on the keyboard instead.
                 ("ctrl-z", Command::Undo),
                 ("ctrl-j", Command::Redo),
+            ]),
+        );
+        bindings.insert(
+            Context::VimNormal,
+            parse_defaults(&[
+                ("i", Command::EditorEnterInsert),
+                ("a", Command::EditorAppend),
+                ("I", Command::EditorInsertLineStart),
+                ("A", Command::EditorAppendLineEnd),
+                ("o", Command::EditorOpenBelow),
+                ("O", Command::EditorOpenAbove),
+                ("v", Command::EditorEnterVisual),
+                ("V", Command::EditorEnterVisualLine),
+                ("x", Command::EditorDeleteChar),
+                ("p", Command::EditorPasteAfter),
+                ("P", Command::EditorPasteBefore),
+                ("dd", Command::EditorDeleteLine),
+                ("yy", Command::EditorYankLine),
+                ("za", Command::EditorToggleFold),
+                // Real vim's redo key, `ctrl-r`, is already query-screen's
+                // "open history" and is intercepted before it ever reaches
+                // the editor -- `U` is the substitute here, same as before
+                // this context existed. `u` reuses `Command::Undo`/`Redo`
+                // rather than new editor-specific commands: undoing is the
+                // same action whether it's reached via `u` here or `ctrl-z`
+                // in `Context::Editor` (vim mode off).
+                ("u", Command::Undo),
+                ("U", Command::Redo),
+            ]),
+        );
+        bindings.insert(
+            Context::VimVisual,
+            parse_defaults(&[
+                ("y", Command::EditorYankSelection),
+                ("d", Command::EditorDeleteSelection),
+                ("x", Command::EditorDeleteSelection),
+                ("c", Command::EditorChangeSelection),
+            ]),
+        );
+        bindings.insert(
+            Context::VimMotion,
+            parse_defaults(&[
+                ("h", Command::EditorMoveLeft),
+                ("left", Command::EditorMoveLeft),
+                ("l", Command::EditorMoveRight),
+                ("right", Command::EditorMoveRight),
+                ("j", Command::MoveDown),
+                ("down", Command::MoveDown),
+                ("k", Command::MoveUp),
+                ("up", Command::MoveUp),
+                ("gg", Command::MoveTop),
+                ("G", Command::MoveBottom),
+                ("ctrl-d", Command::HalfPageDown),
+                ("ctrl-u", Command::HalfPageUp),
+                ("0", Command::EditorLineStart),
+                ("$", Command::EditorLineEnd),
             ]),
         );
         bindings.insert(
@@ -1519,6 +1731,21 @@ mod tests {
     }
 
     #[test]
+    fn less_and_greater_than_resize_the_selected_column_by_default() {
+        let keymap = Keymap::default();
+        let mut pending = None;
+
+        assert_eq!(
+            keymap.resolve(Context::Results, &mut pending, press(KeyCode::Char('<'))),
+            Resolution::Command(Command::NarrowColumn)
+        );
+        assert_eq!(
+            keymap.resolve(Context::Results, &mut pending, press(KeyCode::Char('>'))),
+            Resolution::Command(Command::WidenColumn)
+        );
+    }
+
+    #[test]
     fn an_unbound_key_resolves_to_none() {
         let keymap = Keymap::default();
         let mut pending = None;
@@ -1608,6 +1835,71 @@ mod tests {
         assert_eq!(
             keymap.resolve(Context::Global, &mut pending, ctrl('w')),
             Resolution::None
+        );
+    }
+
+    #[test]
+    fn the_vim_editor_contexts_are_remappable_like_any_other() {
+        // Proves h/l/0/$ (`VimMotion`), i/a/o/... (`VimNormal`) and
+        // y/d/c (`VimVisual`) aren't a special case anymore -- the exact
+        // gap this test closes, see docs/backlog/vim-remap-2026-09-24.md.
+        let mut keymap = Keymap::default();
+        keymap
+            .apply_overrides(&overrides("vim-motion", "editor-move-left", &["ctrl-h"]))
+            .unwrap();
+        keymap
+            .apply_overrides(&overrides("vim-normal", "editor-enter-insert", &["ctrl-i"]))
+            .unwrap();
+        keymap
+            .apply_overrides(&overrides(
+                "vim-visual",
+                "editor-yank-selection",
+                &["ctrl-y"],
+            ))
+            .unwrap();
+
+        let mut pending = None;
+        assert_eq!(
+            keymap.resolve(Context::VimMotion, &mut pending, ctrl('h')),
+            Resolution::Command(Command::EditorMoveLeft)
+        );
+        assert_eq!(
+            keymap.resolve(Context::VimMotion, &mut pending, press(KeyCode::Char('h'))),
+            Resolution::None,
+            "the default binding is replaced, not added to"
+        );
+        assert_eq!(
+            keymap.resolve(Context::VimNormal, &mut pending, ctrl('i')),
+            Resolution::Command(Command::EditorEnterInsert)
+        );
+        assert_eq!(
+            keymap.resolve(Context::VimVisual, &mut pending, ctrl('y')),
+            Resolution::Command(Command::EditorYankSelection)
+        );
+    }
+
+    #[test]
+    fn the_dd_yy_za_two_key_editor_combos_are_rebindable_to_a_different_pair() {
+        let mut keymap = Keymap::default();
+        keymap
+            .apply_overrides(&overrides("vim-normal", "editor-delete-line", &["qq"]))
+            .unwrap();
+
+        let mut pending = None;
+        assert_eq!(
+            keymap.resolve(Context::VimNormal, &mut pending, press(KeyCode::Char('q'))),
+            Resolution::Pending
+        );
+        assert_eq!(
+            keymap.resolve(Context::VimNormal, &mut pending, press(KeyCode::Char('q'))),
+            Resolution::Command(Command::EditorDeleteLine)
+        );
+
+        pending = None;
+        assert_eq!(
+            keymap.resolve(Context::VimNormal, &mut pending, press(KeyCode::Char('d'))),
+            Resolution::None,
+            "the old dd binding is gone once overridden"
         );
     }
 

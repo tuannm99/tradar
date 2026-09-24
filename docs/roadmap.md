@@ -34,10 +34,10 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 **Gap nhỏ, chưa scope**
 
 - [x] Nhiều theme preset dựng sẵn — xong (2026-09-23), xem `docs/backlog/theme-presets.md`
-- [ ] Remap phím vim bên trong editor
-- [ ] Resize cột bằng tay trong results grid
-- [ ] Visual mode search-as-motion trong query editor
-- [ ] `:s/pat/repl/` trong query editor
+- [x] Remap phím vim bên trong editor — xong (2026-09-24), xem `docs/backlog/vim-remap-2026-09-24.md`
+- [x] Resize cột bằng tay trong results grid — xong (2026-09-24), xem `docs/backlog/column-resize-2026-09-24.md`
+- [x] Visual mode search-as-motion trong query editor — xong (2026-09-24), xem `docs/backlog/visual-mode-search-motion-2026-09-24.md`
+- [x] `:s/pat/repl/` trong query editor — xong (2026-09-24), xem `docs/backlog/command-line-substitute-2026-09-24.md`
 - [x] `Component: Send` — re-verify lý do gốc còn đúng không (xong 2026-09-03, kết luận: giữ nguyên)
 
 ## Connector mới, đã lên kế hoạch nhưng chưa code
@@ -49,10 +49,10 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 ## Gap nhỏ, chưa được scope
 
 - ~~Nhiều theme preset dựng sẵn~~ — xong (2026-09-23), xem `docs/backlog/theme-presets.md`. Chốt qua `AskUserQuestion`: 2 preset **Dracula + Nord** (dark-only, không làm theme sáng/Gruvbox/Solarized), `preset` trong `[theme]` chọn bảng nền, override từng role vẫn đè lên trên như trước.
-- Cho phép remap cả phím vim *bên trong* editor (hiện cố định theo vim chuẩn — xem ghi chú phạm vi ở đầu `crates/tradar-core/src/keymap.rs`).
-- Cột trong bảng kết quả resize được bằng tay (hiện tự tính theo giá trị rộng nhất, cap 40 ký tự).
-- **Visual mode search-as-motion** trong query editor — thật vim hỗ trợ `/pattern` làm motion trong Visual mode, editor tự viết ở đây cố tình chưa làm (`open_buffer_search` chỉ hoạt động ở Normal mode).
-- **`:s/pat/repl/` (replace) trong query editor** — phần còn thiếu của "Visual mode, copy/paste nội bộ, search trong buffer" (`docs/backlog/features-batch-2026-08-14.md`), tách ra làm sau vì chưa có tiền lệ UI dạng dòng lệnh `:` nào trong app, cần scope riêng.
+- ~~Cho phép remap cả phím vim *bên trong* editor~~ — xong (2026-09-24), xem `docs/backlog/vim-remap-2026-09-24.md`. Chốt qua `AskUserQuestion`: remap **toàn bộ** (kể cả `dd`/`yy`/`i`/`a`/`o`/...), không chỉ motion đơn giản — `QueryEditorComponent` giờ resolve qua `Context::VimNormal`/`VimVisual`/`VimMotion` mới trong `tradar_core::keymap`, y hệt mọi component khác.
+- ~~Cột trong bảng kết quả resize được bằng tay~~ — xong (2026-09-24), xem `docs/backlog/column-resize-2026-09-24.md`. Chốt qua `AskUserQuestion`: phím tắt `<`/`>` trên cột đang chọn (không phải kéo chuột), reset khi có kết quả mới (không nhớ theo tên cột xuyên session).
+- ~~**Visual mode search-as-motion** trong query editor~~ — xong (2026-09-24), xem `docs/backlog/visual-mode-search-motion-2026-09-24.md`. `find()` chưa từng đụng `visual_anchor` nên chỉ cần nới guard "chỉ Normal" thành "trừ Insert" ở `open_buffer_search`/`repeat_buffer_search`.
+- ~~**`:s/pat/repl/` (replace) trong query editor**~~ — xong (2026-09-24), xem `docs/backlog/command-line-substitute-2026-09-24.md`. Chốt qua `AskUserQuestion`: theo đúng vim thật (không tiền tố = dòng hiện tại, `%s` = toàn buffer), pattern literal substring như `/` search (không phải regex, không thêm dependency).
 - ~~**`Component: Send`**~~ — đã verify 2026-09-03, **kết luận: giữ nguyên, không bound**. Mọi implementor thật (`RootComponent`, `ConnectionPickerComponent`, `QueryScreenComponent`, `KafkaScreen`, `RabbitScreen`, `HttpScreen`) đã `Send` sẵn; chỉ 2 test double còn giữ `Rc`. Lý do gốc (`edtui` giữ `Rc`) đúng là đã biến mất — nhưng điều kiện kích hoạt mà `docs/architecture.md` đặt ra ("xem lại nếu channel `ConnectOutcome` từng trở thành điểm khó bảo trì thật") thì chưa xảy ra, nên bound vào lúc này là đổi kiến trúc cho một lợi ích chưa ai cần. Chi tiết + cách verify trong `docs/backlog/known-issues.md`.
 
 ## So sánh DataGrip/DBeaver/Studio3T — gap còn lại (user hỏi 2026-08-19)
