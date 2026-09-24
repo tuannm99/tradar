@@ -210,6 +210,21 @@ pub enum Command {
     CloseTab,
     NextTab,
     PrevTab,
+    /// Jump straight to tab N (1-indexed, matching the tab bar's own
+    /// numbering) rather than stepping there one `NextTab`/`PrevTab` at a
+    /// time. Nine separate variants, not `GoToTab(u8)`, to match every other
+    /// `Command` here staying a plain unit variant -- a data-carrying one
+    /// would be the only exception in the whole enum for no real benefit,
+    /// since the binding table still has to name each of the nine anyway.
+    GoToTab1,
+    GoToTab2,
+    GoToTab3,
+    GoToTab4,
+    GoToTab5,
+    GoToTab6,
+    GoToTab7,
+    GoToTab8,
+    GoToTab9,
     /// Show/hide the database navigator, and move focus into it.
     ToggleNavigator,
     // Picker
@@ -421,6 +436,15 @@ impl Command {
             Self::CloseTab => "close-tab",
             Self::NextTab => "next-tab",
             Self::PrevTab => "prev-tab",
+            Self::GoToTab1 => "go-to-tab-1",
+            Self::GoToTab2 => "go-to-tab-2",
+            Self::GoToTab3 => "go-to-tab-3",
+            Self::GoToTab4 => "go-to-tab-4",
+            Self::GoToTab5 => "go-to-tab-5",
+            Self::GoToTab6 => "go-to-tab-6",
+            Self::GoToTab7 => "go-to-tab-7",
+            Self::GoToTab8 => "go-to-tab-8",
+            Self::GoToTab9 => "go-to-tab-9",
             Self::ToggleNavigator => "toggle-navigator",
             Self::Open => "open",
             Self::OpenNewSession => "open-new-session",
@@ -520,12 +544,21 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 97] = [
+    const ALL: [Self; 106] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
         Self::NextTab,
         Self::PrevTab,
+        Self::GoToTab1,
+        Self::GoToTab2,
+        Self::GoToTab3,
+        Self::GoToTab4,
+        Self::GoToTab5,
+        Self::GoToTab6,
+        Self::GoToTab7,
+        Self::GoToTab8,
+        Self::GoToTab9,
         Self::ToggleNavigator,
         Self::Open,
         Self::OpenNewSession,
@@ -628,6 +661,15 @@ impl Command {
             Self::CloseTab => "Close the current tab",
             Self::NextTab => "Go to the next tab",
             Self::PrevTab => "Go to the previous tab",
+            Self::GoToTab1 => "Jump to tab 1",
+            Self::GoToTab2 => "Jump to tab 2",
+            Self::GoToTab3 => "Jump to tab 3",
+            Self::GoToTab4 => "Jump to tab 4",
+            Self::GoToTab5 => "Jump to tab 5",
+            Self::GoToTab6 => "Jump to tab 6",
+            Self::GoToTab7 => "Jump to tab 7",
+            Self::GoToTab8 => "Jump to tab 8",
+            Self::GoToTab9 => "Jump to tab 9",
             Self::ToggleNavigator => "Show/focus the database navigator",
             Self::Open => "Connect (switches to the tab it's already open on, if any)",
             Self::OpenNewSession => "Open a new session even if already connected",
@@ -837,7 +879,27 @@ impl Default for Keymap {
                 ("ctrl-w", Command::CloseTab),
                 ("ctrl-right", Command::NextTab),
                 ("ctrl-left", Command::PrevTab),
-                ("ctrl-b", Command::ToggleNavigator),
+                // `h`/`l`, not `j`/`k`: tabs sit left-to-right on the bar,
+                // same reasoning as vim-tmux-navigator's own `ctrl-h`/
+                // `ctrl-l` moving to the split on that side. `ctrl-l` here
+                // shadows `Context::QueryScreen`'s and `Context::Http`'s own
+                // `ctrl-l` (`OpenSnippets`/`HttpOpenRequests`) -- `Global` is
+                // resolved first, so both moved to `f7` to stay reachable.
+                ("ctrl-h", Command::PrevTab),
+                ("ctrl-l", Command::NextTab),
+                ("ctrl-1", Command::GoToTab1),
+                ("ctrl-2", Command::GoToTab2),
+                ("ctrl-3", Command::GoToTab3),
+                ("ctrl-4", Command::GoToTab4),
+                ("ctrl-5", Command::GoToTab5),
+                ("ctrl-6", Command::GoToTab6),
+                ("ctrl-7", Command::GoToTab7),
+                ("ctrl-8", Command::GoToTab8),
+                ("ctrl-9", Command::GoToTab9),
+                // Was `ctrl-b`: `ctrl-n` reads more like "navigator" and
+                // leaves `ctrl-b` free (unbound by default, still usable via
+                // `[keymap.global]` for anyone who preferred it).
+                ("ctrl-n", Command::ToggleNavigator),
             ]),
         );
         bindings.insert(
@@ -868,7 +930,10 @@ impl Default for Keymap {
                 ("ctrl-o", Command::OpenFile),
                 ("ctrl-r", Command::History),
                 ("ctrl-k", Command::SaveSnippet),
-                ("ctrl-l", Command::OpenSnippets),
+                // Was `ctrl-l`: `Context::Global` now claims that for
+                // `NextTab` (see its own binding table's comment) and is
+                // resolved first, so this moved to the nearest free F-key.
+                ("f7", Command::OpenSnippets),
                 ("f4", Command::ShowErd),
                 ("f1", Command::ShowMigrations),
                 ("ctrl-y", Command::ExportCurl),
@@ -914,15 +979,16 @@ impl Default for Keymap {
                 ("backtab", Command::PrevField),
                 ("ctrl-enter", Command::HttpSend),
                 ("f5", Command::HttpSend),
-                // Not `ctrl-left`/`ctrl-right`: `Context::Global` binds those
-                // to `PrevTab`/`NextTab` and is resolved before any screen
-                // ever sees the key (`RootComponent::handle_key_event`
-                // returns as soon as Global matches), so a Http-context
-                // binding on the same keys would never fire.
+                // Not `ctrl-left`/`ctrl-right`/`ctrl-h`/`ctrl-l`/`ctrl-n`:
+                // `Context::Global` binds those to tab switching and
+                // `ToggleNavigator` and is resolved before any screen ever
+                // sees the key (`RootComponent::handle_key_event` returns as
+                // soon as Global matches), so a Http-context binding on the
+                // same keys would never fire.
                 ("ctrl-p", Command::HttpPrevMethod),
-                ("ctrl-n", Command::HttpNextMethod),
+                ("f3", Command::HttpNextMethod),
                 ("ctrl-k", Command::HttpSaveRequest),
-                ("ctrl-l", Command::HttpOpenRequests),
+                ("f7", Command::HttpOpenRequests),
                 ("f6", Command::ToggleSplitOrientation),
                 ("ctrl-up", Command::ZoomIn),
                 ("ctrl-down", Command::ZoomOut),
@@ -1025,7 +1091,11 @@ impl Default for Keymap {
             Context::Completion,
             parse_defaults(&[
                 ("tab", Command::AcceptCompletion),
-                ("ctrl-n", Command::NextCompletion),
+                // No `ctrl-n` alongside `down` here anymore: `Context::Global`
+                // now claims `ctrl-n` for `ToggleNavigator` and is resolved
+                // first, so a binding here would never fire -- `down` alone
+                // still reaches `NextCompletion` fine. `ctrl-p` stays, since
+                // Global doesn't touch it.
                 ("down", Command::NextCompletion),
                 ("ctrl-p", Command::PrevCompletion),
                 ("up", Command::PrevCompletion),
@@ -1291,6 +1361,47 @@ mod tests {
         let resolution = keymap.resolve(Context::List, &mut pending, press(KeyCode::Char('j')));
 
         assert_eq!(resolution, Resolution::Command(Command::MoveDown));
+    }
+
+    #[test]
+    fn ctrl_h_and_ctrl_l_switch_tabs_like_ctrl_left_and_ctrl_right() {
+        let keymap = Keymap::default();
+        let mut pending = None;
+
+        assert_eq!(
+            keymap.resolve(Context::Global, &mut pending, ctrl('h')),
+            Resolution::Command(Command::PrevTab)
+        );
+        assert_eq!(
+            keymap.resolve(Context::Global, &mut pending, ctrl('l')),
+            Resolution::Command(Command::NextTab)
+        );
+    }
+
+    #[test]
+    fn ctrl_digit_jumps_straight_to_that_tab() {
+        let keymap = Keymap::default();
+        let mut pending = None;
+
+        assert_eq!(
+            keymap.resolve(Context::Global, &mut pending, ctrl('1')),
+            Resolution::Command(Command::GoToTab1)
+        );
+        assert_eq!(
+            keymap.resolve(Context::Global, &mut pending, ctrl('9')),
+            Resolution::Command(Command::GoToTab9)
+        );
+    }
+
+    #[test]
+    fn ctrl_n_toggles_the_navigator_by_default() {
+        let keymap = Keymap::default();
+        let mut pending = None;
+
+        assert_eq!(
+            keymap.resolve(Context::Global, &mut pending, ctrl('n')),
+            Resolution::Command(Command::ToggleNavigator)
+        );
     }
 
     #[test]

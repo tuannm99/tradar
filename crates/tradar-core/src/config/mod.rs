@@ -10,7 +10,7 @@
 //! error = "red"
 //!
 //! [keymap.global]
-//! new-tab = "ctrl-n"          # one binding
+//! new-tab = "ctrl-g"          # one binding
 //!
 //! [keymap.list]
 //! move-down = ["j", "down"]   # or several
@@ -235,8 +235,11 @@ mod tests {
 
     #[test]
     fn a_command_can_be_bound_to_one_key_or_a_list() {
+        // `ctrl-g`, not `ctrl-n`: the latter is `ToggleNavigator`'s own
+        // default now (see `keymap.rs`), so reusing it here would collide
+        // with that default binding rather than exercising the override.
         let (_dir, path) = write_config(
-            "[keymap.global]\nnew-tab = \"ctrl-n\"\n\n[keymap.list]\nmove-down = [\"n\", \"down\"]\n",
+            "[keymap.global]\nnew-tab = \"ctrl-g\"\n\n[keymap.list]\nmove-down = [\"n\", \"down\"]\n",
         );
 
         let (_, keymap, _) = load(&path).unwrap();
@@ -246,7 +249,7 @@ mod tests {
             keymap.resolve(
                 Context::Global,
                 &mut pending,
-                KeyPress::new(KeyCode::Char('n'), KeyModifiers::CONTROL)
+                KeyPress::new(KeyCode::Char('g'), KeyModifiers::CONTROL)
             ),
             Resolution::Command(Command::NewTab)
         );

@@ -712,10 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_n_and_ctrl_p_cycle_the_method_regardless_of_focus() {
+    fn f3_and_ctrl_p_cycle_the_method_regardless_of_focus() {
         let mut screen = screen();
 
-        screen.handle_key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        // Not `ctrl-n`: `Context::Global` claims that for `ToggleNavigator`
+        // now (see `keymap.rs`'s default bindings), so this moved to `f3`.
+        screen.handle_key_event(KeyCode::F(3), KeyModifiers::NONE);
         assert_eq!(screen.method, HttpMethod::Post);
 
         screen.handle_key_event(KeyCode::Char('p'), KeyModifiers::CONTROL);
@@ -759,10 +761,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_l_opens_an_empty_picker_when_nothing_is_saved() {
+    fn f7_opens_an_empty_picker_when_nothing_is_saved() {
         let mut screen = screen();
 
-        screen.handle_key_event(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        // Not `ctrl-l`: `Context::Global` claims that for `NextTab` now
+        // (see `keymap.rs`'s default bindings), so this moved to `f7`.
+        screen.handle_key_event(KeyCode::F(7), KeyModifiers::NONE);
 
         assert!(screen.request_picker.is_some());
     }
