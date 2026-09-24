@@ -2,6 +2,8 @@
 //! driven entirely by `QueryScreenComponent` calling `set_result`/`set_error`
 //! and its movement/yank methods directly from key handling.
 
+use std::collections::HashMap;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
@@ -59,8 +61,15 @@ fn type_icon(type_name: &str) -> Option<&'static str> {
 }
 
 /// Width for each column: whatever its widest value needs, capped at
-/// `MAX_COLUMN_WIDTH`, and never narrower than its own header.
-fn column_widths(columns: &[String], rows: &[Vec<String>]) -> Vec<usize> {
+/// `MAX_COLUMN_WIDTH`, and never narrower than its own header -- then a
+/// manual resize (`overrides`, column index -> `<`/`>` adjustment from this
+/// auto width) is applied on top, which is exactly how it can end up past
+/// the cap or below what the header alone would need.
+fn column_widths(
+    columns: &[String],
+    rows: &[Vec<String>],
+    overrides: &HashMap<usize, i32>,
+) -> Vec<usize> {
     let mut widths: Vec<usize> = columns
         .iter()
         .map(|name| name.chars().count().min(MAX_COLUMN_WIDTH))
@@ -70,6 +79,11 @@ fn column_widths(columns: &[String], rows: &[Vec<String>]) -> Vec<usize> {
             if let Some(width) = widths.get_mut(i) {
                 *width = (*width).max(cell.chars().count()).min(MAX_COLUMN_WIDTH);
             }
+        }
+    }
+    for (index, width) in widths.iter_mut().enumerate() {
+        if let Some(&delta) = overrides.get(&index) {
+            *width = (*width as i32 + delta).max(MIN_COLUMN_WIDTH) as usize;
         }
     }
     widths
@@ -100,8 +114,17 @@ fn count(n: usize, noun: &str) -> String {
 
 /// Widest a single column may get before its cells are truncated. Without
 /// a cap one long text column pushes every other column off screen, which
-/// is worse than losing the tail of that one value.
+/// is worse than losing the tail of that one value. A manual resize
+/// (`<`/`>`, see `ResultsComponent::widen_column`) can still push a column
+/// past this -- the cap is only what *auto*-sizing picks on its own.
 const MAX_COLUMN_WIDTH: usize = 40;
+
+/// How far one `<`/`>` press grows or shrinks the selected column.
+const COLUMN_RESIZE_STEP: i32 = 4;
+
+/// Floor a manual resize can't shrink a column past -- narrow enough to
+/// still show *something*, never zero or negative.
+const MIN_COLUMN_WIDTH: i32 = 3;
 
 /// Blank columns between two rendered columns.
 const COLUMN_SPACING: u16 = 2;
@@ -312,6 +335,11 @@ pub struct ResultsComponent {
     /// many columns), kept across `set_result_keeping_cursor` (a refresh of
     /// the same shape) -- same lifetime as `filter`. See `sort_by_column`.
     sort: Option<(usize, SortDirection)>,
+    /// Manual `<`/`>` width adjustment per column index, relative to what
+    /// `column_widths` would auto-size that column to -- same lifetime as
+    /// `filter`/`sort` (reset in `set_result`, kept across
+    /// `set_result_keeping_cursor`). See `widen_column`/`narrow_column`.
+    column_width_deltas: HashMap<usize, i32>,
     /// First visible column, for tables too wide to fit. Derived rather
     /// than driven: `draw` scrolls it just far enough to keep
     /// `selected_col` on screen, the way a spreadsheet follows its cursor.
@@ -371,6 +399,7 @@ impl ResultsComponent {
             selected_col: 0,
             filter: String::new(),
             sort: None,
+            column_width_deltas: HashMap::new(),
             col_offset: 0,
             running: None,
             table_state: TableState::default(),
@@ -415,23 +444,28 @@ impl ResultsComponent {
         // Same reasoning -- the sorted column may not exist, or mean the
         // same thing, in a different result.
         self.sort = None;
+        // Same again -- a manual width for column 3 of the last result has
+        // nothing to do with whatever column 3 happens to be in this one.
+        self.column_width_deltas.clear();
     }
 
-    /// Same as `set_result`, but leaves the cell cursor, the filter, and
-    /// the sort where they were -- used when a result is *re-read* rather
-    /// than replaced (the refresh after an edit), so the row you just
-    /// changed is still under the cursor instead of the view jumping back
-    /// to the top.
+    /// Same as `set_result`, but leaves the cell cursor, the filter, the
+    /// sort, and any manual column widths where they were -- used when a
+    /// result is *re-read* rather than replaced (the refresh after an
+    /// edit), so the row you just changed is still under the cursor
+    /// instead of the view jumping back to the top.
     pub fn set_result_keeping_cursor(&mut self, result: QueryResult) {
-        let (row, column, filter, sort) = (
+        let (row, column, filter, sort, widths) = (
             self.selected,
             self.selected_col,
             std::mem::take(&mut self.filter),
             self.sort,
+            std::mem::take(&mut self.column_width_deltas),
         );
         self.set_result(result);
         self.filter = filter;
         self.sort = sort;
+        self.column_width_deltas = widths;
         self.selected = row.min(self.cursor_count().saturating_sub(1));
         self.selected_col = column.min(self.column_count().saturating_sub(1));
     }
@@ -634,6 +668,39 @@ impl ResultsComponent {
         let last = self.column_count().saturating_sub(1);
         self.selected_col = (self.selected_col + 1).min(last);
         self.preview_open = false;
+    }
+
+    /// `>`: grows the selected column by `COLUMN_RESIZE_STEP`, past
+    /// `MAX_COLUMN_WIDTH` if pressed enough times -- a no-op with no
+    /// columns to resize (an error, `Affected`, or no result at all).
+    pub fn widen_column(&mut self) {
+        if self.column_count() == 0 {
+            return;
+        }
+        *self
+            .column_width_deltas
+            .entry(self.selected_col)
+            .or_insert(0) += COLUMN_RESIZE_STEP;
+    }
+
+    /// `<`: the inverse of `widen_column` -- the delta itself isn't floored
+    /// (repeated presses past the limit are harmless no-ops), `column_widths`
+    /// is what keeps the actual rendered width from ever going below
+    /// `MIN_COLUMN_WIDTH`. Clears the entry rather than keeping a `0` delta
+    /// once back at the auto width, so a result with no resizing at all
+    /// costs no extra bookkeeping.
+    pub fn narrow_column(&mut self) {
+        if self.column_count() == 0 {
+            return;
+        }
+        let delta = self
+            .column_width_deltas
+            .entry(self.selected_col)
+            .or_insert(0);
+        *delta -= COLUMN_RESIZE_STEP;
+        if *delta == 0 {
+            self.column_width_deltas.remove(&self.selected_col);
+        }
     }
 
     /// The column names of the current table result -- also the flattened
@@ -890,6 +957,7 @@ impl ResultsComponent {
                     &self.column_types,
                     &self.filter,
                     self.sort,
+                    &self.column_width_deltas,
                     self.selected,
                     self.preview_open,
                     &mut self.selected_col,
@@ -916,6 +984,7 @@ impl ResultsComponent {
                     &[],
                     &self.filter,
                     self.sort,
+                    &self.column_width_deltas,
                     self.selected,
                     self.preview_open,
                     &mut self.selected_col,
@@ -987,6 +1056,7 @@ fn draw_table_body(
     column_types: &[Option<String>],
     filter: &str,
     sort: Option<(usize, SortDirection)>,
+    column_width_deltas: &HashMap<usize, i32>,
     selected: usize,
     preview_open: bool,
     selected_col: &mut usize,
@@ -1034,7 +1104,7 @@ fn draw_table_body(
         label.push(' ');
         label.push(arrow);
     }
-    let widths = column_widths(&header_labels, rows);
+    let widths = column_widths(&header_labels, rows, column_width_deltas);
 
     // A row-number gutter, wide enough for the highest number there is:
     // on a screen full of rows, "which one am I on" is otherwise
@@ -1377,7 +1447,8 @@ mod tests {
         assert_eq!(
             column_widths(
                 &["v".to_string()],
-                &[vec!["x".repeat(MAX_COLUMN_WIDTH + 10)]]
+                &[vec!["x".repeat(MAX_COLUMN_WIDTH + 10)]],
+                &HashMap::new()
             ),
             vec![MAX_COLUMN_WIDTH],
             "one huge value must not push the other columns off screen"
@@ -1392,9 +1463,25 @@ mod tests {
                 vec!["1".to_string(), "alice".to_string()],
                 vec!["1000".to_string(), "bo".to_string()],
             ],
+            &HashMap::new(),
         );
 
         assert_eq!(widths, vec![4, 5], "id -> '1000', name -> 'alice'");
+    }
+
+    #[test]
+    fn a_manual_override_can_push_a_column_past_the_cap_or_below_its_auto_width() {
+        let columns = vec!["id".to_string(), "name".to_string()];
+        let rows = vec![vec!["1".to_string(), "alice".to_string()]];
+
+        let widened = column_widths(&columns, &rows, &HashMap::from([(1, 10)]));
+        assert_eq!(widened, vec![2, 15], "name: auto 5 + delta 10");
+
+        let narrowed = column_widths(&columns, &rows, &HashMap::from([(1, -100)]));
+        assert_eq!(
+            narrowed[1], MIN_COLUMN_WIDTH as usize,
+            "a huge negative delta must still floor at MIN_COLUMN_WIDTH, not go negative"
+        );
     }
 
     #[test]
@@ -1414,6 +1501,62 @@ mod tests {
         results.prev_column();
         results.prev_column();
         assert_eq!(results.selected_col, 0, "must not move past the first");
+    }
+
+    #[test]
+    fn widen_and_narrow_column_adjust_only_the_selected_column() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+
+        results.widen_column();
+        results.next_column();
+        results.widen_column();
+        results.widen_column();
+
+        assert_eq!(
+            results.column_width_deltas,
+            HashMap::from([(0, COLUMN_RESIZE_STEP), (1, 2 * COLUMN_RESIZE_STEP)]),
+            "each column keeps its own delta"
+        );
+
+        results.prev_column();
+        results.narrow_column();
+        assert_eq!(
+            results.column_width_deltas.get(&0),
+            None,
+            "narrowing back to zero clears the entry rather than keeping a 0 delta"
+        );
+    }
+
+    #[test]
+    fn resizing_a_column_is_a_no_op_with_no_result() {
+        let mut results = ResultsComponent::new();
+
+        results.widen_column();
+        results.narrow_column();
+
+        assert!(results.column_width_deltas.is_empty());
+    }
+
+    #[test]
+    fn a_new_result_clears_manual_widths_but_keeping_the_cursor_preserves_them() {
+        let mut results = ResultsComponent::new();
+        results.set_result(wide_table());
+        results.widen_column();
+        assert!(!results.column_width_deltas.is_empty());
+
+        results.set_result(wide_table());
+        assert!(
+            results.column_width_deltas.is_empty(),
+            "a brand new result must not carry over another result's column widths"
+        );
+
+        results.widen_column();
+        results.set_result_keeping_cursor(wide_table());
+        assert!(
+            !results.column_width_deltas.is_empty(),
+            "a refresh of the same shape keeps manual widths, like it keeps the sort"
+        );
     }
 
     #[test]

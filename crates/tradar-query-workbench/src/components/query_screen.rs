@@ -463,6 +463,8 @@ impl QueryScreenComponent {
             }
             Command::PrevColumn => self.results.prev_column(),
             Command::NextColumn => self.results.next_column(),
+            Command::NarrowColumn => self.results.narrow_column(),
+            Command::WidenColumn => self.results.widen_column(),
             Command::TogglePreview => self.results.toggle_preview(),
             Command::ToggleResultView => self.results.toggle_document_view(),
             Command::EditCell => self.begin_edit_cell(),

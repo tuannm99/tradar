@@ -283,6 +283,11 @@ pub enum Command {
     /// scrolls to follow it, so this covers horizontal scrolling too.
     PrevColumn,
     NextColumn,
+    /// `<`/`>`: manually shrink/grow the selected column past what
+    /// auto-sizing picked -- see `ResultsComponent::narrow_column`/
+    /// `widen_column`.
+    NarrowColumn,
+    WidenColumn,
     /// Change the selected cell's value, by generating and running the
     /// statement that does it.
     EditCell,
@@ -480,6 +485,8 @@ impl Command {
             Self::Help => "help",
             Self::PrevColumn => "prev-column",
             Self::NextColumn => "next-column",
+            Self::NarrowColumn => "narrow-column",
+            Self::WidenColumn => "widen-column",
             Self::EditCell => "edit-cell",
             Self::DeleteRow => "delete-row",
             Self::SortColumn => "sort-column",
@@ -550,7 +557,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 107] = [
+    const ALL: [Self; 109] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -595,6 +602,8 @@ impl Command {
         Self::Help,
         Self::PrevColumn,
         Self::NextColumn,
+        Self::NarrowColumn,
+        Self::WidenColumn,
         Self::EditCell,
         Self::DeleteRow,
         Self::SortColumn,
@@ -707,6 +716,8 @@ impl Command {
             Self::Help => "Show this help",
             Self::PrevColumn => "Move to the previous column",
             Self::NextColumn => "Move to the next column",
+            Self::NarrowColumn => "Shrink the selected column",
+            Self::WidenColumn => "Grow the selected column",
             Self::EditCell => "Edit the selected cell",
             Self::DeleteRow => "Delete the selected row",
             Self::SortColumn => "Sort by the selected column (asc/desc/off)",
@@ -1056,6 +1067,8 @@ impl Default for Keymap {
                 ("left", Command::PrevColumn),
                 ("l", Command::NextColumn),
                 ("right", Command::NextColumn),
+                ("<", Command::NarrowColumn),
+                (">", Command::WidenColumn),
                 ("enter", Command::EditCell),
                 ("d", Command::DeleteRow),
                 ("s", Command::SortColumn),
@@ -1516,6 +1529,21 @@ mod tests {
 
         assert_eq!(in_navigator, Resolution::Command(Command::Expand));
         assert_eq!(in_results, Resolution::Command(Command::NextColumn));
+    }
+
+    #[test]
+    fn less_and_greater_than_resize_the_selected_column_by_default() {
+        let keymap = Keymap::default();
+        let mut pending = None;
+
+        assert_eq!(
+            keymap.resolve(Context::Results, &mut pending, press(KeyCode::Char('<'))),
+            Resolution::Command(Command::NarrowColumn)
+        );
+        assert_eq!(
+            keymap.resolve(Context::Results, &mut pending, press(KeyCode::Char('>'))),
+            Resolution::Command(Command::WidenColumn)
+        );
     }
 
     #[test]
