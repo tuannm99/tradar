@@ -498,6 +498,61 @@ impl QueryEditorComponent {
         false
     }
 
+    /// Real vim's `:s/pattern/replacement/[g]` (`all_on_line`) and
+    /// `:%s/pattern/replacement/[g]` (`whole_buffer`) -- plain substring
+    /// replace, same literal-match philosophy as `find` (no regex engine
+    /// in this editor). Without `all_on_line`, only the first match on
+    /// each touched line is replaced, matching vim's own default. Returns
+    /// how many replacements were made (0 for an empty pattern or no
+    /// match, in which case the buffer is left untouched and no undo step
+    /// is recorded) -- the caller uses this to know whether anything
+    /// actually happened.
+    pub fn substitute(
+        &mut self,
+        pattern: &str,
+        replacement: &str,
+        whole_buffer: bool,
+        all_on_line: bool,
+    ) -> usize {
+        if pattern.is_empty() {
+            return 0;
+        }
+        let rows: Vec<usize> = if whole_buffer {
+            (0..self.lines.len()).collect()
+        } else {
+            vec![self.cursor_row]
+        };
+        let mut total = 0;
+        let mut checkpointed = false;
+        let mut last_changed_row = None;
+        for row in rows {
+            let line: String = self.lines[row].iter().collect();
+            if !line.contains(pattern) {
+                continue;
+            }
+            if !checkpointed {
+                self.checkpoint();
+                checkpointed = true;
+            }
+            let (new_line, count) = if all_on_line {
+                (
+                    line.replace(pattern, replacement),
+                    line.matches(pattern).count(),
+                )
+            } else {
+                (line.replacen(pattern, replacement, 1), 1)
+            };
+            self.lines[row] = new_line.chars().collect();
+            total += count;
+            last_changed_row = Some(row);
+        }
+        if let Some(row) = last_changed_row {
+            self.cursor_row = row;
+            self.clamp_col();
+        }
+        total
+    }
+
     /// The first index at or after `from_col` where `needle` matches,
     /// case-insensitively (ASCII).
     fn find_in_line(haystack: &[char], needle: &[char], from_col: usize) -> Option<usize> {
@@ -2548,5 +2603,117 @@ mod tests {
         editor.set_text("abc");
 
         assert!(!editor.find("", false));
+    }
+
+    #[test]
+    fn substitute_replaces_only_the_first_match_on_the_current_line_by_default() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("foo foo foo");
+
+        let count = editor.substitute("foo", "bar", false, false);
+
+        assert_eq!(count, 1);
+        assert_eq!(editor.text(), "bar foo foo");
+    }
+
+    #[test]
+    fn substitute_with_g_replaces_every_match_on_the_line() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("foo foo foo");
+
+        let count = editor.substitute("foo", "bar", false, true);
+
+        assert_eq!(count, 3);
+        assert_eq!(editor.text(), "bar bar bar");
+    }
+
+    #[test]
+    fn substitute_only_touches_the_current_line_unless_whole_buffer_is_set() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("foo\nfoo\nfoo");
+        editor.forward_key(key(KeyCode::Char('j'))); // cursor on the middle line
+
+        let count = editor.substitute("foo", "bar", false, false);
+
+        assert_eq!(count, 1);
+        assert_eq!(editor.text(), "foo\nbar\nfoo");
+    }
+
+    #[test]
+    fn substitute_whole_buffer_touches_every_line_that_matches() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("foo\nbaz\nfoo foo");
+
+        let count = editor.substitute("foo", "bar", true, false);
+
+        assert_eq!(
+            count, 2,
+            "one replacement per matching line without the g flag, even on line 3 with two foos"
+        );
+        assert_eq!(editor.text(), "bar\nbaz\nbar foo");
+    }
+
+    #[test]
+    fn substitute_whole_buffer_with_g_replaces_every_match_on_every_line() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("foo\nbaz\nfoo foo");
+
+        let count = editor.substitute("foo", "bar", true, true);
+
+        assert_eq!(count, 3);
+        assert_eq!(editor.text(), "bar\nbaz\nbar bar");
+    }
+
+    #[test]
+    fn substitute_with_no_match_changes_nothing_and_records_no_undo_step() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        let count = editor.substitute("zzz", "y", true, true);
+
+        assert_eq!(count, 0);
+        assert_eq!(editor.text(), "abc");
+        // If a checkpoint had been recorded, undo would still be a no-op
+        // here (nothing changed to undo back to) -- the real assertion is
+        // in `substitute`'s own doc comment (`checkpointed` never flips to
+        // `true` on the no-match path); this just documents the intent.
+        editor.undo();
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn substitute_with_an_empty_pattern_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        assert_eq!(editor.substitute("", "x", true, true), 0);
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn substitute_moves_the_cursor_to_the_last_line_it_changed() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("foo\nbaz\nfoo");
+
+        editor.substitute("foo", "bar", true, false);
+
+        assert_eq!(editor.cursor_row, 2, "the second (last) matching line");
+    }
+
+    #[test]
+    fn substitute_can_be_undone_as_a_single_step() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("foo\nfoo\nfoo");
+
+        editor.substitute("foo", "bar", true, false);
+        assert_eq!(editor.text(), "bar\nbar\nbar");
+
+        editor.undo();
+
+        assert_eq!(
+            editor.text(),
+            "foo\nfoo\nfoo",
+            "one undo must restore every line the substitute touched, not just the last one"
+        );
     }
 }

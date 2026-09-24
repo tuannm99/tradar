@@ -36,5 +36,6 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`yank-curl-2026-09-24.md`](yank-curl-2026-09-24.md) — `Ctrl+G` mới (context `QueryScreen`) yank curl thẳng vào clipboard (OSC52), giữ nguyên `Ctrl+Y` ghi file `./tradar-query.sh` như cũ — hai phím riêng, không đổi hành vi cũ.
 - [`column-resize-2026-09-24.md`](column-resize-2026-09-24.md) — `<`/`>` resize tay cột đang chọn trong results grid, lưu dưới dạng delta so với auto-width (không phải absolute) nên vượt được cap 40 ký tự; vòng đời giống `sort`/`filter` — reset khi có kết quả mới, giữ nguyên khi `set_result_keeping_cursor`.
 - [`visual-mode-search-motion-2026-09-24.md`](visual-mode-search-motion-2026-09-24.md) — `/pattern`/`n`/`N` hoạt động như motion thật trong Visual/Visual Line (mở rộng vùng chọn tới match, không thoát Visual) — hoá ra chỉ cần nới guard "chỉ Normal" thành "trừ Insert", vì `find()` từ trước đã không đụng `visual_anchor`.
+- [`command-line-substitute-2026-09-24.md`](command-line-substitute-2026-09-24.md) — `:s/pat/repl/[g]` (dòng hiện tại) và `:%s/pat/repl/[g]` (toàn buffer) trong query editor, literal substring giống `/` search (không phải regex), dòng lệnh `:` mới tách khỏi `buffer_search`, Normal mode only.
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.

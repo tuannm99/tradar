@@ -147,6 +147,12 @@ pub struct QueryScreenComponent {
     /// The last confirmed buffer search, for `n`/`N` to repeat once the bar
     /// itself has closed.
     last_search: Option<String>,
+    /// The `:` command line (`Focus::Editor`, Normal mode only) -- currently
+    /// only understands `:s/pat/repl/[g]`/`:%s/pat/repl/[g]`, real vim's own
+    /// substitute syntax, see `QueryEditorComponent::substitute`. A separate
+    /// field from `buffer_search` for the same reason that one is separate
+    /// from `search`: different trigger key, different Enter behavior.
+    command_line: Option<ui::TextInput>,
     /// `Some` only for a Redis connection -- see `docs/backlog/mockup-ui-2026-08-15.md`'s "Redis:
     /// key browser". `None` for every other driver, which never shows a
     /// sidebar or leaves `ScreenMode::Console`.
@@ -200,6 +206,34 @@ fn fallback_key_warning(uses_fallback_key: bool) -> Option<String> {
          more than one if any are exact duplicates"
             .to_string()
     })
+}
+
+/// Parses the text typed on the `:` command line (the `:` itself isn't
+/// part of it, same convention as `buffer_search` never seeing its own
+/// `/`) as vim's substitute command: `s/pattern/replacement/[g]` or, with
+/// the `%` prefix, `%s/pattern/replacement/[g]` for the whole buffer
+/// instead of just the current line. Returns
+/// `(whole_buffer, pattern, replacement, all_on_line)`, or `None` for
+/// anything else -- not a substitute command, a delimiter other than `/`
+/// (real vim allows picking any punctuation as the delimiter; only `/` is
+/// supported here), or fewer than the two `/`-separated fields a
+/// substitution needs. An escaped `\/` inside the pattern/replacement
+/// isn't supported -- there's no way to substitute a literal `/` with
+/// this parser, see `docs/backlog/command-line-substitute-2026-09-24.md`.
+fn parse_substitute(command: &str) -> Option<(bool, String, String, bool)> {
+    let (whole_buffer, rest) = match command.strip_prefix('%') {
+        Some(rest) => (true, rest),
+        None => (false, command),
+    };
+    let rest = rest.strip_prefix("s/")?;
+    let mut fields = rest.split('/');
+    let pattern = fields.next()?.to_string();
+    let replacement = fields.next()?.to_string();
+    let flags = fields.next().unwrap_or("");
+    if pattern.is_empty() {
+        return None;
+    }
+    Some((whole_buffer, pattern, replacement, flags.contains('g')))
 }
 
 /// `schema`, flattened for the navigator, grouped by `SchemaInfo::schema`
@@ -401,6 +435,7 @@ impl QueryScreenComponent {
             buffer_search: None,
             search_origin: None,
             last_search: None,
+            command_line: None,
             browse,
             mode,
             last_browse_command: None,
@@ -488,6 +523,7 @@ impl QueryScreenComponent {
             Command::BrowseOpen => self.open_selected_key(),
             Command::ToggleBrowseMode => self.toggle_browse_mode(),
             Command::SearchInBuffer => self.open_buffer_search(),
+            Command::EnterCommandLine => self.open_command_line(),
             Command::SearchNext => self.repeat_buffer_search(false),
             Command::SearchPrev => self.repeat_buffer_search(true),
             Command::Undo => self.query_editor.undo(),
@@ -781,6 +817,34 @@ impl QueryScreenComponent {
         }
         self.search_origin = Some(self.query_editor.cursor());
         self.buffer_search = Some(ui::TextInput::new(""));
+    }
+
+    /// `:` while the editor has focus: opens the vim-style command line --
+    /// Normal mode only (unlike `/`, this deliberately doesn't extend to
+    /// Visual/VisualLine -- real vim's `:'<,'>s/.../.../ ` range-from-
+    /// selection syntax is out of scope here, see
+    /// `docs/backlog/command-line-substitute-2026-09-24.md`).
+    fn open_command_line(&mut self) {
+        if self.query_editor.mode != EditorMode::Normal {
+            return;
+        }
+        self.command_line = Some(ui::TextInput::new(""));
+    }
+
+    /// `Enter` on the `:` command line: the only command understood right
+    /// now is `s`/`%s` (see `parse_substitute`) -- anything else, or a
+    /// substitute whose pattern matches nothing, is silently a no-op. Real
+    /// vim reports "N substitutions" / "Pattern not found" in its own
+    /// command line; this editor has no status line to put that in, and
+    /// undo is one keystroke away either way, so it stays quiet rather
+    /// than growing a whole notification mechanism for one command.
+    fn apply_command_line(&mut self, command: &str) {
+        let Some((whole_buffer, pattern, replacement, all_on_line)) = parse_substitute(command)
+        else {
+            return;
+        };
+        self.query_editor
+            .substitute(&pattern, &replacement, whole_buffer, all_on_line);
     }
 
     /// `n`/`N`: repeats `last_search`, same restriction (and same
@@ -1418,6 +1482,25 @@ impl Component for QueryScreenComponent {
             return None;
         }
 
+        // No incremental preview here, unlike `buffer_search` above --
+        // `:s/.../.../ ` mutates the buffer, so there's nothing sane to
+        // preview keystroke by keystroke the way a read-only cursor jump
+        // can be.
+        if let Some(command_line) = self.command_line.as_mut() {
+            match code {
+                KeyCode::Esc => self.command_line = None,
+                KeyCode::Enter => {
+                    let command = command_line.text();
+                    self.command_line = None;
+                    self.apply_command_line(&command);
+                }
+                _ => {
+                    command_line.handle_key_event(code, modifiers);
+                }
+            }
+            return None;
+        }
+
         if let Some(row_edit) = self.row_edit.as_mut() {
             if let Some(outcome) = row_edit.handle_key_event(code, modifiers) {
                 self.handle_row_edit(outcome);
@@ -1838,10 +1921,18 @@ impl Component for QueryScreenComponent {
             // Stacked or side by side, and how much of the split the
             // editor gets, per `self.split` -- `Ctrl+Up`/`Ctrl+Down` zooms
             // whichever pane has focus, `F6` flips the orientation. The
-            // buffer-search bar, when open, is carved off the bottom of
-            // whatever the editor got, not off a separately reserved row.
+            // buffer-search/command-line bar, when open, is carved off the
+            // bottom of whatever the editor got, not off a separately
+            // reserved row -- the two are mutually exclusive (`/` and `:`
+            // each close whichever overlay is already open before opening
+            // their own), so there's never a need for more than one row.
             let (editor_rect, main_rest) = self.split.split(area);
-            let (editor_draw_rect, search_bar_rect) = if self.buffer_search.is_some() {
+            let bottom_bar: Option<(&str, &ui::TextInput)> = self
+                .buffer_search
+                .as_ref()
+                .map(|s| ("/", s))
+                .or_else(|| self.command_line.as_ref().map(|c| (":", c)));
+            let (editor_draw_rect, bottom_bar_rect) = if bottom_bar.is_some() {
                 let (top, bar) = ui::split_bottom_bar(editor_rect, 1);
                 (top, Some(bar))
             } else {
@@ -1858,13 +1949,13 @@ impl Component for QueryScreenComponent {
                 self.engine.alive(),
                 self.engine.in_transaction(),
             );
-            if let (Some(buffer_search), Some(bar)) = (&self.buffer_search, search_bar_rect) {
+            if let (Some((prefix, input)), Some(bar)) = (bottom_bar, bottom_bar_rect) {
                 let theme = tradar_core::theme::theme();
                 let mut spans = vec![ratatui::text::Span::styled(
-                    "/",
+                    prefix,
                     ratatui::style::Style::default().fg(theme.accent),
                 )];
-                spans.extend(buffer_search.spans(true));
+                spans.extend(input.spans(true));
                 frame.render_widget(
                     ratatui::widgets::Paragraph::new(ratatui::text::Line::from(spans)),
                     bar,
@@ -2037,6 +2128,63 @@ mod tests {
         let recent = vec!["/somewhere/else/report.sql".to_string()];
 
         assert_eq!(last_used_dir(&recent, queries_dir), queries_dir);
+    }
+
+    #[test]
+    fn parse_substitute_reads_the_current_line_form() {
+        assert_eq!(
+            parse_substitute("s/foo/bar/"),
+            Some((false, "foo".to_string(), "bar".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn parse_substitute_reads_the_whole_buffer_and_g_flag() {
+        assert_eq!(
+            parse_substitute("%s/foo/bar/g"),
+            Some((true, "foo".to_string(), "bar".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn parse_substitute_allows_omitting_the_trailing_delimiter() {
+        assert_eq!(
+            parse_substitute("s/foo/bar"),
+            Some((false, "foo".to_string(), "bar".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn parse_substitute_allows_an_empty_replacement() {
+        assert_eq!(
+            parse_substitute("s/foo//"),
+            Some((false, "foo".to_string(), String::new(), false))
+        );
+    }
+
+    #[test]
+    fn parse_substitute_rejects_anything_that_is_not_a_substitute_command() {
+        assert_eq!(parse_substitute(""), None);
+        assert_eq!(
+            parse_substitute("w"),
+            None,
+            "not a command this editor supports"
+        );
+        assert_eq!(
+            parse_substitute("s#foo#bar#"),
+            None,
+            "only `/` is supported as the delimiter"
+        );
+        assert_eq!(
+            parse_substitute("s/foo"),
+            None,
+            "needs at least pattern and replacement, not just a pattern"
+        );
+        assert_eq!(
+            parse_substitute("s//bar/"),
+            None,
+            "an empty pattern is rejected rather than reusing the last search"
+        );
     }
 
     fn connection() -> SavedConnection {
@@ -3772,6 +3920,69 @@ mod tests {
 
         assert!(screen.buffer_search.is_none());
         assert_eq!(screen.query_editor.text(), "/");
+    }
+
+    #[test]
+    fn colon_command_line_applies_a_substitute_on_enter() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("select id from users");
+
+        screen.handle_key_event(KeyCode::Char(':'), KeyModifiers::NONE);
+        assert!(screen.command_line.is_some());
+        for c in "s/id/user_id/".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.command_line.is_none(), "the bar closes");
+        assert_eq!(screen.query_editor.text(), "select user_id from users");
+    }
+
+    #[test]
+    fn esc_cancels_the_colon_command_line_without_touching_the_buffer() {
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("select id from users");
+
+        screen.handle_key_event(KeyCode::Char(':'), KeyModifiers::NONE);
+        for c in "s/id/user_id/".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.command_line.is_none());
+        assert_eq!(
+            screen.query_editor.text(),
+            "select id from users",
+            "esc must not apply anything typed so far"
+        );
+    }
+
+    #[test]
+    fn colon_in_insert_mode_types_a_literal_character_instead_of_opening_the_command_line() {
+        let (mut screen, _rx) = screen();
+        screen
+            .query_editor
+            .forward_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        screen.handle_key_event(KeyCode::Char(':'), KeyModifiers::NONE);
+
+        assert!(screen.command_line.is_none());
+        assert_eq!(screen.query_editor.text(), ":");
+    }
+
+    #[test]
+    fn colon_in_visual_mode_does_not_open_the_command_line() {
+        // Deliberately out of scope, unlike `/` -- see
+        // `docs/backlog/command-line-substitute-2026-09-24.md`: real vim's
+        // `:'<,'>s/.../.../ ` range-from-selection syntax isn't supported.
+        let (mut screen, _rx) = screen();
+        screen.query_editor.set_text("select * from users");
+        screen.handle_key_event(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(screen.query_editor.mode, EditorMode::Visual);
+
+        screen.handle_key_event(KeyCode::Char(':'), KeyModifiers::NONE);
+
+        assert!(screen.command_line.is_none());
     }
 
     /// A screen whose driver returns a two-column `users` table and whose

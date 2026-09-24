@@ -401,6 +401,10 @@ pub enum Command {
     /// `/` in the editor: incremental search over the buffer -- distinct
     /// from `Search` (the results-grid filter), see `Context::Editor`.
     SearchInBuffer,
+    /// `:` in the editor, Normal mode only: opens vim's own command line --
+    /// currently only understands `s`/`%s` (substitute), see
+    /// `tradar-query-workbench`'s `query_screen::parse_substitute`.
+    EnterCommandLine,
     /// `n`: repeat the last buffer search forward.
     SearchNext,
     /// `N`: repeat the last buffer search backward.
@@ -531,6 +535,7 @@ impl Command {
             Self::CrudUpdate => "crud-update",
             Self::CrudDelete => "crud-delete",
             Self::SearchInBuffer => "search-in-buffer",
+            Self::EnterCommandLine => "enter-command-line",
             Self::SearchNext => "search-next",
             Self::SearchPrev => "search-prev",
             Self::Undo => "undo",
@@ -557,7 +562,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 109] = [
+    const ALL: [Self; 110] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -648,6 +653,7 @@ impl Command {
         Self::CrudUpdate,
         Self::CrudDelete,
         Self::SearchInBuffer,
+        Self::EnterCommandLine,
         Self::SearchNext,
         Self::SearchPrev,
         Self::Undo,
@@ -762,6 +768,7 @@ impl Command {
             Self::CrudUpdate => "Insert an Update snippet for the selected table",
             Self::CrudDelete => "Insert a Delete snippet for the selected table",
             Self::SearchInBuffer => "Search the buffer",
+            Self::EnterCommandLine => "Open the : command line (substitute)",
             Self::SearchNext => "Repeat the last search forward",
             Self::SearchPrev => "Repeat the last search backward",
             Self::Undo => "Undo the last edit",
@@ -1085,6 +1092,7 @@ impl Default for Keymap {
             Context::Editor,
             parse_defaults(&[
                 ("/", Command::SearchInBuffer),
+                (":", Command::EnterCommandLine),
                 ("n", Command::SearchNext),
                 ("N", Command::SearchPrev),
                 // Reachable regardless of vim mode -- unlike `u`/`U`
