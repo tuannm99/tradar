@@ -4,7 +4,7 @@ Tài liệu này gồm hai phần: kiến trúc đang triển khai hiện tại,
 
 ## Triển khai hiện tại
 
-Tradar là một Cargo workspace gồm mười ba crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới. **Cập nhật 2026-08-16**: các connector crate được đổi tên prefix `tradar-connector-<tên>` (trước đó `tradar-<tên>`) và chuyển ra sống trực tiếp dưới `crates/`, bỏ hẳn thư mục lồng `crates/connectors/` — dọn dẹp thuần cấu trúc, không đổi trait/API nào, làm cùng lúc với việc thêm connector thứ 9 (HTTP).
+Tradar là một Cargo workspace gồm mười bốn crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới. **Cập nhật 2026-08-16**: các connector crate được đổi tên prefix `tradar-connector-<tên>` (trước đó `tradar-<tên>`) và chuyển ra sống trực tiếp dưới `crates/`, bỏ hẳn thư mục lồng `crates/connectors/` — dọn dẹp thuần cấu trúc, không đổi trait/API nào, làm cùng lúc với việc thêm connector thứ 9 (HTTP). **Cập nhật 2026-09-29**: thêm connector thứ 10, `tradar-connector-clickhouse` — xem `docs/backlog/clickhouse-connector-2026-09-29.md`.
 
 ```
 Cargo.toml                    [workspace], default-members = ["crates/tradar-app"]
@@ -31,14 +31,16 @@ crates/
       components/             — QueryScreenComponent (implement Component), + query_editor.rs/results.rs/row_edit.rs/completion.rs/file_prompt.rs/file_picker.rs/history_picker.rs
                                   (struct state+draw thuần, do QueryScreenComponent compose và định tuyến phím tới, không tự implement Component)
   tradar-connector-postgres/  tradar-connector-sqlite/  tradar-connector-elasticsearch/  tradar-connector-redis/  tradar-connector-mongo/  tradar-connector-cassandra/
+  tradar-connector-clickhouse/
       src/lib.rs               — mỗi crate: struct driver (private, implement QueryDriver) + struct XConnector (private, implement Connector)
                                     + `pub fn connector() -> Box<dyn Connector>` (constructor export duy nhất ra ngoài crate)
+                                    ClickHouse: qua reqwest + FORMAT JSON (HTTP interface), không qua sqlx (không hỗ trợ ClickHouse)
   tradar-connector-rabbitmq/  tradar-connector-kafka/  tradar-connector-http/     — không phụ thuộc tradar-query-workbench (không có hình dạng query — xem "Kiến trúc mục tiêu" bên dưới)
       src/lib.rs               — struct XSession (private, implement Session) + struct XConnector (private, implement Connector) + `pub fn connector()`
       src/screen.rs            — struct XScreen (private, implement Component) — Screen tự viết, không dùng QueryScreenComponent
   tradar-app/                 [[bin]] name = "tradar"
     src/
-      main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 9 connector(); event loop:
+      main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 10 connector(); event loop:
                                     crossterm input -> Component actions -> spawn Connector::connect -> Session -> Screen
       components/
         mod.rs                — RootComponent: tabs: Vec<Tab> (mỗi Tab: ScreenSlot::ConnectionPicker | Active(Box<dyn Component>) + connection_picker riêng + title) + active_tab
@@ -46,7 +48,7 @@ crates/
         connection_form.rs    — ConnectionFormComponent: form 3 field cho add/edit, overlay trên picker
 ```
 
-`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-spi`, cùng với `CONNECT_TIMEOUT`/`with_connect_timeout` — giới hạn thời gian mở kết nối mà **mọi** connector đều bọc qua, đặt chung một chỗ vì client bên dưới của mỗi backend bất đồng hoàn toàn về hành vi khi host không trả lời (sqlx có timeout riêng, `redis`/`mongodb` có default riêng, `reqwest` không có gì), mà TUI thì đứng im trong lúc connect nên treo lâu sẽ bị đọc là app hỏng. Mỗi driver cụ thể sống trong crate connector riêng của nó (`tradar-connector-<tên>`, dưới `crates/`); `tradar-app` phụ thuộc cả 9 (6 connector dạng query + Kafka + RabbitMQ + HTTP) nhưng không chứa code driver nào.
+`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-spi`, cùng với `CONNECT_TIMEOUT`/`with_connect_timeout` — giới hạn thời gian mở kết nối mà **mọi** connector đều bọc qua, đặt chung một chỗ vì client bên dưới của mỗi backend bất đồng hoàn toàn về hành vi khi host không trả lời (sqlx có timeout riêng, `redis`/`mongodb` có default riêng, `reqwest` không có gì), mà TUI thì đứng im trong lúc connect nên treo lâu sẽ bị đọc là app hỏng. Mỗi driver cụ thể sống trong crate connector riêng của nó (`tradar-connector-<tên>`, dưới `crates/`); `tradar-app` phụ thuộc cả 10 (7 connector dạng query + Kafka + RabbitMQ + HTTP) nhưng không chứa code driver nào.
 
 ### Trait `QueryDriver`
 
@@ -142,7 +144,7 @@ Những phần còn mỏng/thiếu đáng chú ý:
 
 Cả sáu driver dạng query dùng chung một shape: `connect → list_schema → execute(query) -> Table | Documents`, được enforce bởi trait `QueryDriver` duy nhất và UI `QueryScreenComponent` duy nhất ở trên. Shape đó không khớp với message broker — Kafka/RabbitMQ không phải "gửi một chuỗi query, nhận về rows" mà là browse-topic/queue, tail message theo thời gian thực, publish một message — hay các hệ thống watch/inspect trạng thái sống (Kubernetes, Docker, Prometheus) và công cụ dạng remote-shell (SSH) vẫn còn ở nhóm "chưa có connector nào". Cassandra (CQL) là ngoại lệ trong nhóm phi-query ban đầu: nó khớp shape query nên tái dùng được UI hiện tại luôn — đã làm xong (2026-08-15). Kafka và RabbitMQ thì không khớp shape query — mỗi cái tự viết `Session`/`Screen` riêng theo đúng phần "Kiến trúc mục tiêu" bên dưới — cũng đã làm xong (2026-08-16, xem `docs/backlog/mockup-ui-2026-08-15.md`).
 
-Phần sau định nghĩa shape mà toàn bộ 6 connector dạng query hiện có (Postgres, SQLite, Elasticsearch, Redis, MongoDB, Cassandra) đã được xây theo, và là shape Kafka/RabbitMQ đã dùng để tự viết `Session`/`Screen` riêng (giờ là ví dụ thật, không còn chỉ là đặc tả) — cũng là shape các hệ thống phi-query còn lại (Kubernetes, SSH, ...) sẽ được xây vào khi chúng thực sự được lên kế hoạch. Xem "Triển khai hiện tại" ở trên để biết layout thật hiện có.
+Phần sau định nghĩa shape mà toàn bộ 7 connector dạng query hiện có (Postgres, SQLite, Elasticsearch, Redis, MongoDB, Cassandra, ClickHouse) đã được xây theo, và là shape Kafka/RabbitMQ đã dùng để tự viết `Session`/`Screen` riêng (giờ là ví dụ thật, không còn chỉ là đặc tả) — cũng là shape các hệ thống phi-query còn lại (Kubernetes, SSH, ...) sẽ được xây vào khi chúng thực sự được lên kế hoạch. Xem "Triển khai hiện tại" ở trên để biết layout thật hiện có.
 
 ### Các quyết định
 
@@ -164,7 +166,7 @@ crates/
   tradar-query-workbench/        — QueryScreenComponent, ResultsComponent, QueryEditorComponent,
                                     QueryEngine (implement Session), trait QueryDriver, SchemaInfo/QueryResult
   tradar-connector-postgres/  tradar-connector-sqlite/  tradar-connector-mongo/  tradar-connector-elasticsearch/  tradar-connector-redis/  tradar-connector-cassandra/
-  tradar-connector-rabbitmq/  tradar-connector-kafka/  tradar-connector-http/
+  tradar-connector-clickhouse/  tradar-connector-rabbitmq/  tradar-connector-kafka/  tradar-connector-http/
   tradar-app/ (binary crate)     — main.rs (registry + event loop), RootComponent, ConnectionPickerComponent
 ```
 

@@ -22,7 +22,8 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 
 **Connector mới**
 
-- [ ] MySQL / MariaDB / ClickHouse
+- [ ] MySQL / MariaDB
+- [x] ClickHouse — xong (2026-09-29), xem `docs/backlog/clickhouse-connector-2026-09-29.md`
 - [ ] Kafka: mode Groups (lag theo consumer group)
 - [ ] Socket
 - [ ] gRPC (cần chốt phạm vi v1 trước)
@@ -42,7 +43,8 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 
 ## Connector mới, đã lên kế hoạch nhưng chưa code
 
-- **MySQL / MariaDB / ClickHouse.** `README.md` liệt ở mục "Dự kiến". Rẻ nhờ kiến trúc pluggable: thêm crate mới + 1 dòng trong `registry()`, không đụng core. MySQL qua `sqlx` gần như giống hệt connector Postgres đang có.
+- **MySQL / MariaDB.** `README.md` liệt ở mục "Dự kiến". Rẻ nhờ kiến trúc pluggable: thêm crate mới + 1 dòng trong `registry()`, không đụng core. Qua `sqlx` gần như giống hệt connector Postgres đang có.
+- ~~**ClickHouse**~~ — xong (2026-09-29), xem `docs/backlog/clickhouse-connector-2026-09-29.md`. Không qua `sqlx` (không hỗ trợ ClickHouse) mà qua chính HTTP interface của ClickHouse (`reqwest` + `FORMAT JSON`, giống cách connector Elasticsearch đã làm) — vẫn là SQL thật nên dùng chung `SQL_KEYWORDS`/`split_sql_statements`/tree-sitter highlight với Postgres/SQLite. Row-edit (sửa cell/xoá dòng) **không** làm ở v1: ClickHouse không có `UPDATE`/`DELETE` chuẩn, chỉ có mutation `ALTER TABLE ... UPDATE/DELETE` chạy nền bất đồng bộ, không khớp trải nghiệm "y rồi thấy liền" hiện có.
 - **Kafka: mode Groups (lag theo consumer group).** Hoãn khỏi v1 (`docs/backlog/mockup-ui-2026-08-15.md` mục 5, Topics mode + publish đã xong 2026-08-16) — mockup Screen 7 có phần consumer group nhưng lấy lag đúng nghĩa (current offset của 1 group cụ thể theo từng partition, so với high-water mark) với `rdkafka` cần dựng 1 consumer tạm gán `group.id` được chọn rồi gọi `committed()`, phức tạp hơn đáng kể so với phần Topics đã làm. Đọc-only, không seek/reset offset (giữ nguyên non-goal đã ghi trong `docs/architecture.md`).
 - **gRPC, Socket** (cùng đợt yêu cầu 2026-08-16 với HTTP — HTTP đã xong, xem `docs/backlog/http-connector.md`). Thiết kế trong `docs/architecture.md` (mục "Thiết kế UI: HTTP, gRPC, Socket") chưa đổi, chưa code dòng nào. gRPC vẫn cần user xác nhận cắt phạm vi v1 xuống unary + server-streaming (bỏ client-streaming/bidi) trước khi bắt tay — connector rủi ro cao nhất trong ba cái, nên spike/prototype phần reflection + `prost-reflect::DynamicMessage` trước khi cam kết chi tiết UI. Socket đơn giản hơn, thiết kế đã đủ rõ để code thẳng khi tới lượt. Gợi ý thứ tự kỹ thuật: Socket trước (đơn giản nhất) → gRPC sau (rủi ro cao nhất, giờ đã có kinh nghiệm build UI phi-query mới từ HTTP — kể cả bài học "kiểm tra Cargo.toml của connector tương tự trước khi tin plan tái dùng crate nào").
 

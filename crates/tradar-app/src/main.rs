@@ -40,6 +40,7 @@ fn registry() -> HashMap<String, Box<dyn Connector>> {
         tradar_connector_redis::connector(),
         tradar_connector_mongo::connector(),
         tradar_connector_cassandra::connector(),
+        tradar_connector_clickhouse::connector(),
         tradar_connector_rabbitmq::connector(),
         tradar_connector_kafka::connector(),
         tradar_connector_http::connector(),
