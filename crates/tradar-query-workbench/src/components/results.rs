@@ -2,6 +2,7 @@
 //! driven entirely by `QueryScreenComponent` calling `set_result`/`set_error`
 //! and its movement/yank methods directly from key handling.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ratatui::Frame;
@@ -382,6 +383,28 @@ pub struct ResultsComponent {
     /// result, a join, a `Documents` result flattened into a table (no SQL
     /// schema applies there).
     column_types: Vec<Option<String>>,
+    /// Bumped by every mutator that can change what `visible_items()`
+    /// filters/sorts to, or what `json_lines()` flattens (`set_result`,
+    /// `set_filter`, `sort_by_column`, `toggle_document_view`, and
+    /// `set_column_types` -- only when the types actually differ, since
+    /// the screen calls that one unconditionally once per query outcome,
+    /// not to signal a real change every time). `visible_items_cache`/
+    /// `json_lines_cache` key on this instead of comparing `last_result`/
+    /// `filter` themselves, which would mean cloning a result that can be
+    /// large just to check whether it's still the one already cached.
+    version: u64,
+    /// Memoized `visible_items()` -- same idea as `query_editor.rs`'s
+    /// `fold_cache`/`highlight_cache`: filtering and sorting a large
+    /// result was being redone from scratch on every `j`/`k` press and
+    /// every one of the ~20/sec redraws a running query's spinner drives
+    /// (see `QueryEngine::tick`), not just when the result/filter/sort
+    /// actually changed.
+    visible_items_cache: RefCell<Option<(u64, Vec<usize>)>>,
+    /// Memoized `json_lines()` -- same reasoning as `visible_items_cache`,
+    /// for the JSON view's line flattening (which pretty-prints every
+    /// visible document, the more expensive of the two to redo
+    /// unnecessarily).
+    json_lines_cache: RefCell<Option<(u64, Vec<String>)>>,
 }
 
 impl Default for ResultsComponent {
@@ -411,6 +434,9 @@ impl ResultsComponent {
             doc_view: DocumentView::Json,
             doc_table: None,
             column_types: Vec::new(),
+            version: 0,
+            visible_items_cache: RefCell::new(None),
+            json_lines_cache: RefCell::new(None),
         }
     }
 
@@ -418,6 +444,14 @@ impl ResultsComponent {
     /// current result's source table against the schema -- see
     /// `query_driver::column_types`.
     pub fn set_column_types(&mut self, types: Vec<Option<String>>) {
+        // The screen calls this unconditionally once per query outcome
+        // (see its own call site's comment), not only when the types
+        // actually differ -- bump the cache version only on a real change,
+        // so a result that already had its types resolved doesn't pay for
+        // a fresh `visible_items()`/`json_lines()` recompute for no reason.
+        if self.column_types != types {
+            self.version += 1;
+        }
         self.column_types = types;
     }
 
@@ -428,6 +462,7 @@ impl ResultsComponent {
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
+        self.version += 1;
         self.doc_table = match &result {
             QueryResult::Documents(docs) => Some(documents_as_table(docs)),
             _ => None,
@@ -476,6 +511,7 @@ impl ResultsComponent {
     /// the same), not a query sent back to the database -- see
     /// `visible_and_sorted_rows`.
     pub fn sort_by_column(&mut self, index: usize) {
+        self.version += 1;
         self.sort = match self.sort {
             Some((current, SortDirection::Asc)) if current == index => {
                 Some((index, SortDirection::Desc))
@@ -488,6 +524,7 @@ impl ResultsComponent {
     /// Narrows the grid to rows containing `filter`, case-insensitively,
     /// anywhere in them. An empty string shows everything again.
     pub fn set_filter(&mut self, filter: &str) {
+        self.version += 1;
         self.filter = filter.to_string();
         // The row/line that was under the cursor may not be in the new
         // set, and a cursor pointing past the end selects nothing at all.
@@ -502,7 +539,24 @@ impl ResultsComponent {
     /// in order. This is what `selected` indexes -- everything that acts on
     /// "the selected row" goes through here, so an edit made while filtered
     /// still lands on the row the user is pointing at.
+    ///
+    /// Memoized on `self.version` (`visible_items_cache`) -- filtering and
+    /// sorting a large result was otherwise redone from scratch on every
+    /// call, and this is called several times per frame (the title bar's
+    /// count, the row-number gutter, the table body, `json_lines`...) plus
+    /// once per `j`/`k`/scroll keystroke via `apply_move`.
     fn visible_items(&self) -> Vec<usize> {
+        if let Some((cached_version, cached)) = self.visible_items_cache.borrow().as_ref()
+            && *cached_version == self.version
+        {
+            return cached.clone();
+        }
+        let items = self.compute_visible_items();
+        *self.visible_items_cache.borrow_mut() = Some((self.version, items.clone()));
+        items
+    }
+
+    fn compute_visible_items(&self) -> Vec<usize> {
         match &self.last_result {
             Some(QueryResult::Table { rows, columns, .. }) => {
                 visible_and_sorted_rows(rows, &self.filter, self.sort, &self.column_types, columns)
@@ -543,6 +597,20 @@ impl ResultsComponent {
         }
     }
 
+    /// `json_lines`, memoized the same way as `visible_items` -- the more
+    /// expensive of the two to redo unnecessarily, since it pretty-prints
+    /// every visible document rather than just filtering/sorting indices.
+    fn cached_json_lines(&self, docs: &[serde_json::Value]) -> Vec<String> {
+        if let Some((cached_version, cached)) = self.json_lines_cache.borrow().as_ref()
+            && *cached_version == self.version
+        {
+            return cached.clone();
+        }
+        let lines = json_lines(docs, &self.visible_items());
+        *self.json_lines_cache.borrow_mut() = Some((self.version, lines.clone()));
+        lines
+    }
+
     /// Where the selected row sits in the *unfiltered* result -- what the
     /// row-number gutter shows, so the numbers stay honest while filtered.
     fn selected_item(&self) -> Option<usize> {
@@ -580,7 +648,7 @@ impl ResultsComponent {
     fn cursor_count(&self) -> usize {
         match &self.last_result {
             Some(QueryResult::Documents(docs)) if self.doc_view == DocumentView::Json => {
-                json_lines(docs, &self.visible_items()).len()
+                self.cached_json_lines(docs).len()
             }
             _ => self.item_count(),
         }
@@ -615,6 +683,7 @@ impl ResultsComponent {
         if !matches!(self.last_result, Some(QueryResult::Documents(_))) {
             return;
         }
+        self.version += 1;
         self.doc_view = match self.doc_view {
             DocumentView::Json => DocumentView::Table,
             DocumentView::Table => DocumentView::Json,
@@ -800,9 +869,7 @@ impl ResultsComponent {
         if let Some(QueryResult::Documents(docs)) = self.last_result.as_ref()
             && self.doc_view == DocumentView::Json
         {
-            return json_lines(docs, &self.visible_items())
-                .get(self.selected)
-                .cloned();
+            return self.cached_json_lines(docs).get(self.selected).cloned();
         }
         let index = self.selected_item()?;
         match self.last_result.as_ref()? {
@@ -945,6 +1012,14 @@ impl ResultsComponent {
             self.visible_height = 0;
             return;
         };
+        // Computed once per frame (memoized on `self.version`, see
+        // `visible_items`) and handed to `draw_table_body` instead of
+        // letting it recompute filtering/sorting itself -- that free
+        // function used to call `visible_and_sorted_rows` directly, its
+        // own copy of the same work `visible_items()` already does
+        // elsewhere in this same `draw()` (the title bar's count, the
+        // row-number gutter), redone from scratch every frame.
+        let visible_rows = self.visible_items();
 
         match result {
             QueryResult::Table { columns, rows, .. } => {
@@ -955,7 +1030,7 @@ impl ResultsComponent {
                     columns,
                     rows,
                     &self.column_types,
-                    &self.filter,
+                    &visible_rows,
                     self.sort,
                     &self.column_width_deltas,
                     self.selected,
@@ -982,7 +1057,7 @@ impl ResultsComponent {
                     columns,
                     rows,
                     &[],
-                    &self.filter,
+                    &visible_rows,
                     self.sort,
                     &self.column_width_deltas,
                     self.selected,
@@ -1019,7 +1094,7 @@ impl ResultsComponent {
                 // long document's own body a line at a time, the same as
                 // any other vim buffer, instead of jumping straight past it
                 // to the next document once it no longer fits on screen.
-                let lines = json_lines(docs, &self.visible_items());
+                let lines = self.cached_json_lines(docs);
                 let items: Vec<ListItem> = lines
                     .iter()
                     .map(|line| ListItem::new(line.as_str()))
@@ -1054,7 +1129,7 @@ fn draw_table_body(
     columns: &[String],
     rows: &[Vec<String>],
     column_types: &[Option<String>],
-    filter: &str,
+    visible_rows: &[usize],
     sort: Option<(usize, SortDirection)>,
     column_width_deltas: &HashMap<usize, i32>,
     selected: usize,
@@ -1108,9 +1183,12 @@ fn draw_table_body(
 
     // A row-number gutter, wide enough for the highest number there is:
     // on a screen full of rows, "which one am I on" is otherwise
-    // something you have to count. Computed once and reused below for
-    // both the preview (which cell is selected) and the table body.
-    let visible_rows = visible_and_sorted_rows(rows, filter, sort, column_types, columns);
+    // something you have to count. `visible_rows` (filtered/sorted
+    // indices) is reused below for both the preview (which cell is
+    // selected) and the table body -- computed once by the caller
+    // (`ResultsComponent::draw`, via the memoized `visible_items()`)
+    // rather than here, since this function used to redo that filtering/
+    // sorting itself on every call with no cache of its own.
     let gutter = (rows.len().to_string().chars().count() as u16).max(1);
 
     // Computed with the cell cursor as it stood before this frame's
@@ -1971,6 +2049,62 @@ mod tests {
         results.set_filter("DA NA");
 
         assert_eq!(results.selected_text().as_deref(), Some("2\tDa Nang"));
+    }
+
+    #[test]
+    fn visible_items_and_json_lines_never_serve_a_stale_cache_across_mutations() {
+        // `visible_items`/`json_lines` are memoized on `self.version` (see
+        // their own doc comments) purely for speed -- every mutator that
+        // can change what they compute has to bump it, or a later call
+        // would silently keep returning what an earlier filter/sort/view
+        // produced. Exercise every one of those mutators back to back and
+        // confirm each call reflects the *current* state, not a cached one.
+        let mut results = ResultsComponent::new();
+        results.set_result(cities());
+        assert_eq!(results.item_count(), 3, "no filter: all three rows");
+
+        results.set_filter("hanoi");
+        assert_eq!(results.item_count(), 2, "filtered to the two Hanoi rows");
+
+        results.set_filter("da nang");
+        assert_eq!(
+            results.item_count(),
+            1,
+            "a second, different filter must not reuse the first filter's cache"
+        );
+
+        results.set_filter("");
+        assert_eq!(
+            results.item_count(),
+            3,
+            "clearing the filter shows all rows again"
+        );
+
+        results.sort_by_column(1);
+        let ascending = draw_component(&mut results, 30, 8);
+        results.sort_by_column(1);
+        let descending = draw_component(&mut results, 30, 8);
+        assert_ne!(
+            ascending, descending,
+            "re-sorting the same column must not reuse the previous sort's cache"
+        );
+
+        // Documents/JSON view: `cached_json_lines` specifically.
+        results.set_result(QueryResult::Documents(vec![
+            serde_json::json!({"name": "Ada"}),
+            serde_json::json!({"name": "Lin"}),
+        ]));
+        assert_eq!(
+            results.cursor_count(),
+            7,
+            "2 docs, 3 lines each, 1 blank separator"
+        );
+        results.set_filter("lin");
+        assert_eq!(
+            results.cursor_count(),
+            3,
+            "filtering to one document must not reuse the unfiltered line count"
+        );
     }
 
     #[test]
