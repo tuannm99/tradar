@@ -885,6 +885,7 @@ fn context_title(context: Context) -> &'static str {
         Context::Browse => "Redis key browser (when focused)",
         Context::Rabbit => "RabbitMQ screen",
         Context::Kafka => "Kafka screen",
+        Context::Socket => "Socket screen",
         Context::Http => "HTTP screen",
         Context::HttpResponse => "HTTP screen — response pane (when focused)",
         Context::HttpRequests => "Saved-request library (while open)",

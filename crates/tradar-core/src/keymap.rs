@@ -72,6 +72,14 @@ pub enum Context {
     /// follow, publish) -- combined with `List` for its topic sidebar the
     /// same way `Rabbit` is.
     Kafka,
+    /// The Socket screen's own bindings (send, reconnect, toggle auto-`\n`,
+    /// scroll the received-data log) -- unlike `Rabbit`/`Kafka`, **not**
+    /// combined with `List`: this screen has no sidebar, and its one input
+    /// line is always in "insert mode" (there's no other field to tab into
+    /// and back out of), so every letter key has to stay typable. Scrolling
+    /// the log therefore only binds arrow keys/`ctrl-d`/`ctrl-u` here, never
+    /// `j`/`k`/`gg`/`G` -- see `docs/backlog/socket-connector-2026-09-29.md`.
+    Socket,
     /// Shared by every selectable list: the connection picker, the schema
     /// sidebar, the results pane, the history overlay, and the Redis browse
     /// sidebar.
@@ -158,6 +166,7 @@ impl Context {
             Self::Browse => "browse",
             Self::Rabbit => "rabbit",
             Self::Kafka => "kafka",
+            Self::Socket => "socket",
             Self::List => "list",
             Self::Prompt => "prompt",
             Self::Completion => "completion",
@@ -185,6 +194,7 @@ impl Context {
             "browse" => Self::Browse,
             "rabbit" => Self::Rabbit,
             "kafka" => Self::Kafka,
+            "socket" => Self::Socket,
             "list" => Self::List,
             "prompt" => Self::Prompt,
             "completion" => Self::Completion,
@@ -203,7 +213,7 @@ impl Context {
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 22] {
+    pub fn all() -> [Self; 23] {
         [
             Self::Global,
             Self::Picker,
@@ -217,6 +227,7 @@ impl Context {
             Self::Browse,
             Self::Rabbit,
             Self::Kafka,
+            Self::Socket,
             Self::Http,
             Self::HttpResponse,
             Self::HttpRequests,
@@ -400,6 +411,15 @@ pub enum Command {
     KafkaPauseFollow,
     /// Open the publish compose panel for the selected topic.
     KafkaPublish,
+    /// `Enter` in the Socket screen's input line: sends its text (plus a
+    /// trailing `\n` if `SocketToggleAppendNewline` is on).
+    SocketSend,
+    /// Drops the current TCP connection and dials the same target again.
+    SocketReconnect,
+    /// Toggles whether `SocketSend` appends a trailing `\n` -- on by
+    /// default, matching most line-based text protocols (RESP inline,
+    /// SMTP, IRC...).
+    SocketToggleAppendNewline,
     /// Send the current request.
     HttpSend,
     /// Cycle the method field (GET/POST/PUT/...) forward/backward, while
@@ -593,6 +613,9 @@ impl Command {
             Self::KafkaTailEarliest => "kafka-tail-earliest",
             Self::KafkaPauseFollow => "kafka-pause-follow",
             Self::KafkaPublish => "kafka-publish",
+            Self::SocketSend => "socket-send",
+            Self::SocketReconnect => "socket-reconnect",
+            Self::SocketToggleAppendNewline => "socket-toggle-append-newline",
             Self::HttpSend => "http-send",
             Self::HttpNextMethod => "http-next-method",
             Self::HttpPrevMethod => "http-prev-method",
@@ -655,7 +678,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 131] = [
+    const ALL: [Self; 134] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -732,6 +755,9 @@ impl Command {
         Self::KafkaTailEarliest,
         Self::KafkaPauseFollow,
         Self::KafkaPublish,
+        Self::SocketSend,
+        Self::SocketReconnect,
+        Self::SocketToggleAppendNewline,
         Self::HttpSend,
         Self::HttpNextMethod,
         Self::HttpPrevMethod,
@@ -868,6 +894,9 @@ impl Command {
             Self::KafkaTailEarliest => "Tail the selected topic from the earliest offset",
             Self::KafkaPauseFollow => "Pause/resume following new messages",
             Self::KafkaPublish => "Publish a message to the selected topic",
+            Self::SocketSend => "Send the input line",
+            Self::SocketReconnect => "Reconnect",
+            Self::SocketToggleAppendNewline => "Toggle sending a trailing newline",
             Self::HttpSend => "Send the request",
             Self::HttpNextMethod => "Next HTTP method",
             Self::HttpPrevMethod => "Previous HTTP method",
@@ -1135,6 +1164,30 @@ impl Default for Keymap {
                 ("b", Command::KafkaTailEarliest),
                 ("space", Command::KafkaPauseFollow),
                 ("p", Command::KafkaPublish),
+                ("esc", Command::Back),
+                ("?", Command::Help),
+            ]),
+        );
+        bindings.insert(
+            Context::Socket,
+            parse_defaults(&[
+                ("enter", Command::SocketSend),
+                // Not bare `r` -- the input line is always focused/typable
+                // (no sidebar to tab away to, unlike Rabbit/Kafka), so every
+                // letter key has to stay text. `ctrl-` prefixes here instead.
+                ("ctrl-r", Command::SocketReconnect),
+                ("f2", Command::SocketToggleAppendNewline),
+                // Log scrolling: arrows/ctrl-d/ctrl-u only, never `j`/`k`/
+                // `gg`/`G` -- same reasoning. `Command::MoveUp`/`MoveDown`/
+                // `HalfPageUp`/`HalfPageDown` are the same commands
+                // `Context::List` uses; this is a separate binding table
+                // for them; the input field never sees these (`TextInput`
+                // doesn't consume arrows/ctrl-d/ctrl-u, but the keymap
+                // resolves them to a command before the field is asked).
+                ("up", Command::MoveUp),
+                ("down", Command::MoveDown),
+                ("ctrl-u", Command::HalfPageUp),
+                ("ctrl-d", Command::HalfPageDown),
                 ("esc", Command::Back),
                 ("?", Command::Help),
             ]),

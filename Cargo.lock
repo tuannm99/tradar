@@ -5001,6 +5001,7 @@ dependencies = [
  "tradar-connector-postgres",
  "tradar-connector-rabbitmq",
  "tradar-connector-redis",
+ "tradar-connector-socket",
  "tradar-connector-spi",
  "tradar-connector-sqlite",
  "tradar-core",
@@ -5145,6 +5146,19 @@ dependencies = [
  "tradar-connector-spi",
  "tradar-core",
  "tradar-query-workbench",
+]
+
+[[package]]
+name = "tradar-connector-socket"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "crossterm",
+ "ratatui",
+ "tokio",
+ "tradar-connector-spi",
+ "tradar-core",
 ]
 
 [[package]]
