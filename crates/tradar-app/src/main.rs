@@ -44,6 +44,7 @@ fn registry() -> HashMap<String, Box<dyn Connector>> {
         tradar_connector_rabbitmq::connector(),
         tradar_connector_kafka::connector(),
         tradar_connector_http::connector(),
+        tradar_connector_socket::connector(),
     ];
     connectors
         .into_iter()

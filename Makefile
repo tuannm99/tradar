@@ -3,7 +3,7 @@ DOCKER_SERVICES := postgres redis mongo elasticsearch5 elasticsearch7 elasticsea
 .PHONY: help build run fmt fmt-check clippy check \
 	test test-unit test-docker \
 	test-core test-connector-spi test-workbench test-app \
-	test-sqlite test-postgres test-redis test-mongo test-elasticsearch test-clickhouse test-http \
+	test-sqlite test-socket test-postgres test-redis test-mongo test-elasticsearch test-clickhouse test-http \
 	up down ps
 
 CARGO := cargo
@@ -35,7 +35,7 @@ check: fmt-check clippy test-unit ## Fast pre-commit gate: fmt + clippy + tests 
 test: ## Run every test in the workspace (needs Docker for postgres/redis/mongo/elasticsearch)
 	$(CARGO) test --workspace
 
-test-unit: ## Tests that never touch Docker: core, connector-spi, query-workbench, sqlite, app
+test-unit: ## Tests that never touch Docker: core, connector-spi, query-workbench, sqlite, socket, app
 	$(CARGO) test --workspace \
 		--exclude tradar-connector-postgres \
 		--exclude tradar-connector-redis \
@@ -63,6 +63,9 @@ test-app: ## tradar-app only (components, RootComponent -- no Docker)
 
 test-sqlite: ## tradar-connector-sqlite only (real temp-file DB, no Docker)
 	$(CARGO) test -p tradar-connector-sqlite --lib
+
+test-socket: ## tradar-connector-socket only (real local TcpListener, no Docker)
+	$(CARGO) test -p tradar-connector-socket --lib
 
 test-postgres: ## tradar-connector-postgres only -- needs Docker (testcontainers)
 	$(CARGO) test -p tradar-connector-postgres --lib

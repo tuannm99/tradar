@@ -21,6 +21,7 @@ tradar-connector-clickhouse = { path = "../tradar-connector-clickhouse" }
 tradar-connector-rabbitmq = { path = "../tradar-connector-rabbitmq" }
 tradar-connector-kafka = { path = "../tradar-connector-kafka" }
 tradar-connector-http = { path = "../tradar-connector-http" }
+tradar-connector-socket = { path = "../tradar-connector-socket" }
 
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.30"

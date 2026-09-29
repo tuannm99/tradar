@@ -4,7 +4,7 @@ Tài liệu này gồm hai phần: kiến trúc đang triển khai hiện tại,
 
 ## Triển khai hiện tại
 
-Tradar là một Cargo workspace gồm mười bốn crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới. **Cập nhật 2026-08-16**: các connector crate được đổi tên prefix `tradar-connector-<tên>` (trước đó `tradar-<tên>`) và chuyển ra sống trực tiếp dưới `crates/`, bỏ hẳn thư mục lồng `crates/connectors/` — dọn dẹp thuần cấu trúc, không đổi trait/API nào, làm cùng lúc với việc thêm connector thứ 9 (HTTP). **Cập nhật 2026-09-29**: thêm connector thứ 10, `tradar-connector-clickhouse` — xem `docs/backlog/clickhouse-connector-2026-09-29.md`.
+Tradar là một Cargo workspace gồm mười lăm crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới. **Cập nhật 2026-08-16**: các connector crate được đổi tên prefix `tradar-connector-<tên>` (trước đó `tradar-<tên>`) và chuyển ra sống trực tiếp dưới `crates/`, bỏ hẳn thư mục lồng `crates/connectors/` — dọn dẹp thuần cấu trúc, không đổi trait/API nào, làm cùng lúc với việc thêm connector thứ 9 (HTTP). **Cập nhật 2026-09-29**: thêm connector thứ 10 và 11, `tradar-connector-clickhouse` và `tradar-connector-socket` — xem `docs/backlog/clickhouse-connector-2026-09-29.md` và `docs/backlog/socket-connector-2026-09-29.md`.
 
 ```
 Cargo.toml                    [workspace], default-members = ["crates/tradar-app"]
@@ -35,12 +35,12 @@ crates/
       src/lib.rs               — mỗi crate: struct driver (private, implement QueryDriver) + struct XConnector (private, implement Connector)
                                     + `pub fn connector() -> Box<dyn Connector>` (constructor export duy nhất ra ngoài crate)
                                     ClickHouse: qua reqwest + FORMAT JSON (HTTP interface), không qua sqlx (không hỗ trợ ClickHouse)
-  tradar-connector-rabbitmq/  tradar-connector-kafka/  tradar-connector-http/     — không phụ thuộc tradar-query-workbench (không có hình dạng query — xem "Kiến trúc mục tiêu" bên dưới)
+  tradar-connector-rabbitmq/  tradar-connector-kafka/  tradar-connector-http/  tradar-connector-socket/     — không phụ thuộc tradar-query-workbench (không có hình dạng query — xem "Kiến trúc mục tiêu" bên dưới)
       src/lib.rs               — struct XSession (private, implement Session) + struct XConnector (private, implement Connector) + `pub fn connector()`
       src/screen.rs            — struct XScreen (private, implement Component) — Screen tự viết, không dùng QueryScreenComponent
   tradar-app/                 [[bin]] name = "tradar"
     src/
-      main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 10 connector(); event loop:
+      main.rs                 — dựng registry (HashMap<String, Box<dyn Connector>>) từ 11 connector(); event loop:
                                     crossterm input -> Component actions -> spawn Connector::connect -> Session -> Screen
       components/
         mod.rs                — RootComponent: tabs: Vec<Tab> (mỗi Tab: ScreenSlot::ConnectionPicker | Active(Box<dyn Component>) + connection_picker riêng + title) + active_tab
@@ -48,7 +48,7 @@ crates/
         connection_form.rs    — ConnectionFormComponent: form 3 field cho add/edit, overlay trên picker
 ```
 
-`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-spi`, cùng với `CONNECT_TIMEOUT`/`with_connect_timeout` — giới hạn thời gian mở kết nối mà **mọi** connector đều bọc qua, đặt chung một chỗ vì client bên dưới của mỗi backend bất đồng hoàn toàn về hành vi khi host không trả lời (sqlx có timeout riêng, `redis`/`mongodb` có default riêng, `reqwest` không có gì), mà TUI thì đứng im trong lúc connect nên treo lâu sẽ bị đọc là app hỏng. Mỗi driver cụ thể sống trong crate connector riêng của nó (`tradar-connector-<tên>`, dưới `crates/`); `tradar-app` phụ thuộc cả 10 (7 connector dạng query + Kafka + RabbitMQ + HTTP) nhưng không chứa code driver nào.
+`Action`/`Component` nằm ở `tradar-core` (đóng, 6 variant: `Quit`/`OpenRequested`/`Opened`/`OpenFailed`/`BackToPicker`/`ShowHelp` — đổi tên từ `Connect*` thành `Open*` đúng theo "RootComponent và Action" ở mục kiến trúc mục tiêu bên dưới; `ShowHelp` thêm 2026-08-13, vẫn đúng quy tắc "không connector nào thêm variant" vì overlay phím tắt là việc của app shell, không của connector). `QueryDriver`/`SchemaInfo`/`QueryResult`/`QueryEngine` cùng toàn bộ UI dạng query nằm ở `tradar-query-workbench`. `Connector`/`Session`/`ConnectorDescriptor` nằm ở `tradar-connector-spi`, cùng với `CONNECT_TIMEOUT`/`with_connect_timeout` — giới hạn thời gian mở kết nối mà **mọi** connector đều bọc qua, đặt chung một chỗ vì client bên dưới của mỗi backend bất đồng hoàn toàn về hành vi khi host không trả lời (sqlx có timeout riêng, `redis`/`mongodb` có default riêng, `reqwest` không có gì), mà TUI thì đứng im trong lúc connect nên treo lâu sẽ bị đọc là app hỏng. Mỗi driver cụ thể sống trong crate connector riêng của nó (`tradar-connector-<tên>`, dưới `crates/`); `tradar-app` phụ thuộc cả 11 (7 connector dạng query + Kafka + RabbitMQ + HTTP + Socket) nhưng không chứa code driver nào.
 
 ### Trait `QueryDriver`
 
@@ -166,7 +166,7 @@ crates/
   tradar-query-workbench/        — QueryScreenComponent, ResultsComponent, QueryEditorComponent,
                                     QueryEngine (implement Session), trait QueryDriver, SchemaInfo/QueryResult
   tradar-connector-postgres/  tradar-connector-sqlite/  tradar-connector-mongo/  tradar-connector-elasticsearch/  tradar-connector-redis/  tradar-connector-cassandra/
-  tradar-connector-clickhouse/  tradar-connector-rabbitmq/  tradar-connector-kafka/  tradar-connector-http/
+  tradar-connector-clickhouse/  tradar-connector-rabbitmq/  tradar-connector-kafka/  tradar-connector-http/  tradar-connector-socket/
   tradar-app/ (binary crate)     — main.rs (registry + event loop), RootComponent, ConnectionPickerComponent
 ```
 
@@ -391,7 +391,7 @@ Chốt 2 quyết định UX còn treo ở `docs/backlog/mockup-ui-2026-08-15.md`
 
 **Non-goals của riêng thiết kế Kafka/RabbitMQ này** (ngoài các non-goal chung ở mục dưới): seek/reset consumer group offset (Kafka — cùng lý do mode Groups bị cắt khỏi v1); tạo/xoá queue, exchange, hay vhost (RabbitMQ — chỉ browse + publish, không quản trị); tail real-time cho RabbitMQ qua AMQP; bất kỳ UI branch nào theo `Capability` (giữ đúng non-goal chung đã có).
 
-### Thiết kế UI: HTTP, gRPC, Socket (2026-08-16 — HTTP đã code, gRPC/Socket vẫn kế hoạch)
+### Thiết kế UI: HTTP, gRPC, Socket (2026-08-16 — HTTP + Socket đã code, gRPC vẫn kế hoạch)
 
 User yêu cầu bổ sung ba connector mới, **không phải database**: HTTP client kiểu Postman, gRPC client, và raw TCP socket kiểu netcat. Chốt qua `AskUserQuestion` trước khi viết thiết kế:
 
@@ -425,20 +425,21 @@ Cả ba đều là connector **phi-query** theo đúng nghĩa mục trên: mỗi
 - **Đề xuất cắt phạm vi v1 (cần user xác nhận trước khi code, chưa tự quyết)**: chỉ hỗ trợ **unary + server-streaming**, **không** làm client-streaming/bidi-streaming — hai loại đó cần gửi nhiều message tương tác trong lúc đang nhận, phức tạp hơn đáng kể so với phần còn lại (đúng lý do Kafka từng cắt mode Groups khỏi v1). Cũng chưa làm metadata/header của request (gRPC có khái niệm tương đương HTTP header) — để dành fast-follow, giữ v1 tối giản như RabbitMQ đã làm.
 - Crate: `tonic` (chỉ phần client, không cần codegen server), `prost` + `prost-reflect` (dynamic message + serde JSON mapping), `protox` (parse `.proto` không cần `protoc`). **Rủi ro cao nhất trong cả ba** — chưa từng làm trong codebase này, khả năng thiết kế lệch khi code thật (kiểu "Sai khác khi triển khai thật" đã thấy ở Kafka) là cao nhất; nên spike/prototype phần reflection + dynamic message trước khi cam kết UI chi tiết.
 
-**Socket** (raw TCP, netcat-style) — Capability đề xuất `[Streaming]`.
+**Socket** (raw TCP, netcat-style, đã code 2026-09-29) — Capability `[Streaming]`.
 
 - `target` = `host:port` trần.
-- `SocketSession` sở hữu `tokio::net::TcpStream`, một task nền đọc liên tục đẩy chunk nhận được (`Vec<u8>`, decode UTF-8 khi hợp lệ) qua channel nội bộ; `tick()` rút có giới hạn — đúng pattern firehose-safe đã đặc tả (giống hệt Kafka tail, chỉ khác nguồn dữ liệu). Buffer cap một số lượng chunk gần nhất (giống cap 500 message của Kafka) để không leak trên kết nối sống lâu.
-- Screen: **không có sidebar** (không có khái niệm "topic/queue" — kết nối chính là phiên duy nhất). Một panel cuộn hiện dữ liệu nhận được, mỗi entry có timestamp, decode UTF-8 khi được còn không thì hiện dạng hex dump (kiểu `xxd`) để không mất thông tin với giao thức nhị phân. Một dòng input (`ui::TextInput`) ở đáy — gõ rồi `Enter` gửi, có toggle tự thêm `\n` cuối dòng khi gửi (mặc định bật — khớp phần lớn giao thức dòng lệnh văn bản: RESP inline, SMTP, IRC...). `r` ngắt và kết nối lại (không có cơ chế tự retry giống connection pool của DB).
+- `SocketSession` sở hữu `tokio::net::TcpStream` (tách `into_split()` thành `OwnedReadHalf`/`OwnedWriteHalf`), một task nền đọc liên tục đẩy chunk nhận được (`Vec<u8>`, decode UTF-8 khi hợp lệ) qua channel nội bộ; `tick()` rút có giới hạn — đúng pattern firehose-safe đã đặc tả (giống hệt Kafka tail, chỉ khác nguồn dữ liệu). Buffer cap 500 entry gần nhất (giống cap 500 message của Kafka) để không leak trên kết nối sống lâu.
+- Screen: **không có sidebar** (không có khái niệm "topic/queue" — kết nối chính là phiên duy nhất). Một panel cuộn hiện transcript (cả gửi lẫn nhận, không chỉ nhận như plan gốc — xem "Sai khác #3" dưới), mỗi entry có timestamp elapsed-since-connect, decode UTF-8 khi được còn không thì hiện hex preview 1 dòng (không phải `xxd` nhiều dòng như plan gốc — xem "Sai khác #2"). Một dòng input (`ui::TextInput`) ở đáy — gõ rồi `Enter` gửi, có toggle tự thêm `\n` cuối dòng khi gửi (mặc định bật — khớp phần lớn giao thức dòng lệnh văn bản: RESP inline, SMTP, IRC...). Reconnect đổi từ `r` sang `ctrl-r`, cuộn đổi từ `j`/`k`/`gg`/`G` sang mũi tên/`ctrl-d`/`ctrl-u` — xem "Sai khác #1". Không có cơ chế tự retry giống connection pool của DB.
 - Non-goal v1: UDP (user chỉ được hỏi về TCP), TLS (`rustls`/`native-tls` — plain TCP trước, để dành fast-follow), không parse/frame theo bất kỳ giao thức cụ thể nào — đúng chủ đích: đây là công cụ cho lúc *chưa có* connector riêng cho thứ đang cần xem, không phải một connector giao thức mới.
+- **Sai khác khi triển khai thật**: (1) `r` reconnect → `ctrl-r`, `j`/`k`/`gg`/`G` cuộn → mũi tên/`ctrl-d`/`ctrl-u` — plan gốc không nói rõ input line có rời focus được không; code thật input line **luôn ở chế độ gõ** (không có field/sidebar khác để `Tab` sang, khác HTTP có 4 field luân phiên), nên mọi phím chữ cái đơn phải là text, không được là lệnh; (2) hex dump chỉ 1 dòng (tối đa 32 byte, phần dư ghi "… (N bytes)"), không phải nhiều dòng kiểu `xxd` thật — làm đúng vậy sẽ phá bất biến "1 entry = 1 dòng hiển thị" mà cơ chế cuộn (`scroll_offset` tính theo dòng) đang dựa vào; (3) transcript log cả tin đã gửi (đánh dấu `›` khác `‹` của tin nhận), không chỉ tin nhận được như plan gốc viết — không có cách nào khác xác nhận "đã gửi đúng cái gì" sau khi dòng input xoá trắng. Chi tiết đầy đủ, gồm toàn bộ 17 test đã chạy (không cần Docker — dựng thẳng `TcpListener` cục bộ trong test), xem `docs/backlog/socket-connector-2026-09-29.md`.
 
-**Chung cho cả ba, chưa làm — ghi để tránh quên khi bắt tay code**:
+**Chung cho cả ba, HTTP + Socket đã xong, còn gRPC**:
 
-- 3 `Context` mới trong `tradar_core::keymap` (`Http`, `Grpc`, `Socket`), mỗi cái tự khai binding riêng như `Context::Rabbit`/`Context::Kafka` đã làm, kết hợp `Context::List` cho sidebar ở HTTP/gRPC (Socket không có sidebar nên không cần).
-- `main.rs`'s `registry()` thêm 3 dòng.
-- README.md/`docs/backlog/` cập nhật khi từng connector thật sự chạy được đầu-cuối, đúng quy ước đã làm với Cassandra/Kafka/RabbitMQ.
+- 3 `Context` mới trong `tradar_core::keymap` (`Http`, `Grpc`, `Socket`), mỗi cái tự khai binding riêng như `Context::Rabbit`/`Context::Kafka` đã làm — `Http` kết hợp `Context::List` cho sidebar-shaped Response pane, `Socket` **không** kết hợp `Context::List` (input line luôn gõ được, không có pane rảnh để nhường `j`/`k`/`gg`/`G`, xem phần Socket ở trên); `Grpc` sẽ cần quyết định tương tự khi tới lượt (có sidebar service/method thật, gần HTTP hơn Socket).
+- `main.rs`'s `registry()` — 2/3 dòng đã thêm (HTTP, Socket); còn 1 dòng cho gRPC.
+- README.md/`docs/backlog/` cập nhật khi từng connector thật sự chạy được đầu-cuối, đúng quy ước đã làm với Cassandra/Kafka/RabbitMQ/HTTP/Socket.
 
-**Gợi ý thứ tự build** (không phải thứ tự sản phẩm — user đã chốt "cả ba cùng lúc" ở tầm đó; đây chỉ là gợi ý kỹ thuật để tránh lãng phí công sức nếu một phần bị pivot giữa chừng): **HTTP trước** — xong (2026-08-16), xác nhận pattern "Screen phi-query tự vẽ + `ui::TextArea` dùng chung" chạy tốt, và bắt được ngay lỗi cách ly (định tái dùng `QueryEditorComponent`/`ResultsComponent` — không được phép, xem mục HTTP ở trên) trước khi lỗi đó lặp lại ở gRPC. Còn lại: **Socket** (đơn giản kỹ thuật nhất, không phần nào mới ngoài chính TCP) → **gRPC** (rủi ro cao nhất, giờ đã có kinh nghiệm build UI phi-query mới từ HTTP). Đây chỉ là đề xuất — hỏi lại trước khi bắt đầu code nếu muốn thứ tự khác.
+**Gợi ý thứ tự build** (không phải thứ tự sản phẩm — user đã chốt "cả ba cùng lúc" ở tầm đó; đây chỉ là gợi ý kỹ thuật để tránh lãng phí công sức nếu một phần bị pivot giữa chừng): **HTTP trước** — xong (2026-08-16), xác nhận pattern "Screen phi-query tự vẽ + `ui::TextArea` dùng chung" chạy tốt, và bắt được ngay lỗi cách ly (định tái dùng `QueryEditorComponent`/`ResultsComponent` — không được phép, xem mục HTTP ở trên) trước khi lỗi đó lặp lại ở gRPC. **Socket** — xong (2026-09-29, đơn giản kỹ thuật nhất đúng như dự đoán, không phần nào mới ngoài chính TCP — cái duy nhất phải tự quyết thêm là hệ quả "input luôn gõ được" của layout không-sidebar, xem "Sai khác #1" ở trên). Còn lại: **gRPC** (rủi ro cao nhất, giờ đã có kinh nghiệm build UI phi-query mới từ cả HTTP lẫn Socket). Đây chỉ là đề xuất — hỏi lại trước khi bắt đầu code nếu muốn thứ tự khác.
 
 ### Query/HTTP screen: layout ngang/dọc + zoom, chuột trái/phải/giữa (2026-08-17, đã code)
 
