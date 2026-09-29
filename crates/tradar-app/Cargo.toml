@@ -17,6 +17,7 @@ tradar-connector-elasticsearch = { path = "../tradar-connector-elasticsearch" }
 tradar-connector-redis = { path = "../tradar-connector-redis" }
 tradar-connector-mongo = { path = "../tradar-connector-mongo" }
 tradar-connector-cassandra = { path = "../tradar-connector-cassandra" }
+tradar-connector-clickhouse = { path = "../tradar-connector-clickhouse" }
 tradar-connector-rabbitmq = { path = "../tradar-connector-rabbitmq" }
 tradar-connector-kafka = { path = "../tradar-connector-kafka" }
 tradar-connector-http = { path = "../tradar-connector-http" }

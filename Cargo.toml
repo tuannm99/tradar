@@ -10,6 +10,7 @@ members = [
   "crates/tradar-connector-redis",
   "crates/tradar-connector-mongo",
   "crates/tradar-connector-cassandra",
+  "crates/tradar-connector-clickhouse",
   "crates/tradar-connector-rabbitmq",
   "crates/tradar-connector-kafka",
   "crates/tradar-connector-http",

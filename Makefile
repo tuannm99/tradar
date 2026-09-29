@@ -3,7 +3,7 @@ DOCKER_SERVICES := postgres redis mongo elasticsearch5 elasticsearch7 elasticsea
 .PHONY: help build run fmt fmt-check clippy check \
 	test test-unit test-docker \
 	test-core test-connector-spi test-workbench test-app \
-	test-sqlite test-postgres test-redis test-mongo test-elasticsearch test-http \
+	test-sqlite test-postgres test-redis test-mongo test-elasticsearch test-clickhouse test-http \
 	up down ps
 
 CARGO := cargo
@@ -42,11 +42,12 @@ test-unit: ## Tests that never touch Docker: core, connector-spi, query-workbenc
 		--exclude tradar-connector-mongo \
 		--exclude tradar-connector-elasticsearch \
 		--exclude tradar-connector-cassandra \
+		--exclude tradar-connector-clickhouse \
 		--exclude tradar-connector-rabbitmq \
 		--exclude tradar-connector-kafka \
 		--exclude tradar-connector-http
 
-test-docker: test-postgres test-redis test-mongo test-elasticsearch test-cassandra test-rabbitmq test-kafka test-http ## Every connector whose tests need a Docker daemon (testcontainers)
+test-docker: test-postgres test-redis test-mongo test-elasticsearch test-cassandra test-clickhouse test-rabbitmq test-kafka test-http ## Every connector whose tests need a Docker daemon (testcontainers)
 
 test-core: ## tradar-core only (keymap, storage, theme, config, ui, vim_list)
 	$(CARGO) test -p tradar-core --lib
@@ -77,6 +78,9 @@ test-elasticsearch: ## tradar-connector-elasticsearch only -- needs Docker (test
 
 test-cassandra: ## tradar-connector-cassandra only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
 	$(CARGO) test -p tradar-connector-cassandra --lib
+
+test-clickhouse: ## tradar-connector-clickhouse only -- needs Docker (testcontainers-modules)
+	$(CARGO) test -p tradar-connector-clickhouse --lib
 
 test-rabbitmq: ## tradar-connector-rabbitmq only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
 	$(CARGO) test -p tradar-connector-rabbitmq --lib
