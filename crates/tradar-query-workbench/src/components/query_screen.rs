@@ -346,16 +346,21 @@ fn push_table(entries: &mut Vec<OutlineEntry>, depth: u8, table: &SchemaInfo) {
         primary_key: false,
     });
     for column in &table.columns {
+        // Which columns are the key decides whether the results grid can
+        // be edited, so it's worth seeing here; `indexed` likewise matters
+        // for writing a performant query (Mongo today -- the only driver
+        // that reports it, see `ColumnInfo::indexed`'s own doc comment).
+        let mut detail = column.type_name.clone();
+        if column.primary_key {
+            detail.push_str(" pk");
+        }
+        if column.indexed {
+            detail.push_str(" idx");
+        }
         entries.push(OutlineEntry {
             depth: depth + 1,
             label: column.name.clone(),
-            // Which columns are the key decides whether the results
-            // grid can be edited, so it's worth seeing here.
-            detail: if column.primary_key {
-                format!("{} pk", column.type_name)
-            } else {
-                column.type_name.clone()
-            },
+            detail,
             has_children: false,
             is_object: false,
             primary_key: column.primary_key,
@@ -2298,6 +2303,7 @@ mod tests {
                 type_name: "INTEGER".to_string(),
                 primary_key: true,
                 foreign_key: None,
+                indexed: false,
             }],
             kind: None,
             ttl: None,
@@ -3266,6 +3272,7 @@ mod tests {
                     type_name: "INTEGER".to_string(),
                     primary_key: true,
                     foreign_key: None,
+                    indexed: false,
                 },
                 crate::query_driver::ColumnInfo::new("name", "TEXT"),
             ],
@@ -4009,6 +4016,7 @@ mod tests {
                     type_name: "INTEGER".to_string(),
                     primary_key: true,
                     foreign_key: None,
+                    indexed: false,
                 },
                 crate::query_driver::ColumnInfo::new("name", "TEXT"),
             ],

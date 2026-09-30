@@ -598,6 +598,7 @@ mod tests {
                 type_name: "INTEGER".to_string(),
                 primary_key: true,
                 foreign_key: None,
+                indexed: false,
             }],
             kind: None,
             ttl: None,
@@ -615,6 +616,7 @@ mod tests {
                     type_name: "INTEGER".to_string(),
                     primary_key: true,
                     foreign_key: None,
+                    indexed: false,
                 },
                 ColumnInfo {
                     name: "user_id".to_string(),
@@ -624,6 +626,7 @@ mod tests {
                         table: "users".to_string(),
                         column: "id".to_string(),
                     }),
+                    indexed: false,
                 },
             ],
             kind: None,
@@ -644,6 +647,7 @@ mod tests {
                     table: "orders".to_string(),
                     column: "id".to_string(),
                 }),
+                indexed: false,
             }],
             kind: None,
             ttl: None,
@@ -752,6 +756,7 @@ mod tests {
                 table: "warehouses".to_string(),
                 column: "id".to_string(),
             }),
+            indexed: false,
         });
         let warehouses = SchemaInfo {
             name: "warehouses".to_string(),
@@ -822,6 +827,7 @@ mod tests {
                 table: "warehouses".to_string(),
                 column: "id".to_string(),
             }),
+            indexed: false,
         });
         let warehouses = SchemaInfo {
             name: "warehouses".to_string(),

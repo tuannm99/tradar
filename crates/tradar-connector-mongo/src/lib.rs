@@ -423,11 +423,18 @@ impl QueryDriver for MongoDriver {
             async move { collection.find_one(Document::new()).await }
         }))
         .await;
+        let indexed_fields =
+            futures_util::future::join_all(targets.iter().map(|(db_name, name)| {
+                let collection = client.database(db_name).collection::<Document>(name);
+                async move { indexed_field_names(&collection).await }
+            }))
+            .await;
         let mut schema: Vec<SchemaInfo> = targets
             .into_iter()
             .zip(samples)
-            .map(|((db_name, name), sample)| {
-                let columns = match sample {
+            .zip(indexed_fields)
+            .map(|(((db_name, name), sample), indexed_fields)| {
+                let mut columns = match sample {
                     Ok(Some(doc)) => {
                         let mut columns = Vec::new();
                         flatten_document("", &doc, &mut columns);
@@ -435,6 +442,11 @@ impl QueryDriver for MongoDriver {
                     }
                     Ok(None) | Err(_) => Vec::new(),
                 };
+                for column in &mut columns {
+                    if indexed_fields.contains(&column.name) {
+                        column.indexed = true;
+                    }
+                }
                 SchemaInfo {
                     name,
                     columns,
@@ -967,6 +979,34 @@ fn simplify_extjson(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+/// Every field named in any of this collection's indexes, `_id` excluded
+/// (every collection has the implicit `_id_` index, which `primary_key`
+/// already surfaces -- listing it again here would just be noise). Field
+/// names come straight from `IndexModel::keys`, the same dotted-path form
+/// `flatten_document` already produces for a nested field's own key
+/// (Mongo's own index syntax, e.g. `{"address.city": 1}`), so a match
+/// against `ColumnInfo::name` needs no extra parsing. Errors (no
+/// permission to list indexes, a dropped collection) come back as "no
+/// indexed fields known" rather than failing schema browsing over it --
+/// same fallback `list_schema` already uses for a sample that fails to
+/// load.
+async fn indexed_field_names(
+    collection: &mongodb::Collection<Document>,
+) -> std::collections::HashSet<String> {
+    let Ok(mut cursor) = collection.list_indexes().await else {
+        return std::collections::HashSet::new();
+    };
+    let mut fields = std::collections::HashSet::new();
+    while let Ok(Some(index)) = cursor.try_next().await {
+        for key in index.keys.keys() {
+            if key != "_id" {
+                fields.insert(key.clone());
+            }
+        }
+    }
+    fields
 }
 
 fn json_to_document(value: serde_json::Value) -> anyhow::Result<Document> {
@@ -2195,6 +2235,64 @@ mod tests {
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(key, vec!["_id"]);
+    }
+
+    #[tokio::test]
+    async fn list_schema_marks_a_field_covered_by_a_real_index() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada", "age": 36})"#)
+            .await
+            .unwrap();
+        // `execute()`'s parser doesn't understand `createIndex` (it's not
+        // one of the methods `docs/architecture.md` scoped this connector
+        // to) -- created directly through the driver crate instead, same
+        // as any other test-only setup step outside the shell subset.
+        let client = mongodb::Client::with_uri_str(format!("mongodb://127.0.0.1:{port}/test"))
+            .await
+            .unwrap();
+        client
+            .database("test")
+            .collection::<Document>("users")
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(mongodb::bson::doc! { "name": 1 })
+                    .build(),
+            )
+            .await
+            .unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        let users = schema.iter().find(|s| s.name == "users").unwrap();
+        let indexed: Vec<&str> = users
+            .columns
+            .iter()
+            .filter(|c| c.indexed)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(indexed, vec!["name"]);
+        // `_id` has the implicit default index, but it's already flagged
+        // via `primary_key` -- not worth a second, redundant marker.
+        assert!(
+            !users
+                .columns
+                .iter()
+                .find(|c| c.name == "_id")
+                .unwrap()
+                .indexed
+        );
+        assert!(
+            !users
+                .columns
+                .iter()
+                .find(|c| c.name == "age")
+                .unwrap()
+                .indexed
+        );
     }
 
     #[tokio::test]
