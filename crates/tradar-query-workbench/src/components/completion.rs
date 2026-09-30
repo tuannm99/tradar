@@ -467,6 +467,7 @@ mod tests {
                             table: "users".to_string(),
                             column: "id".to_string(),
                         }),
+                        indexed: false,
                     },
                 ],
                 kind: None,

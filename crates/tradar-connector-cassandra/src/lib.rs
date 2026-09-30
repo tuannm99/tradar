@@ -196,6 +196,7 @@ impl QueryDriver for CassandraDriver {
                         // CQL has no referential-integrity concept -- no FK
                         // to report, ever, for this driver.
                         foreign_key: None,
+                        indexed: false,
                     })
                     .collect(),
                 kind: None,

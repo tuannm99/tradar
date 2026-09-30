@@ -86,6 +86,16 @@ pub struct RabbitScreen {
     selected_exchange: Option<String>,
     compose: Option<ComposeState>,
     pending: Option<KeyPress>,
+    /// A case-insensitive substring narrowing the sidebar (queues or
+    /// exchanges, whichever mode is active) -- same idiom as
+    /// `NavigatorComponent::filter`. Kept even while `filter_input` is
+    /// closed so the title can still say what's applied and a fresh `/`
+    /// prefills it rather than starting over. Reset on `toggle_mode`,
+    /// same as `sidebar_selected` -- a filter typed for queue names
+    /// wouldn't mean anything against exchange names.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
 }
 
 impl RabbitScreen {
@@ -103,26 +113,47 @@ impl RabbitScreen {
             selected_exchange: None,
             compose: None,
             pending: None,
+            filter: String::new(),
+            filter_input: None,
         }
+    }
+
+    /// `session.queues`/`session.exchanges` (whichever the current mode
+    /// shows) narrowed by `filter`, when one's applied -- same idiom as
+    /// `NavigatorComponent::visible_rows`.
+    fn visible_queues(&self) -> Vec<&crate::QueueInfo> {
+        let needle = self.filter.to_lowercase();
+        self.session
+            .queues
+            .iter()
+            .filter(|q| self.filter.is_empty() || q.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    fn visible_exchanges(&self) -> Vec<&crate::ExchangeInfo> {
+        let needle = self.filter.to_lowercase();
+        self.session
+            .exchanges
+            .iter()
+            .filter(|e| self.filter.is_empty() || e.name.to_lowercase().contains(&needle))
+            .collect()
     }
 
     fn sidebar_len(&self) -> usize {
         match self.mode {
-            RabbitMode::Queues => self.session.queues.len(),
-            RabbitMode::Exchanges => self.session.exchanges.len(),
+            RabbitMode::Queues => self.visible_queues().len(),
+            RabbitMode::Exchanges => self.visible_exchanges().len(),
         }
     }
 
     fn selected_name(&self) -> Option<String> {
         match self.mode {
             RabbitMode::Queues => self
-                .session
-                .queues
+                .visible_queues()
                 .get(self.sidebar_selected)
                 .map(|q| q.name.clone()),
             RabbitMode::Exchanges => self
-                .session
-                .exchanges
+                .visible_exchanges()
                 .get(self.sidebar_selected)
                 .map(|e| e.name.clone()),
         }
@@ -134,6 +165,39 @@ impl RabbitScreen {
             RabbitMode::Exchanges => RabbitMode::Queues,
         };
         self.sidebar_selected = 0;
+        self.filter.clear();
+        self.filter_input = None;
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied.
+    fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys. `Esc` cancels -- clears
+    /// the bar *and* whatever was applied. `Enter` keeps the filter and
+    /// closes the bar. Anything else is text editing, applied live.
+    fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+                self.sidebar_selected = 0;
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+                self.sidebar_selected = 0;
+            }
+        }
     }
 
     fn refresh(&self) {
@@ -220,6 +284,13 @@ impl RabbitScreen {
     }
 
     fn draw_sidebar(&mut self, frame: &mut Frame, area: Rect) {
+        let (area, filter_bar_area) = if self.filter_input.is_some() {
+            let (list_area, bar) = ui::split_bottom_bar(area, 1);
+            (list_area, Some(bar))
+        } else {
+            (area, None)
+        };
+
         self.sidebar_visible_height = area.height.saturating_sub(2) as usize;
         let len = self.sidebar_len();
         self.sidebar_selected = self.sidebar_selected.min(len.saturating_sub(1));
@@ -235,8 +306,7 @@ impl RabbitScreen {
 
         let items: Vec<ListItem> = match self.mode {
             RabbitMode::Queues => self
-                .session
-                .queues
+                .visible_queues()
                 .iter()
                 .map(|q| {
                     ListItem::new(Line::from(vec![
@@ -252,8 +322,7 @@ impl RabbitScreen {
                 })
                 .collect(),
             RabbitMode::Exchanges => self
-                .session
-                .exchanges
+                .visible_exchanges()
                 .iter()
                 .map(|e| {
                     ListItem::new(Line::from(vec![
@@ -271,10 +340,21 @@ impl RabbitScreen {
         if len > 0 {
             state.select(Some(self.sidebar_selected));
         }
+        let title = if self.filter.is_empty() {
+            self.mode_title().to_string()
+        } else {
+            format!("{} — filter: {}", self.mode_title(), self.filter)
+        };
         let list = List::new(items)
-            .block(ui::panel(self.mode_title(), true))
+            .block(ui::panel(&title, true))
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, area, &mut state);
+
+        if let (Some(bar_area), Some(input)) = (filter_bar_area, &self.filter_input) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme().accent))];
+            spans.extend(input.spans(true));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
     }
 
     fn mode_title(&self) -> &'static str {
@@ -419,6 +499,10 @@ impl Component for RabbitScreen {
         if self.compose.is_some() {
             return self.handle_compose_key(code, modifiers);
         }
+        if self.is_filtering() {
+            self.filter_key_event(code, modifiers);
+            return None;
+        }
 
         let key = KeyPress::new(code, modifiers);
         let resolution =
@@ -443,6 +527,7 @@ impl Component for RabbitScreen {
             Command::RabbitRefresh => self.refresh(),
             Command::RabbitOpen => self.open_selected(),
             Command::RabbitPublish => self.open_compose(),
+            Command::Search => self.open_filter(),
             Command::Help => return Some(Action::ShowHelp),
             Command::Back => return Some(Action::BackToPicker),
             _ => {}
@@ -479,6 +564,7 @@ impl Component for RabbitScreen {
         hints.extend(ui::hint(Context::Rabbit, Command::ToggleRabbitMode, "mode"));
         hints.extend(ui::hint(Context::Rabbit, Command::RabbitOpen, "open"));
         hints.extend(ui::hint(Context::Rabbit, Command::RabbitPublish, "publish"));
+        hints.extend(ui::hint(Context::Rabbit, Command::Search, "filter"));
         hints.extend(ui::hint(Context::Rabbit, Command::Back, "back"));
         hints
     }
@@ -521,6 +607,109 @@ mod tests {
 
         screen.toggle_mode();
         assert_eq!(screen.mode, RabbitMode::Queues);
+    }
+
+    #[tokio::test]
+    async fn toggle_mode_also_clears_a_filter_left_over_from_the_other_mode() {
+        let mut screen = screen();
+        screen.open_filter();
+        for c in "orders".chars() {
+            screen.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert!(screen.is_filtering());
+
+        screen.toggle_mode();
+
+        assert!(!screen.is_filtering());
+        assert!(screen.filter.is_empty());
+    }
+
+    #[tokio::test]
+    async fn filter_narrows_the_queue_list_case_insensitively() {
+        let mut screen = screen();
+        screen.session.queues = vec![
+            crate::QueueInfo {
+                name: "orders".to_string(),
+                messages_ready: 0,
+                messages_unacknowledged: 0,
+                consumers: 0,
+            },
+            crate::QueueInfo {
+                name: "payments".to_string(),
+                messages_ready: 0,
+                messages_unacknowledged: 0,
+                consumers: 0,
+            },
+            crate::QueueInfo {
+                name: "ORDER_DLQ".to_string(),
+                messages_ready: 0,
+                messages_unacknowledged: 0,
+                consumers: 0,
+            },
+        ];
+
+        screen.filter = "order".to_string();
+        let names: Vec<&str> = screen
+            .visible_queues()
+            .into_iter()
+            .map(|q| q.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["orders", "ORDER_DLQ"]);
+    }
+
+    #[tokio::test]
+    async fn filter_narrows_the_exchange_list_independently_of_queues() {
+        let mut screen = screen();
+        screen.session.exchanges = vec![
+            crate::ExchangeInfo {
+                name: "orders.topic".to_string(),
+                kind: "topic".to_string(),
+            },
+            crate::ExchangeInfo {
+                name: "payments.direct".to_string(),
+                kind: "direct".to_string(),
+            },
+        ];
+
+        screen.filter = "payments".to_string();
+        let names: Vec<&str> = screen
+            .visible_exchanges()
+            .into_iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["payments.direct"]);
+    }
+
+    #[tokio::test]
+    async fn esc_clears_the_filter_and_resets_the_cursor() {
+        let mut screen = screen();
+        screen.session.queues = vec![
+            crate::QueueInfo {
+                name: "orders".to_string(),
+                messages_ready: 0,
+                messages_unacknowledged: 0,
+                consumers: 0,
+            },
+            crate::QueueInfo {
+                name: "payments".to_string(),
+                messages_ready: 0,
+                messages_unacknowledged: 0,
+                consumers: 0,
+            },
+        ];
+
+        screen.open_filter();
+        for c in "pay".chars() {
+            screen.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(screen.sidebar_len(), 1);
+        screen.sidebar_selected = 5;
+
+        screen.filter_key_event(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!screen.is_filtering());
+        assert!(screen.filter.is_empty());
+        assert_eq!(screen.sidebar_len(), 2);
+        assert_eq!(screen.sidebar_selected, 0);
     }
 
     #[test]

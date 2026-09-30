@@ -301,6 +301,15 @@ impl QueryDriver for ElasticsearchDriver {
         let client = reqwest::Client::new();
         let mut request = client.request(method, &url);
         if let Some(body) = &body {
+            // Caught locally rather than left for Elasticsearch to reject
+            // over the wire: malformed JSON never reaches the network, and
+            // `serde_json`'s own error already carries a line/column
+            // pointing at the mistake -- better than whatever error body
+            // the cluster would otherwise send back for what is, from its
+            // side, just an unparseable request.
+            if let Err(err) = serde_json::from_str::<serde_json::Value>(body) {
+                return Err(anyhow::anyhow!("invalid JSON body: {err}"));
+            }
             request = request
                 .header("Content-Type", "application/json")
                 .body(body.clone());
@@ -829,6 +838,26 @@ mod tests {
                 "POST my-index/_update/1\n{\n  \"doc\": {\n    \"customer\": {\n      \"name\": \"Ada\"\n    }\n  }\n}"
                     .to_string()
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_malformed_json_locally_without_touching_the_network() {
+        // The target host is unroutable (port 1, never a real server) --
+        // if this reached `request.send()` it would hang/fail on a
+        // connection error instead of the JSON error asserted below, so a
+        // network-shaped error here would mean the local validation was
+        // skipped, not that it's slow.
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        let err = driver
+            .execute("POST my-index/_search\n{\"query\": {\"match_all\": {}}")
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("invalid JSON body"),
+            "expected a local JSON error, got: {err}"
         );
     }
 

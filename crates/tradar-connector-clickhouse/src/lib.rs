@@ -306,6 +306,7 @@ impl QueryDriver for ClickHouseDriver {
                 // module doc comment).
                 primary_key: is_primary_key == "1",
                 foreign_key: None,
+                indexed: false,
             });
         }
         query_driver::qualify_colliding_names(&mut schema);

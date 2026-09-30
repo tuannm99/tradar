@@ -82,6 +82,13 @@ pub struct ColumnInfo {
     /// drivers) -- completion and any future ERD treat `None` as "nothing
     /// to relate", not as "not yet looked up".
     pub foreign_key: Option<ForeignKeyRef>,
+    /// Covered by an index other than the primary key, for a backend that
+    /// reports its indexes and doesn't already expose them some other way
+    /// (MongoDB today -- Postgres/SQLite/Cassandra's own index concept
+    /// isn't surfaced here at all yet, only Mongo's, since `primary_key`
+    /// already covers a SQL table's own most useful case). `false` by
+    /// default for every driver that hasn't been taught to report it.
+    pub indexed: bool,
 }
 
 impl ColumnInfo {
@@ -93,6 +100,7 @@ impl ColumnInfo {
             type_name: type_name.into(),
             primary_key: false,
             foreign_key: None,
+            indexed: false,
         }
     }
 }
@@ -232,6 +240,47 @@ fn push_statement(sql: &str, start: usize, end: usize, out: &mut Vec<Statement>)
         start: start + leading,
         end: end - trailing,
     });
+}
+
+/// The line of `sql` containing `position` (a 1-based **character**
+/// index into the exact text that was sent), plus a `^` marker under it --
+/// e.g. `LINE 2:   WHERE bad_col = 1` / `         ^`. `None` when
+/// `position` doesn't land inside `sql` at all. Lives here rather than in
+/// one connector, same reasoning as `returns_rows`: Postgres's own error
+/// protocol reports a position this way (`format_pg_error` in
+/// `tradar-connector-postgres`), and SQLite's error message conventionally
+/// quotes the offending token, which `tradar-connector-sqlite` resolves to
+/// a position of its own before calling this -- both want the identical
+/// `LINE N: ... ^` rendering, and connector crates can't depend on each
+/// other to share it.
+pub fn line_and_caret(sql: &str, position: usize) -> Option<String> {
+    let index = position.checked_sub(1)?;
+    let chars: Vec<char> = sql.chars().collect();
+    if index >= chars.len() {
+        return None;
+    }
+    let mut line_number = 1;
+    let mut line_start = 0;
+    for (i, &c) in chars.iter().enumerate().take(index) {
+        if c == '\n' {
+            line_number += 1;
+            line_start = i + 1;
+        }
+    }
+    let line_end = chars[line_start..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |n| line_start + n);
+    let line: String = chars[line_start..line_end].iter().collect();
+
+    let prefix = format!("LINE {line_number}: ");
+    let caret_offset = index - line_start;
+    let caret_line = format!(
+        "{}{}^",
+        " ".repeat(prefix.chars().count()),
+        " ".repeat(caret_offset)
+    );
+    Some(format!("{prefix}{line}\n{caret_line}"))
 }
 
 /// Whether `sql` is a statement that returns rows, and so should be run
@@ -920,7 +969,47 @@ pub fn completion_context(text_before_cursor: &str) -> CompletionContext {
                 .collect(),
         };
     }
-    CompletionContext::None
+    match mongo_collection_in_scope(&tokens) {
+        Some(table) => CompletionContext::TableColumns { table },
+        None => CompletionContext::None,
+    }
+}
+
+/// The collection named in a Mongo shell call token, e.g.
+/// `db.orders.find` -> `orders` -- `None` for anything that isn't shaped
+/// like `db.<collection>.<rest>` (including a bare `db.orders` with no
+/// second dot, which isn't a call yet).
+fn mongo_call_collection(word: &str) -> Option<&str> {
+    let rest = word.strip_prefix("db.")?;
+    let end = rest.find('.')?;
+    let collection = &rest[..end];
+    (!collection.is_empty()).then_some(collection)
+}
+
+/// The collection whose fields the cursor is completing inside a Mongo
+/// shell call's arguments -- e.g. `db.orders.find({status: "open", na`
+/// is completing a field of `orders`. Mongo has no FROM/JOIN for
+/// `resolve_alias` to scan, so this looks back for the call's own
+/// `db.<collection>.<method>` token instead, at a shallower paren depth
+/// than the cursor -- that's what marks the cursor as inside that call's
+/// `(...)` rather than, say, still typing the method name itself (which
+/// is the same depth as the call token, since the `(` hasn't been typed
+/// yet). `last.word` containing a `.` also rules that out on its own: a
+/// field name never has a dot, only the `db.x.y` chain does.
+fn mongo_collection_in_scope(tokens: &[SqlToken]) -> Option<String> {
+    let last = tokens.last()?;
+    if last.word.contains('.') {
+        return None;
+    }
+    tokens[..tokens.len() - 1]
+        .iter()
+        .rev()
+        .find_map(|t| {
+            (t.depth < last.depth)
+                .then(|| mongo_call_collection(&t.word))
+                .flatten()
+        })
+        .map(str::to_string)
 }
 
 /// Each of `columns`' declared type from `schema`'s entry named `table`,
@@ -1290,6 +1379,59 @@ pub trait QueryDriver: Send + Sync {
 mod tests {
     use super::*;
 
+    /// Where `^` landed relative to the start of the query text on the
+    /// line above it, plus that line's own text -- what actually matters,
+    /// rather than the exact width of the `LINE N: ` prefix in front of
+    /// it.
+    fn caret_position(marker: &str) -> (usize, &str) {
+        let mut lines = marker.lines();
+        let line = lines.next().unwrap();
+        let caret_line = lines.next().unwrap();
+        let caret_column = caret_line.find('^').unwrap();
+        // `line` is `LINE N: <text>` -- the first `": "` marks where
+        // `<text>` starts.
+        let text_start = line.find(": ").unwrap() + 2;
+        (caret_column - text_start, &line[text_start..])
+    }
+
+    #[test]
+    fn line_and_caret_points_at_a_one_based_position_on_a_single_line() {
+        let query = "SELECT * FRO users";
+        let position = query.find("FRO").unwrap() + 1; // 1-based index of 'F'
+
+        let marker = line_and_caret(query, position).unwrap();
+
+        let (offset, text) = caret_position(&marker);
+        assert_eq!(text, query);
+        assert_eq!(offset, query.find("FRO").unwrap());
+    }
+
+    #[test]
+    fn line_and_caret_finds_the_right_line_in_a_multi_line_query() {
+        let query = "SELECT id\nFROM usres\nWHERE id = 1";
+        // 1-based char index of the `u` in `usres` (line 2).
+        let position = query.find("usres").unwrap() + 1;
+
+        let marker = line_and_caret(query, position).unwrap();
+
+        let (offset, text) = caret_position(&marker);
+        assert_eq!(text, "FROM usres");
+        assert_eq!(offset, text.find('u').unwrap());
+        assert!(marker.starts_with("LINE 2:"), "marker was: {marker}");
+    }
+
+    #[test]
+    fn line_and_caret_is_none_past_the_end_of_the_query() {
+        assert_eq!(line_and_caret("SELECT 1", 100), None);
+    }
+
+    #[test]
+    fn line_and_caret_is_none_for_position_zero() {
+        // Postgres never actually sends 0, but the type is an unsigned
+        // int -- this is what "no position" would look like if it did.
+        assert_eq!(line_and_caret("SELECT 1", 0), None);
+    }
+
     fn texts(sql: &str) -> Vec<String> {
         split_sql_statements(sql)
             .into_iter()
@@ -1306,6 +1448,7 @@ mod tests {
                     type_name: "INTEGER".to_string(),
                     primary_key: true,
                     foreign_key: None,
+                    indexed: false,
                 },
                 ColumnInfo::new("email", "TEXT"),
             ],
@@ -1933,6 +2076,53 @@ mod tests {
             CompletionContext::None
         );
         assert_eq!(completion_context(""), CompletionContext::None);
+    }
+
+    #[test]
+    fn a_field_typed_inside_a_mongo_call_resolves_to_its_collection() {
+        assert_eq!(
+            completion_context("db.orders.find({status: \"open\", na"),
+            CompletionContext::TableColumns {
+                table: "orders".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_field_position_right_after_the_opening_brace_also_resolves() {
+        assert_eq!(
+            completion_context("db.orders.find({"),
+            CompletionContext::TableColumns {
+                table: "orders".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn typing_the_mongo_method_name_itself_is_not_scoped_to_a_collection() {
+        // Still inside the `db.orders.` chain, not yet past an opening
+        // paren -- this is completing the method name (`find`, `findOne`,
+        // ...), which isn't collection-specific, so it must fall back to
+        // the flat list rather than being scoped like a field.
+        assert_eq!(completion_context("db.orders.f"), CompletionContext::None);
+    }
+
+    #[test]
+    fn a_second_mongo_call_after_the_first_closes_resolves_to_its_own_collection() {
+        assert_eq!(
+            completion_context("db.orders.find({}); db.payments.find({na"),
+            CompletionContext::TableColumns {
+                table: "payments".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn plain_sql_nested_in_parens_is_not_mistaken_for_a_mongo_call() {
+        assert_eq!(
+            completion_context("SELECT COUNT(na"),
+            CompletionContext::None
+        );
     }
 
     #[test]

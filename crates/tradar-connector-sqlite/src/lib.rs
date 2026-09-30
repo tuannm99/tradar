@@ -83,6 +83,53 @@ impl SqliteDriver {
     }
 }
 
+/// Formats a SQLite error the same `LINE N: ... ^` shape
+/// `tradar-connector-postgres`'s `format_pg_error` produces, when there's a
+/// token in the message to point at. SQLite's own C API reports no
+/// structured position the way Postgres's protocol does --
+/// `sqlx::sqlite::SqliteError` exposes only a message and an error code,
+/// nothing a query's character offset could come from -- but a syntax
+/// error's message conventionally quotes the exact offending token as
+/// `near "X": ...` (SQLite's own long-standing wording), which is enough
+/// to recover *a* position to point at after the fact, via
+/// `near_token_marker`. Anything that doesn't match that shape (a
+/// constraint violation, "no such table", a dropped connection) falls
+/// straight through to `sqlx::Error`'s own `Display` unchanged -- there's
+/// no token to search for.
+fn format_sqlite_error(error: sqlx::Error, query: &str) -> anyhow::Error {
+    let Some(db_error) = error.as_database_error() else {
+        return error.into();
+    };
+    let message = db_error.message().to_string();
+    let Some(marker) = near_token_marker(&message, query) else {
+        return error.into();
+    };
+    anyhow::anyhow!("{message}\n{marker}")
+}
+
+/// The `LINE N: ... ^` marker for the token SQLite's message quotes as
+/// `near "X": ...`, found by the token's first occurrence in `query` --
+/// approximate (the real mistake could in principle be a later occurrence
+/// of the same token, e.g. a repeated typo), but still the closest thing
+/// to a position SQLite's own message offers. `None` when the message
+/// isn't shaped that way, or the token it names doesn't actually occur in
+/// `query` (nothing to point at either way).
+fn near_token_marker(message: &str, query: &str) -> Option<String> {
+    let after = message.strip_prefix("near \"")?;
+    let end = after.find('"')?;
+    let token = &after[..end];
+    if token.is_empty() {
+        return None;
+    }
+    let byte_index = query.find(token)?;
+    // `line_and_caret` wants a 1-based *character* index, matching
+    // Postgres's own convention -- counting chars up to the byte offset
+    // `find` returns, so multi-byte UTF-8 ahead of the token doesn't throw
+    // the caret off.
+    let char_index = query[..byte_index].chars().count() + 1;
+    query_driver::line_and_caret(query, char_index)
+}
+
 /// The body of `execute`, generic over what it runs against -- the pool
 /// directly, or a held transaction when one is open. Identical either way
 /// from here down; only `execute` itself decides which `Executor` to pass.
@@ -94,7 +141,10 @@ where
     // set would just yield zero rows and look like a SELECT that matched
     // nothing.
     if !query_driver::returns_rows(query) {
-        let result = sqlx::query(query).execute(executor).await?;
+        let result = sqlx::query(query)
+            .execute(executor)
+            .await
+            .map_err(|e| format_sqlite_error(e, query))?;
         return Ok(QueryResult::Affected {
             rows: result.rows_affected(),
         });
@@ -107,7 +157,11 @@ where
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut truncated = false;
-    while let Some(row) = stream.try_next().await? {
+    while let Some(row) = stream
+        .try_next()
+        .await
+        .map_err(|e| format_sqlite_error(e, query))?
+    {
         if columns.is_empty() {
             columns = row.columns().iter().map(|c| c.name().to_string()).collect();
         }
@@ -215,6 +269,7 @@ impl QueryDriver for SqliteDriver {
                             type_name,
                             primary_key: pk != 0,
                             foreign_key,
+                            indexed: false,
                         }
                     })
                     .collect(),
@@ -301,6 +356,78 @@ pub fn connector() -> Box<dyn Connector> {
 mod tests {
     use super::*;
     use tradar_query_workbench::query_engine::QueryOutcome;
+
+    #[test]
+    fn near_token_marker_points_at_the_quoted_token_s_position() {
+        let query = "SELECT * FRO users";
+        let message = r#"near "FRO": syntax error"#;
+
+        let marker = near_token_marker(message, query).unwrap();
+
+        assert!(marker.starts_with("LINE 1:"), "marker was: {marker}");
+        assert!(marker.contains(query), "marker was: {marker}");
+        let caret_line = marker.lines().nth(1).unwrap();
+        assert_eq!(
+            caret_line.find('^').unwrap(),
+            marker.lines().next().unwrap().find("FRO").unwrap(),
+            "caret should land under the F of FRO, marker was: {marker}"
+        );
+    }
+
+    #[test]
+    fn near_token_marker_is_none_for_a_message_with_no_quoted_token() {
+        assert_eq!(
+            near_token_marker(
+                "UNIQUE constraint failed: users.email",
+                "INSERT INTO users..."
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn near_token_marker_is_none_when_the_token_is_not_actually_in_the_query() {
+        // Defensive: shouldn't happen against a real SQLite message, but
+        // the query and message come from two different places, so there's
+        // nothing stopping them from disagreeing.
+        assert_eq!(
+            near_token_marker(r#"near "XYZ": syntax error"#, "SELECT * FROM users"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_syntax_error_gets_a_line_and_caret_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+
+        let err = driver.execute("SELECT * FRO users").await.unwrap_err();
+
+        let text = err.to_string();
+        assert!(
+            text.starts_with("near \"FRO\": syntax error"),
+            "was: {text}"
+        );
+        assert!(text.contains("LINE 1:"), "was: {text}");
+        assert!(text.contains('^'), "was: {text}");
+    }
+
+    #[tokio::test]
+    async fn an_error_with_no_quoted_token_still_reports_the_driver_s_own_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+
+        let err = driver
+            .execute("SELECT * FROM no_such_table")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("no such table"), "was: {err}");
+    }
 
     #[test]
     fn crud_snippet_delegates_to_the_shared_sql_builder() {

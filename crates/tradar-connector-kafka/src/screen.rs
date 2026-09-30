@@ -68,6 +68,13 @@ pub struct KafkaScreen {
     paused_at_len: Option<usize>,
     compose: Option<ComposeState>,
     pending: Option<KeyPress>,
+    /// A case-insensitive substring narrowing the topic sidebar -- same
+    /// idiom as `NavigatorComponent::filter`. Kept even while
+    /// `filter_input` is closed so the title can still say what's applied
+    /// and a fresh `/` prefills it rather than starting over.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
 }
 
 impl KafkaScreen {
@@ -83,14 +90,60 @@ impl KafkaScreen {
             paused_at_len: None,
             compose: None,
             pending: None,
+            filter: String::new(),
+            filter_input: None,
         }
     }
 
-    fn selected_topic(&self) -> Option<String> {
+    /// `session.topics` narrowed by `filter`, when one's applied -- same
+    /// idiom as `NavigatorComponent::visible_rows`.
+    fn visible_topics(&self) -> Vec<&crate::TopicInfo> {
+        if self.filter.is_empty() {
+            return self.session.topics.iter().collect();
+        }
+        let needle = self.filter.to_lowercase();
         self.session
             .topics
+            .iter()
+            .filter(|t| t.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    fn selected_topic(&self) -> Option<String> {
+        self.visible_topics()
             .get(self.sidebar_selected)
             .map(|t| t.name.clone())
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied.
+    fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys. `Esc` cancels -- clears
+    /// the bar *and* whatever was applied. `Enter` keeps the filter and
+    /// closes the bar. Anything else is text editing, applied live.
+    fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+                self.sidebar_selected = 0;
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+                self.sidebar_selected = 0;
+            }
+        }
     }
 
     fn tail_selected(&mut self, from_beginning: bool) {
@@ -169,9 +222,14 @@ impl KafkaScreen {
     }
 
     fn draw_sidebar(&mut self, frame: &mut Frame, area: Rect) {
+        let (area, filter_bar_area) = if self.filter_input.is_some() {
+            let (list_area, bar) = ui::split_bottom_bar(area, 1);
+            (list_area, Some(bar))
+        } else {
+            (area, None)
+        };
+
         self.sidebar_visible_height = area.height.saturating_sub(2) as usize;
-        let len = self.session.topics.len();
-        self.sidebar_selected = self.sidebar_selected.min(len.saturating_sub(1));
 
         if let Some(error) = &self.session.error {
             let paragraph = Paragraph::new(error.as_str())
@@ -182,9 +240,11 @@ impl KafkaScreen {
             return;
         }
 
-        let items: Vec<ListItem> = self
-            .session
-            .topics
+        let visible = self.visible_topics();
+        let len = visible.len();
+        self.sidebar_selected = self.sidebar_selected.min(len.saturating_sub(1));
+
+        let items: Vec<ListItem> = visible
             .iter()
             .map(|t| {
                 let tailing = self.session.tailing_topic.as_deref() == Some(t.name.as_str());
@@ -206,10 +266,21 @@ impl KafkaScreen {
         if len > 0 {
             state.select(Some(self.sidebar_selected));
         }
+        let title = if self.filter.is_empty() {
+            "Topics".to_string()
+        } else {
+            format!("Topics — filter: {}", self.filter)
+        };
         let list = List::new(items)
-            .block(ui::panel("Topics", true))
+            .block(ui::panel(&title, true))
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, area, &mut state);
+
+        if let (Some(bar_area), Some(input)) = (filter_bar_area, &self.filter_input) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme().accent))];
+            spans.extend(input.spans(true));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
     }
 
     fn draw_main(&mut self, frame: &mut Frame, area: Rect) {
@@ -317,6 +388,10 @@ impl Component for KafkaScreen {
         if self.compose.is_some() {
             return self.handle_compose_key(code, modifiers);
         }
+        if self.is_filtering() {
+            self.filter_key_event(code, modifiers);
+            return None;
+        }
 
         let key = KeyPress::new(code, modifiers);
         let resolution =
@@ -330,7 +405,7 @@ impl Component for KafkaScreen {
             vim_list::apply(
                 mv,
                 &mut selected,
-                self.session.topics.len(),
+                self.visible_topics().len(),
                 self.sidebar_visible_height,
             );
             self.sidebar_selected = selected;
@@ -342,6 +417,7 @@ impl Component for KafkaScreen {
             Command::KafkaTailEarliest => self.tail_selected(true),
             Command::KafkaPauseFollow => self.toggle_pause(),
             Command::KafkaPublish => self.open_compose(),
+            Command::Search => self.open_filter(),
             Command::Help => return Some(Action::ShowHelp),
             Command::Back => return Some(Action::BackToPicker),
             _ => {}
@@ -379,6 +455,7 @@ impl Component for KafkaScreen {
         hints.extend(ui::hint(Context::Kafka, Command::KafkaTailLatest, "tail"));
         hints.extend(ui::hint(Context::Kafka, Command::KafkaPauseFollow, "pause"));
         hints.extend(ui::hint(Context::Kafka, Command::KafkaPublish, "publish"));
+        hints.extend(ui::hint(Context::Kafka, Command::Search, "filter"));
         hints.extend(ui::hint(Context::Kafka, Command::Back, "back"));
         hints
     }
@@ -438,5 +515,80 @@ mod tests {
         assert_eq!(compose.field, ComposeField::Key);
         compose.toggle_field();
         assert_eq!(compose.field, ComposeField::Value);
+    }
+
+    #[tokio::test]
+    async fn filter_narrows_visible_topics_case_insensitively() {
+        let mut screen = screen();
+        screen.session.topics = vec![
+            crate::TopicInfo {
+                name: "orders".to_string(),
+                partitions: 3,
+            },
+            crate::TopicInfo {
+                name: "payments".to_string(),
+                partitions: 1,
+            },
+            crate::TopicInfo {
+                name: "ORDER_EVENTS".to_string(),
+                partitions: 2,
+            },
+        ];
+
+        screen.filter = "order".to_string();
+        let names: Vec<&str> = screen
+            .visible_topics()
+            .into_iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["orders", "ORDER_EVENTS"]);
+    }
+
+    #[tokio::test]
+    async fn esc_clears_the_filter_and_resets_the_cursor() {
+        let mut screen = screen();
+        screen.session.topics = vec![
+            crate::TopicInfo {
+                name: "orders".to_string(),
+                partitions: 3,
+            },
+            crate::TopicInfo {
+                name: "payments".to_string(),
+                partitions: 1,
+            },
+        ];
+
+        screen.open_filter();
+        assert!(screen.is_filtering());
+        for c in "pay".chars() {
+            screen.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(screen.filter, "pay");
+        assert_eq!(screen.visible_topics().len(), 1);
+        screen.sidebar_selected = 5;
+
+        screen.filter_key_event(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!screen.is_filtering());
+        assert!(screen.filter.is_empty());
+        assert_eq!(screen.visible_topics().len(), 2);
+        assert_eq!(screen.sidebar_selected, 0);
+    }
+
+    #[tokio::test]
+    async fn enter_keeps_the_filter_applied_and_closes_the_bar() {
+        let mut screen = screen();
+        screen.session.topics = vec![crate::TopicInfo {
+            name: "orders".to_string(),
+            partitions: 3,
+        }];
+
+        screen.open_filter();
+        for c in "ord".chars() {
+            screen.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        screen.filter_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(!screen.is_filtering());
+        assert_eq!(screen.filter, "ord");
     }
 }
