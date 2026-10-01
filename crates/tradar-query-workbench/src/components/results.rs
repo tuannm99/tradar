@@ -509,8 +509,16 @@ impl ResultsComponent {
     /// unsorted, or straight to ascending when switching to a different
     /// column. Client-side over whatever's already loaded (`filter` does
     /// the same), not a query sent back to the database -- see
-    /// `visible_and_sorted_rows`.
+    /// `visible_and_sorted_rows`. A no-op in the raw JSON view of a
+    /// `Documents` result (`columns()` is already empty there, same check
+    /// `selected_cell` relies on) -- without this, pressing the sort key
+    /// looked like it did nothing (the JSON branch of `compute_visible_items`
+    /// never reads `self.sort`), only for the sort to "surprise-apply" once
+    /// the view was later toggled to the flattened table.
     pub fn sort_by_column(&mut self, index: usize) {
+        if self.columns().is_empty() {
+            return;
+        }
         self.version += 1;
         self.sort = match self.sort {
             Some((current, SortDirection::Asc)) if current == index => {
@@ -2521,6 +2529,44 @@ mod tests {
             Some((1, SortDirection::Asc)),
             "switching columns must not carry over the old direction"
         );
+    }
+
+    #[test]
+    fn sort_by_column_is_a_no_op_in_the_raw_json_view_of_a_documents_result() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Documents(vec![
+            serde_json::json!({"name": "Lin"}),
+            serde_json::json!({"name": "Ada"}),
+        ]));
+        // The default view for a fresh `Documents` result -- no columns to
+        // sort by, same check `selected_cell`/`columns()` already rely on.
+        assert!(results.columns().is_empty());
+
+        results.sort_by_column(0);
+
+        assert_eq!(
+            results.sort, None,
+            "pressing sort in JSON view must not silently arm a sort that \
+             only shows up after switching to table view"
+        );
+    }
+
+    #[test]
+    fn sort_by_column_works_once_a_documents_result_is_toggled_to_table_view() {
+        let mut results = ResultsComponent::new();
+        results.set_result(QueryResult::Documents(vec![
+            serde_json::json!({"name": "Lin"}),
+            serde_json::json!({"name": "Ada"}),
+        ]));
+        results.toggle_document_view();
+        assert!(
+            !results.columns().is_empty(),
+            "now has a flattened column list"
+        );
+
+        results.sort_by_column(0);
+
+        assert_eq!(results.sort, Some((0, SortDirection::Asc)));
     }
 
     #[test]

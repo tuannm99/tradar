@@ -50,6 +50,19 @@ impl ParsedQuery {
     }
 }
 
+/// Whether `line` begins a new shell statement -- a `db.<collection>...`
+/// call or one of the two shell helpers `execute` special-cases (`use`,
+/// `show dbs`/`show databases`) -- versus continuing the call above it
+/// (a line that's part of a multi-line JSON argument). Mirrors
+/// `tradar-connector-elasticsearch`'s `starts_request`; see
+/// `split_statements`.
+fn starts_mongo_statement(line: &str) -> bool {
+    line.starts_with("db.")
+        || line.starts_with("use ")
+        || line == "show dbs"
+        || line == "show databases"
+}
+
 fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
     let query = query.trim();
     let rest = query.strip_prefix("db.").ok_or_else(|| {
@@ -331,22 +344,37 @@ impl QueryDriver for MongoDriver {
         ]
     }
 
-    /// One `db.<collection>.<method>(...)` per line: the parser accepts a
-    /// single call, so a line is exactly a statement.
+    /// A `db.<collection>.<method>(...)` call, or a `use`/`show dbs`
+    /// shell helper -- same idiom as `tradar-connector-elasticsearch`'s
+    /// `starts_request`, which this mirrors so a call written across
+    /// several lines for readability (the normal mongosh/Compass style,
+    /// e.g. `db.orders.find({\n  status: "open"\n})`) merges into one
+    /// statement instead of each of its lines becoming its own (each
+    /// independently invalid, since none of them alone is a complete
+    /// call) the way a flat one-statement-per-line split used to treat
+    /// it.
     fn split_statements(&self, text: &str) -> Vec<Statement> {
-        let mut statements = Vec::new();
+        let mut statements: Vec<Statement> = Vec::new();
         let mut offset = 0;
         for line in text.split_inclusive('\n') {
             let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                let start = offset + (line.len() - line.trim_start().len());
-                statements.push(Statement {
-                    text: trimmed.to_string(),
-                    start,
-                    end: start + trimmed.len(),
-                });
-            }
+            let line_start = offset + (line.len() - line.trim_start().len());
             offset += line.len();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match (starts_mongo_statement(trimmed), statements.last_mut()) {
+                (false, Some(current)) => {
+                    // Continuation of the call above: extend it to here.
+                    current.end = line_start + trimmed.len();
+                    current.text = text[current.start..current.end].trim_end().to_string();
+                }
+                _ => statements.push(Statement {
+                    text: trimmed.to_string(),
+                    start: line_start,
+                    end: line_start + trimmed.len(),
+                }),
+            }
         }
         statements
     }
@@ -628,7 +656,7 @@ impl QueryDriver for MongoDriver {
                 let insert_fields = query_driver::pick_columns(columns, &all_fields, &all_fields);
                 format!(
                     "db.{collection}.insertOne({})",
-                    object_literal(&insert_fields)
+                    nested_insert_literal(&insert_fields, &value_for)
                 )
             }
             tradar_core::action::CrudOp::Update => {
@@ -668,6 +696,106 @@ fn mongo_field_key(field: &str) -> String {
         field.to_string()
     } else {
         format!("\"{}\"", field.replace('"', "\\\""))
+    }
+}
+
+/// One level of the tree `nested_insert_literal` groups dotted field paths
+/// into -- a leaf holds the *full* original field path (what `value_for`
+/// needs to pick the right placeholder), a group holds its children in
+/// first-seen order.
+enum InsertField {
+    Leaf(String),
+    Group(Vec<(String, InsertField)>),
+}
+
+/// Inserts `field` (one of `nested_insert_literal`'s fields, e.g.
+/// `"address.city"`) into the tree being built, splitting on `.` one
+/// level at a time and descending into (or creating) the group for each
+/// segment but the last. `remaining` shrinks on each recursive call;
+/// `original` stays the full path, for the leaf to carry at the bottom.
+fn insert_field_path(roots: &mut Vec<(String, InsertField)>, remaining: &str, original: &str) {
+    match remaining.split_once('.') {
+        None => roots.push((
+            remaining.to_string(),
+            InsertField::Leaf(original.to_string()),
+        )),
+        Some((head, rest)) => {
+            if let Some((_, InsertField::Group(children))) =
+                roots.iter_mut().find(|(key, _)| key == head)
+            {
+                insert_field_path(children, rest, original);
+                return;
+            }
+            let mut children = Vec::new();
+            insert_field_path(&mut children, rest, original);
+            roots.push((head.to_string(), InsertField::Group(children)));
+        }
+    }
+}
+
+/// A nested JS object literal for `insertOne`'s document, merging dotted
+/// field paths that share a prefix (`address.city`, `address.zip`) into
+/// one real nested object -- `{address: {city: <value>, zip: <value>}}`,
+/// not a single flat field literally named `"address.city"`. Unlike
+/// `object_literal` (used by Update/Delete, where Mongo itself reads a
+/// dotted key in `$set`/a filter as a path expression, so quoting it flat
+/// there is already correct), `insertOne` has no such convention: a dotted
+/// key in the document it inserts is just a field name with a literal dot
+/// in it, not a path -- exactly the mismatch the navigator's own dotted
+/// names (from `flatten_document` sampling a real nested document) would
+/// otherwise reproduce as a wrong Create snippet.
+fn nested_insert_literal(fields: &[&str], value_for: &dyn Fn(&str) -> String) -> String {
+    let mut roots: Vec<(String, InsertField)> = Vec::new();
+    for &field in fields {
+        insert_field_path(&mut roots, field, field);
+    }
+    render_insert_group(&roots, value_for, 1)
+}
+
+fn render_insert_node(
+    node: &InsertField,
+    value_for: &dyn Fn(&str) -> String,
+    indent: usize,
+) -> String {
+    match node {
+        InsertField::Leaf(field) => value_for(field),
+        InsertField::Group(children) => render_insert_group(children, value_for, indent),
+    }
+}
+
+/// Same one-per-line-once-there's-more-than-one shape `object_literal`
+/// uses, except a multi-field group's closing `}` lands one level
+/// shallower than its own body, and a nested group recurses with one more
+/// level of indent -- `indent` counts 2-space units from the outermost
+/// `{`.
+fn render_insert_group(
+    children: &[(String, InsertField)],
+    value_for: &dyn Fn(&str) -> String,
+    indent: usize,
+) -> String {
+    match children {
+        [] => "{}".to_string(),
+        [(key, node)] => format!(
+            "{{{}: {}}}",
+            mongo_field_key(key),
+            render_insert_node(node, value_for, indent)
+        ),
+        children => {
+            let pad = "  ".repeat(indent);
+            let closing_pad = "  ".repeat(indent - 1);
+            let body = children
+                .iter()
+                .map(|(key, node)| {
+                    format!(
+                        "{pad}{}: {}",
+                        mongo_field_key(key),
+                        render_insert_node(node, value_for, indent + 1)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",\n");
+            format!("{{\n{body}\n{closing_pad}}}")
+        }
     }
 }
 
@@ -1085,6 +1213,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn split_statements_treats_a_multi_line_call_as_one_statement() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements = driver.split_statements("db.orders.find({\n  status: \"open\"\n})");
+
+        assert_eq!(statements.len(), 1, "statements were: {statements:?}");
+        assert_eq!(
+            statements[0].text,
+            "db.orders.find({\n  status: \"open\"\n})"
+        );
+    }
+
+    #[test]
+    fn split_statements_still_splits_two_separate_single_line_calls() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements = driver.split_statements("db.orders.find({})\ndb.users.find({})");
+
+        assert_eq!(statements.len(), 2, "statements were: {statements:?}");
+        assert_eq!(statements[0].text, "db.orders.find({})");
+        assert_eq!(statements[1].text, "db.users.find({})");
+    }
+
+    #[test]
+    fn split_statements_keeps_a_multi_line_call_separate_from_the_next_one() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements =
+            driver.split_statements("db.orders.find({\n  status: \"open\"\n})\ndb.users.find({})");
+
+        assert_eq!(statements.len(), 2, "statements were: {statements:?}");
+        assert_eq!(
+            statements[0].text,
+            "db.orders.find({\n  status: \"open\"\n})"
+        );
+        assert_eq!(statements[1].text, "db.users.find({})");
+    }
+
+    #[test]
+    fn split_statements_recognizes_use_and_show_dbs_as_their_own_statements() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements = driver.split_statements("use reporting\nshow dbs");
+
+        assert_eq!(statements.len(), 2, "statements were: {statements:?}");
+        assert_eq!(statements[0].text, "use reporting");
+        assert_eq!(statements[1].text, "show dbs");
+    }
+
+    #[tokio::test]
+    async fn a_multi_line_find_call_actually_executes_correctly() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada", "status": "open"})"#)
+            .await
+            .unwrap();
+
+        let statements = driver.split_statements("db.users.find({\n  \"status\": \"open\"\n})");
+        assert_eq!(statements.len(), 1);
+        let result = driver.execute(&statements[0].text).await.unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => assert_eq!(docs.len(), 1),
+            other => panic!("expected Documents, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn crud_snippet_covers_all_four_ops() {
         let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
         let entry = SchemaInfo::new("users");
@@ -1147,6 +1346,89 @@ mod tests {
                 &["name".to_string()]
             ),
             Some("db.users.insertOne({name: <value>})".to_string())
+        );
+    }
+
+    fn orders_with_a_nested_address() -> SchemaInfo {
+        let mut id = ColumnInfo::new("_id", "ObjectId");
+        id.primary_key = true;
+        SchemaInfo {
+            name: "orders".to_string(),
+            columns: vec![
+                id,
+                ColumnInfo::new("address.city", "String"),
+                ColumnInfo::new("address.zip", "String"),
+            ],
+            kind: None,
+            ttl: None,
+            schema: None,
+            object_kind: None,
+        }
+    }
+
+    #[test]
+    fn crud_snippet_create_nests_dotted_fields_into_a_real_object_instead_of_a_flat_key() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let snippet = driver
+            .crud_snippet(
+                &orders_with_a_nested_address(),
+                tradar_core::action::CrudOp::Create,
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(
+            snippet,
+            "db.orders.insertOne({\n  _id: ObjectId(\"<id>\"),\n  address: {\n    city: <value>,\n    zip: <value>\n  }\n})"
+        );
+        // Never a literal key with a dot in it -- that's the bug this
+        // guards against.
+        assert!(!snippet.contains("\"address.city\""));
+        assert!(!snippet.contains("\"address.zip\""));
+    }
+
+    #[test]
+    fn crud_snippet_create_with_only_one_nested_field_selected_stays_a_single_line() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &orders_with_a_nested_address(),
+                tradar_core::action::CrudOp::Create,
+                &["address.city".to_string()]
+            ),
+            Some("db.orders.insertOne({address: {city: <value>}})".to_string())
+        );
+    }
+
+    #[test]
+    fn crud_snippet_update_and_delete_still_quote_a_dotted_field_flat() {
+        // Unlike Create, Update's `$set` and Delete's filter are read by
+        // Mongo as path expressions, so the flat quoted form
+        // (`object_literal`, unchanged) is already correct there -- this
+        // guards against `nested_insert_literal`'s fix ever leaking into
+        // these two by mistake.
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        assert_eq!(
+            driver.crud_snippet(
+                &orders_with_a_nested_address(),
+                tradar_core::action::CrudOp::Update,
+                &["address.city".to_string()]
+            ),
+            Some(
+                "db.orders.updateOne({_id: ObjectId(\"<id>\")}, {$set: {\"address.city\": <value>}})"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            driver.crud_snippet(
+                &orders_with_a_nested_address(),
+                tradar_core::action::CrudOp::Delete,
+                &["address.city".to_string()]
+            ),
+            Some("db.orders.deleteOne({\"address.city\": <value>})".to_string())
         );
     }
 

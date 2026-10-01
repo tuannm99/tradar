@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use tradar_app::components::RootComponent;
+use tradar_app::components::connection_form::target_hint;
 use tradar_connector_spi::{Connector, Session};
 use tradar_core::action::{Action, Component};
 use tradar_core::config;
@@ -411,11 +412,18 @@ fn spawn_connect(
                 });
             }
             Err(e) => {
-                let _ = connect_tx.send(ConnectOutcome::Failed {
-                    error: e.to_string(),
-                    epoch,
-                    tab,
-                });
+                // The driver's own error rarely says what a *valid*
+                // target looks like (a `sqlx`/`mongodb` error is about
+                // what went wrong talking to the server, not about
+                // syntax) -- appended here rather than guessed at by the
+                // driver itself, since the example strings are connection
+                // form UI knowledge, not something a connector crate
+                // should know about its own callers.
+                let error = match target_hint(&connection.driver) {
+                    Some(hint) => format!("{e}\nexpected target format: {hint}"),
+                    None => e.to_string(),
+                };
+                let _ = connect_tx.send(ConnectOutcome::Failed { error, epoch, tab });
             }
         }
     });

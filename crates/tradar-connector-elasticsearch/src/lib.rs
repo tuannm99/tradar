@@ -46,6 +46,30 @@ fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
     Some((method, path, body))
 }
 
+/// `Ok` when `body` is valid either as one JSON value, or as NDJSON -- one
+/// JSON value per non-blank line, no separating commas -- the shape
+/// `_bulk` and `_msearch` require instead of a single document. Checked as
+/// a whole first (the common case, and what gives the clean single-value
+/// parse error when it's actually meant to be one object); only re-checked
+/// line by line if that fails, so an ordinary malformed single-object body
+/// still reports the same error it always did rather than a confusing
+/// per-line one.
+fn validate_json_body(body: &str) -> Result<(), String> {
+    if serde_json::from_str::<serde_json::Value>(body).is_ok() {
+        return Ok(());
+    }
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Err(err) = serde_json::from_str::<serde_json::Value>(line) {
+            return Err(format!("invalid JSON body: {err}"));
+        }
+    }
+    Ok(())
+}
+
 /// Escapes a string for safe interpolation inside a *single-quoted* shell
 /// argument, using the standard close-quote / escaped-literal-quote /
 /// reopen-quote technique: every `'` becomes `'\''`. Nothing else is special
@@ -82,6 +106,40 @@ fn unwrap_search_hits(json: &serde_json::Value) -> Option<Vec<serde_json::Value>
             })
             .collect(),
     )
+}
+
+/// Turns a raw HTTP response (status + body text) into `execute()`'s
+/// result -- pulled out of `execute` itself so the status-handling logic
+/// is testable without a real cluster, the same reasoning `parse_query`/
+/// `unwrap_search_hits` are already free functions for. A non-2xx status
+/// (a malformed query, a missing index, bad auth, ...) used to come back
+/// as `Ok(QueryResult::Documents)` the same as a real result -- the error
+/// body just showed up in the results pane looking like data, since only
+/// a transport-level failure (`request.send()`, in the caller) ever
+/// surfaced as an actual error. ES's own error body (`{"error": {"type",
+/// "reason", ...}}`) is the useful part, so it's shown pretty-printed
+/// rather than discarded in favor of just the status code.
+fn handle_response(status: reqwest::StatusCode, text: String) -> anyhow::Result<QueryResult> {
+    // Most Elasticsearch APIs return JSON, but the `_cat` family (e.g.
+    // `GET _cat/indices?v`) returns `text/plain` unless `format=json` is
+    // passed -- fall back to wrapping the body as a JSON string rather
+    // than erroring on a decode failure.
+    let json = serde_json::from_str::<serde_json::Value>(&text)
+        .unwrap_or_else(|_| serde_json::Value::String(text.clone()));
+    if !status.is_success() {
+        let detail = serde_json::to_string_pretty(&json).unwrap_or(text);
+        anyhow::bail!("elasticsearch returned {status}\n{detail}");
+    }
+    // A `_search`-shaped response (`hits.hits` present, however many --
+    // zero included) unwraps into one row per hit, same as a Mongo
+    // `find()` returning one row per document; anything else (`_count`,
+    // `_cat`, `_cluster/health`, a single `_doc` fetch) stays exactly as
+    // it always has, the whole response as one `Documents` entry, since
+    // there's no per-row structure to unwrap.
+    match unwrap_search_hits(&json) {
+        Some(docs) => Ok(QueryResult::Documents(docs)),
+        None => Ok(QueryResult::Documents(vec![json])),
+    }
 }
 
 /// Infers a JSON value for a value as it's displayed in the grid or typed
@@ -306,31 +364,26 @@ impl QueryDriver for ElasticsearchDriver {
             // `serde_json`'s own error already carries a line/column
             // pointing at the mistake -- better than whatever error body
             // the cluster would otherwise send back for what is, from its
-            // side, just an unparseable request.
-            if let Err(err) = serde_json::from_str::<serde_json::Value>(body) {
-                return Err(anyhow::anyhow!("invalid JSON body: {err}"));
+            // side, just an unparseable request. Also accepts NDJSON (one
+            // JSON value per line, no commas between them) -- `_bulk` and
+            // `_msearch` require exactly that shape, so a body that isn't
+            // one JSON value as a whole is still checked line by line
+            // before being rejected outright.
+            if let Err(err) = validate_json_body(body) {
+                return Err(anyhow::anyhow!(err));
             }
             request = request
                 .header("Content-Type", "application/json")
                 .body(body.clone());
         }
         let response = request.send().await?;
+        let status = response.status();
         // Most Elasticsearch APIs return JSON, but the `_cat` family (e.g.
         // `GET _cat/indices?v`) returns `text/plain` unless `format=json` is
         // passed. Read the body as text first and fall back to wrapping it
         // as a JSON string rather than erroring on a decode failure.
         let text = response.text().await?;
-        let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-        // A `_search`-shaped response (`hits.hits` present, however many --
-        // zero included) unwraps into one row per hit, same as a Mongo
-        // `find()` returning one row per document; anything else (`_count`,
-        // `_cat`, `_cluster/health`, an error body, a single `_doc` fetch)
-        // stays exactly as it always has, the whole response as one
-        // `Documents` entry, since there's no per-row structure to unwrap.
-        match unwrap_search_hits(&json) {
-            Some(docs) => Ok(QueryResult::Documents(docs)),
-            None => Ok(QueryResult::Documents(vec![json])),
-        }
+        handle_response(status, text)
     }
 
     /// The single, named index a plain `_search` reads from -- conservative
@@ -596,6 +649,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_success_status_still_wraps_the_body_as_documents() {
+        let result = handle_response(
+            reqwest::StatusCode::OK,
+            r#"{"status": "green"}"#.to_string(),
+        )
+        .unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => {
+                assert_eq!(docs, vec![serde_json::json!({"status": "green"})]);
+            }
+            other => panic!("expected Documents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_success_status_is_an_error_not_a_result() {
+        let body = r#"{"error": {"type": "index_not_found_exception", "reason": "no such index [orders]"}, "status": 404}"#;
+
+        let err = handle_response(reqwest::StatusCode::NOT_FOUND, body.to_string()).unwrap_err();
+
+        let text = err.to_string();
+        assert!(text.contains("404"), "was: {text}");
+        assert!(text.contains("index_not_found_exception"), "was: {text}");
+        assert!(text.contains("no such index [orders]"), "was: {text}");
+    }
+
+    #[test]
+    fn a_non_success_status_with_a_non_json_body_still_reports_it() {
+        let err = handle_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "upstream connect error".to_string(),
+        )
+        .unwrap_err();
+
+        let text = err.to_string();
+        assert!(text.contains("500"), "was: {text}");
+        assert!(text.contains("upstream connect error"), "was: {text}");
+    }
+
+    #[test]
+    fn a_success_status_with_the_cat_family_s_plain_text_body_still_works() {
+        let result = handle_response(
+            reqwest::StatusCode::OK,
+            "health status index\ngreen  open   my-index".to_string(),
+        )
+        .unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => {
+                assert_eq!(docs.len(), 1);
+                assert!(docs[0].is_string());
+            }
+            other => panic!("expected Documents, got {other:?}"),
+        }
+    }
+
     fn my_index_with_fields() -> SchemaInfo {
         SchemaInfo {
             name: "my-index".to_string(),
@@ -838,6 +949,56 @@ mod tests {
                 "POST my-index/_update/1\n{\n  \"doc\": {\n    \"customer\": {\n      \"name\": \"Ada\"\n    }\n  }\n}"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn validate_json_body_accepts_a_single_json_object() {
+        assert_eq!(
+            validate_json_body(r#"{"query": {"match_all": {}}}"#),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_json_body_accepts_ndjson_for_bulk_and_msearch() {
+        let bulk = "{\"index\": {\"_index\": \"my-index\"}}\n{\"field\": \"value\"}";
+        assert_eq!(validate_json_body(bulk), Ok(()));
+    }
+
+    #[test]
+    fn validate_json_body_accepts_ndjson_with_blank_lines_between_entries() {
+        let bulk = "{\"index\": {}}\n\n{\"field\": \"value\"}\n";
+        assert_eq!(validate_json_body(bulk), Ok(()));
+    }
+
+    #[test]
+    fn validate_json_body_rejects_a_malformed_single_object() {
+        assert!(validate_json_body(r#"{"query": {"match_all": {}}"#).is_err());
+    }
+
+    #[test]
+    fn validate_json_body_rejects_ndjson_with_one_bad_line() {
+        let bulk = "{\"index\": {}}\n{not json}";
+        assert!(validate_json_body(bulk).is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_accepts_an_ndjson_bulk_body_rather_than_rejecting_it_as_invalid_json() {
+        // Same unroutable-host trick as the test below: if this reached
+        // `request.send()` it's proof the NDJSON body passed local
+        // validation (a connection-refused/timeout error here, not
+        // "invalid JSON body").
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        let err = driver
+            .execute("POST _bulk\n{\"index\": {\"_index\": \"my-index\"}}\n{\"field\": \"value\"}")
+            .await
+            .unwrap_err();
+
+        assert!(
+            !err.to_string().contains("invalid JSON body"),
+            "a valid NDJSON bulk body must not be rejected as malformed JSON, got: {err}"
         );
     }
 

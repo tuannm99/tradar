@@ -182,6 +182,24 @@ impl CompletionSource {
                 });
                 matches.into_iter().map(|(_, c)| c).collect()
             }
+            query_driver::CompletionContext::MongoMethod => {
+                // Narrowed, not just re-ranked: a collection or field name
+                // is never a legal completion here, so there's no reason
+                // to show one and bump the method name you're actually
+                // typing further down the list.
+                let mut matches: Vec<Candidate> = self
+                    .candidates
+                    .iter()
+                    .filter(|c| {
+                        c.kind == CandidateKind::Keyword
+                            && c.text_lower.starts_with(&needle)
+                            && c.text_lower != needle
+                    })
+                    .cloned()
+                    .collect();
+                matches.sort_by(|a, b| a.text_lower.cmp(&b.text_lower));
+                matches
+            }
             query_driver::CompletionContext::None => self.matches(prefix),
         }
     }
@@ -586,6 +604,46 @@ mod tests {
         assert_eq!(
             source_with_fk().matches_in_context("u", &query_driver::CompletionContext::None),
             source_with_fk().matches("u")
+        );
+    }
+
+    /// A Mongo-shaped vocabulary, deliberately picked so an unscoped
+    /// `matches("f")` would rank a field/collection ahead of the method
+    /// name you're actually typing -- `MongoMethod` exists to fix exactly
+    /// that.
+    fn mongo_source() -> CompletionSource {
+        CompletionSource::new(
+            &["find", "findOne", "aggregate"],
+            &[SchemaInfo {
+                name: "foo_collection".to_string(),
+                columns: vec![ColumnInfo::new("favorite_color", "String")],
+                kind: None,
+                ttl: None,
+                schema: None,
+                object_kind: None,
+            }],
+        )
+    }
+
+    #[test]
+    fn mongo_method_context_offers_only_methods_even_though_a_field_and_collection_also_match() {
+        let matches =
+            mongo_source().matches_in_context("f", &query_driver::CompletionContext::MongoMethod);
+
+        let names: Vec<&str> = matches.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(names, vec!["find", "findOne"]);
+        assert!(
+            matches.iter().all(|c| c.kind == CandidateKind::Keyword),
+            "a collection or field name is never legal here"
+        );
+    }
+
+    #[test]
+    fn mongo_method_context_is_empty_when_nothing_starts_with_the_prefix() {
+        assert!(
+            mongo_source()
+                .matches_in_context("zzz", &query_driver::CompletionContext::MongoMethod)
+                .is_empty()
         );
     }
 }

@@ -1568,6 +1568,48 @@ mod tests {
         );
     }
 
+    /// Investigated as a suspected bug (typing a SQL doubled-quote escape
+    /// like `'O''Brien'` was thought to leave a stray auto-inserted quote
+    /// behind, since the second `'` of the escape pair doesn't land next
+    /// to an auto-closer the way the first one does -- it opens a *new*
+    /// auto-close pair instead of skipping over anything). Verified empty:
+    /// quotes are self-pairing, so that new pair's own closer just gets
+    /// pushed ahead of every character typed after it and is then
+    /// consumed by the literal's real closing `'` via the ordinary
+    /// skip-over check -- the exact keystrokes typed always end up as the
+    /// exact final text, with no stray or missing character, for any
+    /// number of escaped quotes in the literal.
+    #[test]
+    fn typing_a_sql_doubled_quote_escape_produces_the_exact_text_typed() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        type_str(&mut editor, "'O''Brien'");
+
+        assert_eq!(editor.text(), "'O''Brien'");
+        assert_eq!(editor.cursor_col, 10);
+    }
+
+    #[test]
+    fn typing_two_separate_doubled_quote_escapes_in_one_literal_also_works() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        type_str(&mut editor, "'O''Brien''s house'");
+
+        assert_eq!(editor.text(), "'O''Brien''s house'");
+    }
+
+    #[test]
+    fn typing_a_doubled_quote_escape_right_at_the_start_of_the_literal_also_works() {
+        let mut editor = QueryEditorComponent::new();
+        editor.forward_key(key(KeyCode::Char('i')));
+
+        type_str(&mut editor, "'''a'");
+
+        assert_eq!(editor.text(), "'''a'");
+    }
+
     #[test]
     fn a_closing_bracket_typed_where_nothing_matches_still_inserts_literally() {
         let mut editor = QueryEditorComponent::new();
