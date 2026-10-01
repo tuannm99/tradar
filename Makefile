@@ -1,9 +1,9 @@
-DOCKER_SERVICES := postgres redis mongo elasticsearch5 elasticsearch7 elasticsearch8 clickhouse cassandra rabbitmq kafka
+DOCKER_SERVICES := postgres mysql redis mongo elasticsearch5 elasticsearch7 elasticsearch8 clickhouse cassandra rabbitmq kafka
 
 .PHONY: help build build-slim run fmt fmt-check clippy check \
 	test test-unit test-docker \
 	test-core test-connector-spi test-workbench test-app \
-	test-sqlite test-socket test-postgres test-redis test-mongo test-elasticsearch test-clickhouse test-http \
+	test-sqlite test-socket test-postgres test-mysql test-redis test-mongo test-elasticsearch test-clickhouse test-http \
 	up down ps
 
 CARGO := cargo
@@ -41,6 +41,7 @@ test: ## Run every test in the workspace (needs Docker for postgres/redis/mongo/
 test-unit: ## Tests that never touch Docker or need Kafka's native toolchain (cmake/gcc/libcurl-dev): core, connector-spi, query-workbench, sqlite, socket, app
 	$(CARGO) test --workspace \
 		--exclude tradar-connector-postgres \
+		--exclude tradar-connector-mysql \
 		--exclude tradar-connector-redis \
 		--exclude tradar-connector-mongo \
 		--exclude tradar-connector-elasticsearch \
@@ -55,9 +56,9 @@ test-unit: ## Tests that never touch Docker or need Kafka's native toolchain (cm
 	# as a default-feature dependency even though the crate itself is
 	# excluded above; see the feature flags in crates/tradar-app/Cargo.toml.
 	$(CARGO) test -p tradar-app --no-default-features \
-		--features postgres,sqlite,mongo,elasticsearch,redis,cassandra,clickhouse,rabbitmq,http,socket
+		--features postgres,mysql,sqlite,mongo,elasticsearch,redis,cassandra,clickhouse,rabbitmq,http,socket
 
-test-docker: test-postgres test-redis test-mongo test-elasticsearch test-cassandra test-clickhouse test-rabbitmq test-kafka test-http ## Every connector whose tests need a Docker daemon (testcontainers)
+test-docker: test-postgres test-mysql test-redis test-mongo test-elasticsearch test-cassandra test-clickhouse test-rabbitmq test-kafka test-http ## Every connector whose tests need a Docker daemon (testcontainers)
 
 test-core: ## tradar-core only (keymap, storage, theme, config, ui, vim_list)
 	$(CARGO) test -p tradar-core --lib
@@ -79,6 +80,9 @@ test-socket: ## tradar-connector-socket only (real local TcpListener, no Docker)
 
 test-postgres: ## tradar-connector-postgres only -- needs Docker (testcontainers)
 	$(CARGO) test -p tradar-connector-postgres --lib
+
+test-mysql: ## tradar-connector-mysql only -- needs Docker (testcontainers-modules)
+	$(CARGO) test -p tradar-connector-mysql --lib
 
 test-redis: ## tradar-connector-redis only -- needs Docker (testcontainers)
 	$(CARGO) test -p tradar-connector-redis --lib

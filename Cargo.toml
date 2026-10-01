@@ -5,6 +5,7 @@ members = [
   "crates/tradar-connector-spi",
   "crates/tradar-query-workbench",
   "crates/tradar-connector-postgres",
+  "crates/tradar-connector-mysql",
   "crates/tradar-connector-sqlite",
   "crates/tradar-connector-elasticsearch",
   "crates/tradar-connector-redis",

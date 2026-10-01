@@ -22,6 +22,29 @@ services:
       retries: 10
 
   # ============================================================
+  # MySQL
+  # ============================================================
+
+  mysql:
+    image: mysql:9
+    container_name: tui-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+      MYSQL_DATABASE: mydb
+      MYSQL_ROOT_PASSWORD: password
+    ports:
+      - '3306:3306'
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-u', 'user', '-ppassword']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ============================================================
 
   # Redis
   # ============================================================
@@ -202,6 +225,7 @@ services:
 
 volumes:
   postgres_data:
+  mysql_data:
   redis_data:
   mongo_data:
 
