@@ -119,3 +119,13 @@ cargo test    # test
 cargo clippy  # lint
 cargo fmt     # format
 ```
+
+Mặc định `cargo build` dựng đủ cả 11 connector. Chỉ cần một vài loại (vd chỉ Mongo + Elasticsearch, không muốn kéo `rdkafka` — cần `cmake`/`gcc`/`libcurl-dev` để build `librdkafka` — hay `scylla`/`sqlx` vào máy)? Mỗi connector là một Cargo feature cùng tên connector id (`postgres`, `sqlite`, `mongo`, `elasticsearch`, `redis`, `cassandra`, `clickhouse`, `rabbitmq`, `kafka`, `http`, `socket`):
+
+```bash
+cargo build -p tradar-app --no-default-features --features mongo,elasticsearch
+# hoặc
+make build-slim FEATURES=mongo,elasticsearch
+```
+
+Connection picker tự đồng bộ — form "driver" chỉ liệt kê đúng connector đã compile vào.

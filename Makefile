@@ -1,6 +1,6 @@
 DOCKER_SERVICES := postgres redis mongo elasticsearch5 elasticsearch7 elasticsearch8 clickhouse cassandra rabbitmq kafka
 
-.PHONY: help build run fmt fmt-check clippy check \
+.PHONY: help build build-slim run fmt fmt-check clippy check \
 	test test-unit test-docker \
 	test-core test-connector-spi test-workbench test-app \
 	test-sqlite test-socket test-postgres test-redis test-mongo test-elasticsearch test-clickhouse test-http \
@@ -15,8 +15,11 @@ help: ## List available targets
 	@printf "  %-20s %s\n" "down-<service>" "Stop and remove one docker-compose service, e.g. \`make down-postgres\`"
 	@printf "  %-20s %s\n" "" "  -> $(DOCKER_SERVICES)"
 
-build: ## cargo build --workspace
+build: ## cargo build --workspace (every connector feature enabled, the default)
 	$(CARGO) build --workspace
+
+build-slim: ## Build `tradar` with only the connectors in FEATURES, e.g. `make build-slim FEATURES=mongo,elasticsearch` -- skips every other connector's own dependencies entirely (no rdkafka/scylla/sqlx pulled in for a build that doesn't need them)
+	$(CARGO) build -p tradar-app --no-default-features --features $(FEATURES)
 
 run: ## cargo run (tradar binary)
 	$(CARGO) run
@@ -35,7 +38,7 @@ check: fmt-check clippy test-unit ## Fast pre-commit gate: fmt + clippy + tests 
 test: ## Run every test in the workspace (needs Docker for postgres/redis/mongo/elasticsearch)
 	$(CARGO) test --workspace
 
-test-unit: ## Tests that never touch Docker: core, connector-spi, query-workbench, sqlite, socket, app
+test-unit: ## Tests that never touch Docker or need Kafka's native toolchain (cmake/gcc/libcurl-dev): core, connector-spi, query-workbench, sqlite, socket, app
 	$(CARGO) test --workspace \
 		--exclude tradar-connector-postgres \
 		--exclude tradar-connector-redis \
@@ -45,7 +48,14 @@ test-unit: ## Tests that never touch Docker: core, connector-spi, query-workbenc
 		--exclude tradar-connector-clickhouse \
 		--exclude tradar-connector-rabbitmq \
 		--exclude tradar-connector-kafka \
-		--exclude tradar-connector-http
+		--exclude tradar-connector-http \
+		--exclude tradar-app
+	# tradar-app on its own, built without the `kafka` feature -- otherwise
+	# it'd still pull in `tradar-connector-kafka` (and so `rdkafka`/cmake)
+	# as a default-feature dependency even though the crate itself is
+	# excluded above; see the feature flags in crates/tradar-app/Cargo.toml.
+	$(CARGO) test -p tradar-app --no-default-features \
+		--features postgres,sqlite,mongo,elasticsearch,redis,cassandra,clickhouse,rabbitmq,http,socket
 
 test-docker: test-postgres test-redis test-mongo test-elasticsearch test-cassandra test-clickhouse test-rabbitmq test-kafka test-http ## Every connector whose tests need a Docker daemon (testcontainers)
 

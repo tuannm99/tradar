@@ -29,24 +29,45 @@ use tradar_core::storage::{
     default_connections_path, default_session_path,
 };
 
-/// Every connector compiled into this binary. Adding a connector means
-/// adding a dependency line in `Cargo.toml` and a line here -- nothing else
-/// in the workspace needs to change (see "Registry" in
-/// docs/architecture.md).
+/// Every connector compiled into this binary -- which ones that is depends
+/// on which Cargo features were enabled at build time (`default = full`
+/// means every one of these `#[cfg]`s is on unless someone explicitly
+/// trims the set with `--no-default-features --features ...`). Adding a
+/// connector means adding an optional dependency line + matching feature
+/// in `Cargo.toml` and a `#[cfg(feature = "...")]` line here -- nothing
+/// else in the workspace needs to change (see "Registry" in
+/// docs/architecture.md). Feature names match `ConnectorDescriptor::id`
+/// on purpose, so `--features mongo,elasticsearch` reads the same as the
+/// driver ids already shown in the connection picker.
+// `vec![]` can't express a conditionally-included element, so this is a
+// `Vec::new()` + `push`es on purpose -- clippy's `vec_init_then_push`
+// doesn't see the `#[cfg]`s and would otherwise suggest collapsing it
+// back into a literal that can't compile under a trimmed feature set.
+#[allow(clippy::vec_init_then_push)]
 fn registry() -> HashMap<String, Box<dyn Connector>> {
-    let connectors: Vec<Box<dyn Connector>> = vec![
-        tradar_connector_postgres::connector(),
-        tradar_connector_sqlite::connector(),
-        tradar_connector_elasticsearch::connector(),
-        tradar_connector_redis::connector(),
-        tradar_connector_mongo::connector(),
-        tradar_connector_cassandra::connector(),
-        tradar_connector_clickhouse::connector(),
-        tradar_connector_rabbitmq::connector(),
-        tradar_connector_kafka::connector(),
-        tradar_connector_http::connector(),
-        tradar_connector_socket::connector(),
-    ];
+    let mut connectors: Vec<Box<dyn Connector>> = Vec::new();
+    #[cfg(feature = "postgres")]
+    connectors.push(tradar_connector_postgres::connector());
+    #[cfg(feature = "sqlite")]
+    connectors.push(tradar_connector_sqlite::connector());
+    #[cfg(feature = "elasticsearch")]
+    connectors.push(tradar_connector_elasticsearch::connector());
+    #[cfg(feature = "redis")]
+    connectors.push(tradar_connector_redis::connector());
+    #[cfg(feature = "mongo")]
+    connectors.push(tradar_connector_mongo::connector());
+    #[cfg(feature = "cassandra")]
+    connectors.push(tradar_connector_cassandra::connector());
+    #[cfg(feature = "clickhouse")]
+    connectors.push(tradar_connector_clickhouse::connector());
+    #[cfg(feature = "rabbitmq")]
+    connectors.push(tradar_connector_rabbitmq::connector());
+    #[cfg(feature = "kafka")]
+    connectors.push(tradar_connector_kafka::connector());
+    #[cfg(feature = "http")]
+    connectors.push(tradar_connector_http::connector());
+    #[cfg(feature = "socket")]
+    connectors.push(tradar_connector_socket::connector());
     connectors
         .into_iter()
         .map(|c| (c.descriptor().id.to_string(), c))

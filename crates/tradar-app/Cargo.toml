@@ -11,17 +11,17 @@ path = "src/main.rs"
 tradar-core = { path = "../tradar-core" }
 tradar-connector-spi = { path = "../tradar-connector-spi" }
 tradar-query-workbench = { path = "../tradar-query-workbench" }
-tradar-connector-postgres = { path = "../tradar-connector-postgres" }
-tradar-connector-sqlite = { path = "../tradar-connector-sqlite" }
-tradar-connector-elasticsearch = { path = "../tradar-connector-elasticsearch" }
-tradar-connector-redis = { path = "../tradar-connector-redis" }
-tradar-connector-mongo = { path = "../tradar-connector-mongo" }
-tradar-connector-cassandra = { path = "../tradar-connector-cassandra" }
-tradar-connector-clickhouse = { path = "../tradar-connector-clickhouse" }
-tradar-connector-rabbitmq = { path = "../tradar-connector-rabbitmq" }
-tradar-connector-kafka = { path = "../tradar-connector-kafka" }
-tradar-connector-http = { path = "../tradar-connector-http" }
-tradar-connector-socket = { path = "../tradar-connector-socket" }
+tradar-connector-postgres = { path = "../tradar-connector-postgres", optional = true }
+tradar-connector-sqlite = { path = "../tradar-connector-sqlite", optional = true }
+tradar-connector-elasticsearch = { path = "../tradar-connector-elasticsearch", optional = true }
+tradar-connector-redis = { path = "../tradar-connector-redis", optional = true }
+tradar-connector-mongo = { path = "../tradar-connector-mongo", optional = true }
+tradar-connector-cassandra = { path = "../tradar-connector-cassandra", optional = true }
+tradar-connector-clickhouse = { path = "../tradar-connector-clickhouse", optional = true }
+tradar-connector-rabbitmq = { path = "../tradar-connector-rabbitmq", optional = true }
+tradar-connector-kafka = { path = "../tradar-connector-kafka", optional = true }
+tradar-connector-http = { path = "../tradar-connector-http", optional = true }
+tradar-connector-socket = { path = "../tradar-connector-socket", optional = true }
 
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.30"
@@ -37,3 +37,40 @@ tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+
+# One feature per connector, named after its own `ConnectorDescriptor::id`
+# so `--features mongo,elasticsearch` reads the same as the driver ids
+# already shown in the connection picker -- see "Registry" in
+# docs/architecture.md. `default = ["full"]` keeps a plain `cargo build`/
+# `cargo run` identical to before this existed (every connector compiled
+# in); picking a narrower set (e.g. `--no-default-features --features
+# mongo,elasticsearch`) skips the unused connectors' own dependencies
+# entirely -- `kafka` is the one most worth skipping on a machine without
+# `cmake`/`gcc`/`libcurl-dev`, since `rdkafka-sys` needs all three to
+# build `librdkafka` from vendored source.
+[features]
+default = ["full"]
+full = [
+  "postgres",
+  "sqlite",
+  "mongo",
+  "elasticsearch",
+  "redis",
+  "cassandra",
+  "clickhouse",
+  "rabbitmq",
+  "kafka",
+  "http",
+  "socket",
+]
+postgres = ["dep:tradar-connector-postgres"]
+sqlite = ["dep:tradar-connector-sqlite"]
+mongo = ["dep:tradar-connector-mongo"]
+elasticsearch = ["dep:tradar-connector-elasticsearch"]
+redis = ["dep:tradar-connector-redis"]
+cassandra = ["dep:tradar-connector-cassandra"]
+clickhouse = ["dep:tradar-connector-clickhouse"]
+rabbitmq = ["dep:tradar-connector-rabbitmq"]
+kafka = ["dep:tradar-connector-kafka"]
+http = ["dep:tradar-connector-http"]
+socket = ["dep:tradar-connector-socket"]
