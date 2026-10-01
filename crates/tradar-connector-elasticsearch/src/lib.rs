@@ -84,6 +84,40 @@ fn unwrap_search_hits(json: &serde_json::Value) -> Option<Vec<serde_json::Value>
     )
 }
 
+/// Turns a raw HTTP response (status + body text) into `execute()`'s
+/// result -- pulled out of `execute` itself so the status-handling logic
+/// is testable without a real cluster, the same reasoning `parse_query`/
+/// `unwrap_search_hits` are already free functions for. A non-2xx status
+/// (a malformed query, a missing index, bad auth, ...) used to come back
+/// as `Ok(QueryResult::Documents)` the same as a real result -- the error
+/// body just showed up in the results pane looking like data, since only
+/// a transport-level failure (`request.send()`, in the caller) ever
+/// surfaced as an actual error. ES's own error body (`{"error": {"type",
+/// "reason", ...}}`) is the useful part, so it's shown pretty-printed
+/// rather than discarded in favor of just the status code.
+fn handle_response(status: reqwest::StatusCode, text: String) -> anyhow::Result<QueryResult> {
+    // Most Elasticsearch APIs return JSON, but the `_cat` family (e.g.
+    // `GET _cat/indices?v`) returns `text/plain` unless `format=json` is
+    // passed -- fall back to wrapping the body as a JSON string rather
+    // than erroring on a decode failure.
+    let json = serde_json::from_str::<serde_json::Value>(&text)
+        .unwrap_or_else(|_| serde_json::Value::String(text.clone()));
+    if !status.is_success() {
+        let detail = serde_json::to_string_pretty(&json).unwrap_or(text);
+        anyhow::bail!("elasticsearch returned {status}\n{detail}");
+    }
+    // A `_search`-shaped response (`hits.hits` present, however many --
+    // zero included) unwraps into one row per hit, same as a Mongo
+    // `find()` returning one row per document; anything else (`_count`,
+    // `_cat`, `_cluster/health`, a single `_doc` fetch) stays exactly as
+    // it always has, the whole response as one `Documents` entry, since
+    // there's no per-row structure to unwrap.
+    match unwrap_search_hits(&json) {
+        Some(docs) => Ok(QueryResult::Documents(docs)),
+        None => Ok(QueryResult::Documents(vec![json])),
+    }
+}
+
 /// Infers a JSON value for a value as it's displayed in the grid or typed
 /// into the row-edit prompt: text that parses as JSON (a number,
 /// `true`/`false`, `null`, or a typed-out array/object literal) is used as
@@ -315,22 +349,13 @@ impl QueryDriver for ElasticsearchDriver {
                 .body(body.clone());
         }
         let response = request.send().await?;
+        let status = response.status();
         // Most Elasticsearch APIs return JSON, but the `_cat` family (e.g.
         // `GET _cat/indices?v`) returns `text/plain` unless `format=json` is
         // passed. Read the body as text first and fall back to wrapping it
         // as a JSON string rather than erroring on a decode failure.
         let text = response.text().await?;
-        let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-        // A `_search`-shaped response (`hits.hits` present, however many --
-        // zero included) unwraps into one row per hit, same as a Mongo
-        // `find()` returning one row per document; anything else (`_count`,
-        // `_cat`, `_cluster/health`, an error body, a single `_doc` fetch)
-        // stays exactly as it always has, the whole response as one
-        // `Documents` entry, since there's no per-row structure to unwrap.
-        match unwrap_search_hits(&json) {
-            Some(docs) => Ok(QueryResult::Documents(docs)),
-            None => Ok(QueryResult::Documents(vec![json])),
-        }
+        handle_response(status, text)
     }
 
     /// The single, named index a plain `_search` reads from -- conservative
@@ -594,6 +619,64 @@ mod tests {
             driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete, &[]),
             Some("DELETE my-index/_doc/<id>".to_string())
         );
+    }
+
+    #[test]
+    fn a_success_status_still_wraps_the_body_as_documents() {
+        let result = handle_response(
+            reqwest::StatusCode::OK,
+            r#"{"status": "green"}"#.to_string(),
+        )
+        .unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => {
+                assert_eq!(docs, vec![serde_json::json!({"status": "green"})]);
+            }
+            other => panic!("expected Documents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_success_status_is_an_error_not_a_result() {
+        let body = r#"{"error": {"type": "index_not_found_exception", "reason": "no such index [orders]"}, "status": 404}"#;
+
+        let err = handle_response(reqwest::StatusCode::NOT_FOUND, body.to_string()).unwrap_err();
+
+        let text = err.to_string();
+        assert!(text.contains("404"), "was: {text}");
+        assert!(text.contains("index_not_found_exception"), "was: {text}");
+        assert!(text.contains("no such index [orders]"), "was: {text}");
+    }
+
+    #[test]
+    fn a_non_success_status_with_a_non_json_body_still_reports_it() {
+        let err = handle_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "upstream connect error".to_string(),
+        )
+        .unwrap_err();
+
+        let text = err.to_string();
+        assert!(text.contains("500"), "was: {text}");
+        assert!(text.contains("upstream connect error"), "was: {text}");
+    }
+
+    #[test]
+    fn a_success_status_with_the_cat_family_s_plain_text_body_still_works() {
+        let result = handle_response(
+            reqwest::StatusCode::OK,
+            "health status index\ngreen  open   my-index".to_string(),
+        )
+        .unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => {
+                assert_eq!(docs.len(), 1);
+                assert!(docs[0].is_string());
+            }
+            other => panic!("expected Documents, got {other:?}"),
+        }
     }
 
     fn my_index_with_fields() -> SchemaInfo {

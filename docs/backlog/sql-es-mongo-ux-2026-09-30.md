@@ -56,8 +56,31 @@ Cập nhật test cũ `typing_the_mongo_method_name_itself_is_not_scoped_to_a_co
 
 Cộng test cho gap #5: `cargo test -p tradar-query-workbench` sau khi thêm → 556/556 pass. `cargo build`/`clippy --all-targets -D warnings`/`make test-unit`/`cargo fmt --check` toàn workspace (kafka-disable trick) lại một lần nữa: sạch.
 
+### 6. Elasticsearch: response không phải 2xx giờ là lỗi thật, không phải "kết quả" (2026-10-01)
+
+Rà sâu hơn một lượt nữa (agent audit riêng), phát hiện bug nghiêm trọng hơn cả UX: `execute()` chưa bao giờ kiểm tra `response.status()` — một request sai (index không tồn tại, mapping lỗi, parse exception, sai quyền...) vẫn trả `Ok(QueryResult::Documents(...))` với chính body lỗi của Elasticsearch, hiện trong bảng kết quả y hệt một kết quả thật. Chỉ lỗi tầng network thật (connection refused, timeout) mới từng hiện đúng như lỗi. Ngược hẳn kỳ vọng bình thường: trường hợp hay gặp (server từ chối query) trông như thành công, trường hợp hiếm (mất mạng) mới trông như lỗi.
+
+Tách phần xử lý response (từ sau khi có status + body text) thành hàm thuần `handle_response()` — test được mà không cần cluster thật, cùng tinh thần `parse_query`/`unwrap_search_hits` đã là free function từ trước. `!status.is_success()` giờ trả `Err` kèm status code + body lỗi pretty-print (phần `error.reason` của Elasticsearch là thông tin hữu ích nhất, không nên bỏ qua chỉ lấy status code).
+
+4 test mới, toàn bộ không cần Docker: status OK vẫn wrap bình thường, status lỗi với body JSON (`index_not_found_exception`) → `Err` chứa đủ status/type/reason, status lỗi với body không phải JSON (vd lỗi reverse-proxy) vẫn báo được, response `_cat`-family (plain text, status OK) vẫn hoạt động như cũ.
+
+### 7. Results grid: sort không còn "âm thầm" áp dụng trễ trong JSON view (2026-10-01)
+
+Cùng đợt audit: `ResultsComponent::sort_by_column()` (`crates/tradar-query-workbench/src/components/results.rs`) luôn ghi `self.sort` bất kể đang xem gì, nhưng `compute_visible_items()`'s nhánh JSON (view mặc định cho kết quả `Documents` của Mongo/Elasticsearch) không bao giờ đọc `self.sort` — bấm `s` trông như không làm gì, rồi khi chuyển sang xem dạng bảng (`Command::ToggleResultView`) mới thấy nó đã tự sort theo cột nào đó từ trước mà không hề chủ ý.
+
+Thêm guard đầu hàm: `if self.columns().is_empty() { return; }` — tái dùng đúng điều kiện `selected_cell()`/`columns()` đã dùng để biết "đang ở view không có cột" (JSON view của Documents). Table và Documents-xem-dạng-bảng không đổi hành vi gì (cả hai đều có cột thật).
+
+2 test mới: sort trong JSON view là no-op (`self.sort` vẫn `None` sau khi bấm), sort hoạt động bình thường ngay khi vừa toggle sang table view.
+
+## Test (gap #6, #7)
+
+- `cargo test -p tradar-connector-elasticsearch`: 34 test, 30 pass (26 cũ + 4 mới), 7 fail Docker-integration sẵn có (không đổi so với trước).
+- `cargo test -p tradar-query-workbench`: 558/558 pass (556 cũ + 2 mới).
+- `cargo clippy -p tradar-connector-elasticsearch -p tradar-query-workbench --all-targets -- -D warnings`: sạch.
+
 ## Chưa làm
 
 - **Gap #5 đã làm (2026-10-01)** — xem mục 5 ở trên. Ranking của Elasticsearch (endpoint/method cũng là "keyword") chưa đụng tới: ES không có cú pháp `db.x.y` để nhận diện như Mongo, và console của nó gõ `METHOD /path` ở đầu dòng chứ không lẫn vào giữa field/index — rủi ro bị field che mất thấp hơn hẳn, không có bằng chứng cụ thể cần sửa.
 - Postgres/SQLite/Cassandra/ClickHouse không có `ColumnInfo::indexed` thật — field mới chỉ Mongo dùng, các driver khác luôn `false` (không phải bug, chỉ là scope hẹp theo đúng gap đã chọn).
 - `near_token_marker` không xử lý được trường hợp token trích dẫn xuất hiện nhiều lần trong câu lệnh mà lỗi thật nằm ở lần xuất hiện sau — lấy lần đầu tiên, chấp nhận như một giới hạn đã biết (ghi rõ trong doc comment).
+- **Chưa làm, đang hỏi lại phạm vi**: auto-close dấu `'` trong SQL editor không hỗ trợ gõ literal có escape kiểu `'O''Brien'` một cách tự nhiên (gõ `'` thứ hai sau khi đã skip-over lần đầu sẽ mở một cặp `''` mới thay vì chèn literal) — phát hiện trong cùng đợt audit, nhưng sửa đúng cách cần đụng vào logic auto-close/skip-over dùng chung cho mọi bracket/quote trong `query_editor.rs`, rủi ro regression cao hơn 3 gap đã làm, nên để hỏi `AskUserQuestion` riêng trước khi code.
