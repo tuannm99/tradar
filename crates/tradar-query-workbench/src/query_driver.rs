@@ -864,6 +864,14 @@ pub enum CompletionContext {
     /// are the tables already named in FROM/earlier JOINs, so a caller
     /// with FK data can rank a related table first.
     JoinTarget { known_tables: Vec<String> },
+    /// Cursor is typing the method segment of a Mongo shell call --
+    /// `db.orders.f` -- not yet past the opening `(` that would make it a
+    /// field position (see `mongo_collection_in_scope`). The only legal
+    /// completions here are method names (`find`, `aggregate`, ...),
+    /// never a collection or field -- unlike every other context, which
+    /// only *re-ranks* `matches`' flat list, this one narrows it to
+    /// `CandidateKind::Keyword` alone.
+    MongoMethod,
 }
 
 /// A table named in a FROM/JOIN clause, and the alias it was given (if
@@ -943,6 +951,13 @@ pub fn completion_context(text_before_cursor: &str) -> CompletionContext {
         return CompletionContext::None;
     };
     if let Some(dot) = last.word.find('.') {
+        // Mongo's own `db.<collection>.<method>` shape, still being typed
+        // past the second dot -- checked before the SQL alias path below,
+        // since `alias` there would just be the literal `"db"`, which
+        // never resolves against a FROM/JOIN anyway.
+        if mongo_call_collection(&last.word).is_some() {
+            return CompletionContext::MongoMethod;
+        }
         let alias = &last.word[..dot];
         return match (!alias.is_empty()).then(|| resolve_alias(&tokens, alias)) {
             Some(Some(table)) => CompletionContext::TableColumns { table },
@@ -2102,9 +2117,30 @@ mod tests {
     fn typing_the_mongo_method_name_itself_is_not_scoped_to_a_collection() {
         // Still inside the `db.orders.` chain, not yet past an opening
         // paren -- this is completing the method name (`find`, `findOne`,
-        // ...), which isn't collection-specific, so it must fall back to
-        // the flat list rather than being scoped like a field.
-        assert_eq!(completion_context("db.orders.f"), CompletionContext::None);
+        // ...), which isn't collection-specific, so it gets its own
+        // context rather than being scoped like a field.
+        assert_eq!(
+            completion_context("db.orders.f"),
+            CompletionContext::MongoMethod
+        );
+    }
+
+    #[test]
+    fn a_bare_db_dot_with_nothing_typed_yet_is_also_the_method_context() {
+        assert_eq!(
+            completion_context("db.orders."),
+            CompletionContext::MongoMethod
+        );
+    }
+
+    #[test]
+    fn typing_the_collection_name_itself_is_not_the_method_context() {
+        // Only one dot so far -- `resolve_alias` finds nothing for `db`
+        // (no FROM/JOIN exists for Mongo text), same as always; collection
+        // names are already ranked correctly in the flat list (they're
+        // `CandidateKind::Table`), so this intentionally stays `None`
+        // rather than being narrowed to methods.
+        assert_eq!(completion_context("db.ord"), CompletionContext::None);
     }
 
     #[test]

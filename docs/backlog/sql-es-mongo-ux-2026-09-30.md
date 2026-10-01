@@ -36,6 +36,14 @@ SQLite không có khái niệm "vị trí lỗi" trong C API của nó (`sqlx::s
 
 5 test mới: 3 test thuần cho `near_token_marker` (match đúng, message không có token trích dẫn, token không thật sự có trong query), 2 test tích hợp chạy thật (SQLite file tạm, không cần Docker) — một lỗi cú pháp thật có marker, một lỗi "no such table" (không có token trích dẫn) vẫn hiện message gốc.
 
+### 5. MongoDB: completion không còn giấu tên method đằng sau field/collection trùng tiền tố (2026-10-01)
+
+Gap bỏ qua ở lượt đầu, quay lại làm sau khi người dùng tiếp tục chọn "rà UX sâu hơn". `CompletionSource::matches()` (`crates/tradar-query-workbench/src/components/completion.rs`) rank cố định Table(0) > Column(1) > Keyword(2) — hợp lý cho SQL (tên bảng/cột không đoán được, keyword SQL thì ít và quen thuộc), nhưng sai cho Mongo: "keyword" của Mongo chính là tên method (`find`, `aggregate`, ...), nên gõ `db.orders.f` mà có field/collection nào trùng tiền tố `f` thì nó che mất `find`/`findOne` lên trên.
+
+Thêm biến thể `CompletionContext::MongoMethod` mới: `completion_context()` nhận diện cú pháp `db.<collection>.<method-đang-gõ>` (tái dùng `mongo_call_collection` đã có từ gap #1, chỉ cần kiểm tra token khớp dạng đó — không cần biết tên collection thật sự là gì ở bước này) và trả về context này thay vì rơi vào `None` như trước. `matches_in_context()` xử lý context mới bằng cách **lọc hẳn** chỉ còn `CandidateKind::Keyword` — không chỉ rank lại, vì field/collection không bao giờ hợp lệ ở đúng vị trí đó (khác `TableColumns`/`JoinTarget`, vốn chỉ rank lại trên cùng một flat list).
+
+Cập nhật test cũ `typing_the_mongo_method_name_itself_is_not_scoped_to_a_collection` (trước assert `None`, giờ assert `MongoMethod`), thêm 2 test context-detection mới (`db.orders.` trống cũng là method context; `db.ord` — mới 1 dấu chấm, chưa đủ để phân biệt — vẫn `None` như cũ vì collection name tự nó đã rank đúng là Table) và 2 test ranking trong `completion.rs` (field/collection trùng tiền tố với method bị lọc hẳn, không chỉ xếp sau; prefix không khớp gì thì trả rỗng).
+
 ## Test
 
 - `cargo test -p tradar-connector-sqlite`: 27/27 pass (không cần Docker — SQLite file-based).
@@ -46,8 +54,10 @@ SQLite không có khái niệm "vị trí lỗi" trong C API của nó (`sqlx::s
 - `cargo build --workspace --exclude tradar-connector-kafka`, `cargo clippy --all-targets --workspace --exclude tradar-connector-kafka -- -D warnings`, `make test-unit` (kafka-disable trick, khôi phục qua `cp` không dùng `git checkout`): sạch, 552+159+27+... pass toàn bộ không lỗi.
 - `cargo fmt --check`: sạch.
 
+Cộng test cho gap #5: `cargo test -p tradar-query-workbench` sau khi thêm → 556/556 pass. `cargo build`/`clippy --all-targets -D warnings`/`make test-unit`/`cargo fmt --check` toàn workspace (kafka-disable trick) lại một lần nữa: sạch.
+
 ## Chưa làm
 
-- Gap #5 (ranking của completion candidate ưu tiên Table/Column trước Keyword — không hợp lý cho Mongo/ES nơi "keyword" chính là tên method/endpoint) — người dùng không chọn làm trong lượt này, confidence thấp nhất trong 5 phát hiện ban đầu.
+- **Gap #5 đã làm (2026-10-01)** — xem mục 5 ở trên. Ranking của Elasticsearch (endpoint/method cũng là "keyword") chưa đụng tới: ES không có cú pháp `db.x.y` để nhận diện như Mongo, và console của nó gõ `METHOD /path` ở đầu dòng chứ không lẫn vào giữa field/index — rủi ro bị field che mất thấp hơn hẳn, không có bằng chứng cụ thể cần sửa.
 - Postgres/SQLite/Cassandra/ClickHouse không có `ColumnInfo::indexed` thật — field mới chỉ Mongo dùng, các driver khác luôn `false` (không phải bug, chỉ là scope hẹp theo đúng gap đã chọn).
 - `near_token_marker` không xử lý được trường hợp token trích dẫn xuất hiện nhiều lần trong câu lệnh mà lỗi thật nằm ở lần xuất hiện sau — lấy lần đầu tiên, chấp nhận như một giới hạn đã biết (ghi rõ trong doc comment).
