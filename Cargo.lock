@@ -4997,6 +4997,7 @@ dependencies = [
  "tradar-connector-clickhouse",
  "tradar-connector-elasticsearch",
  "tradar-connector-http",
+ "tradar-connector-kafka",
  "tradar-connector-mongo",
  "tradar-connector-postgres",
  "tradar-connector-rabbitmq",
