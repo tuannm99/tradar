@@ -1,8 +1,11 @@
-//! `KafkaScreen`: the bespoke `Component` a `KafkaSession` builds. One
-//! mode -- Topics -- with a live-tailing message table (auto-scrolling
-//! unless paused) plus a compose overlay for publishing. See "Thiết kế
-//! UI: Kafka và RabbitMQ" in docs/architecture.md; Groups mode (consumer
-//! lag) is deferred, see `docs/roadmap.md`.
+//! `KafkaScreen`: the bespoke `Component` a `KafkaSession` builds. Two
+//! modes toggled by `Command::KafkaToggleMode` -- Topics (live-tailing
+//! message table, auto-scrolling unless paused, plus a compose overlay for
+//! publishing) and Groups (per-partition consumer lag for a selected
+//! group) -- mirroring the `RabbitScreen`'s Queues/Exchanges toggle. See
+//! "Thiết kế UI: Kafka và RabbitMQ" in docs/architecture.md and
+//! `docs/backlog/kafka-groups-mode-2026-10-01.md` for the design Groups
+//! mode implements.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
@@ -19,6 +22,12 @@ use tradar_core::ui::{self, TextInput};
 use tradar_core::vim_list;
 
 use crate::KafkaSession;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KafkaMode {
+    Topics,
+    Groups,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComposeField {
@@ -60,18 +69,27 @@ pub struct KafkaScreen {
     session: KafkaSession,
     #[allow(dead_code)]
     action_tx: tokio::sync::mpsc::UnboundedSender<Action>,
+    mode: KafkaMode,
     sidebar_selected: usize,
     sidebar_visible_height: usize,
     /// `Some(n)` freezes the message view to the first `n` buffered
     /// messages -- `KafkaSession` keeps receiving and buffering regardless
     /// (see `docs/architecture.md`), only the *drawn* view stops advancing.
     paused_at_len: Option<usize>,
+    /// The group whose lag `draw_lag` shows -- `None` until one's opened in
+    /// Groups mode, same role as Rabbit's `selected_queue`/
+    /// `selected_exchange`. The lag data itself lives on `session.group_lag`
+    /// (populated asynchronously), not here.
+    selected_group: Option<String>,
     compose: Option<ComposeState>,
     pending: Option<KeyPress>,
-    /// A case-insensitive substring narrowing the topic sidebar -- same
-    /// idiom as `NavigatorComponent::filter`. Kept even while
-    /// `filter_input` is closed so the title can still say what's applied
-    /// and a fresh `/` prefills it rather than starting over.
+    /// A case-insensitive substring narrowing the sidebar (topics or
+    /// groups, whichever mode is active) -- same idiom as
+    /// `NavigatorComponent::filter`. Kept even while `filter_input` is
+    /// closed so the title can still say what's applied and a fresh `/`
+    /// prefills it rather than starting over. Reset on `toggle_mode`, same
+    /// as `sidebar_selected` -- a filter typed for topic names wouldn't
+    /// mean anything against group names.
     filter: String,
     /// `Some` while the filter bar has the keys -- see `open_filter`.
     filter_input: Option<TextInput>,
@@ -85,9 +103,11 @@ impl KafkaScreen {
         Self {
             session,
             action_tx,
+            mode: KafkaMode::Topics,
             sidebar_selected: 0,
             sidebar_visible_height: 0,
             paused_at_len: None,
+            selected_group: None,
             compose: None,
             pending: None,
             filter: String::new(),
@@ -109,10 +129,84 @@ impl KafkaScreen {
             .collect()
     }
 
+    /// `session.groups` narrowed by `filter`, when one's applied -- same
+    /// idiom as `visible_topics`.
+    fn visible_groups(&self) -> Vec<&crate::ConsumerGroupInfo> {
+        if self.filter.is_empty() {
+            return self.session.groups.iter().collect();
+        }
+        let needle = self.filter.to_lowercase();
+        self.session
+            .groups
+            .iter()
+            .filter(|g| g.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    fn sidebar_len(&self) -> usize {
+        match self.mode {
+            KafkaMode::Topics => self.visible_topics().len(),
+            KafkaMode::Groups => self.visible_groups().len(),
+        }
+    }
+
     fn selected_topic(&self) -> Option<String> {
         self.visible_topics()
             .get(self.sidebar_selected)
             .map(|t| t.name.clone())
+    }
+
+    fn selected_group_name(&self) -> Option<String> {
+        self.visible_groups()
+            .get(self.sidebar_selected)
+            .map(|g| g.name.clone())
+    }
+
+    /// Switches Topics<->Groups, resetting sidebar position and filter --
+    /// neither would mean anything carried over to the other mode's
+    /// entirely different name space. Unlike `RabbitScreen::toggle_mode`,
+    /// doesn't need to eagerly re-fetch: `KafkaSession::new` already lists
+    /// both topics and groups upfront, mirroring `RabbitSession::new`
+    /// fetching both queues and exchanges upfront.
+    fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            KafkaMode::Topics => KafkaMode::Groups,
+            KafkaMode::Groups => KafkaMode::Topics,
+        };
+        self.sidebar_selected = 0;
+        self.filter.clear();
+        self.filter_input = None;
+    }
+
+    /// Re-fetches the current mode's sidebar list, and the open group's lag
+    /// too if one's already shown -- same shape as `RabbitScreen::refresh`.
+    fn refresh(&self) {
+        match self.mode {
+            KafkaMode::Topics => self.session.list_topics(),
+            KafkaMode::Groups => {
+                self.session.list_groups();
+                if let Some(group) = &self.selected_group {
+                    self.session.fetch_group_lag(group);
+                }
+            }
+        }
+    }
+
+    /// `Command::KafkaOpen`'s handler -- dispatches by mode, same pattern
+    /// as `RabbitScreen::open_selected`.
+    fn open_selected(&mut self) {
+        match self.mode {
+            KafkaMode::Topics => self.tail_selected(false),
+            KafkaMode::Groups => self.show_lag_selected(),
+        }
+    }
+
+    fn show_lag_selected(&mut self) {
+        let Some(name) = self.selected_group_name() else {
+            return;
+        };
+        self.session.fetch_group_lag(&name);
+        self.selected_group = Some(name);
     }
 
     /// Opens the filter bar, prefilled with whatever's already applied.
@@ -230,46 +324,76 @@ impl KafkaScreen {
         };
 
         self.sidebar_visible_height = area.height.saturating_sub(2) as usize;
+        let label = match self.mode {
+            KafkaMode::Topics => "Topics",
+            KafkaMode::Groups => "Groups",
+        };
 
         if let Some(error) = &self.session.error {
             let paragraph = Paragraph::new(error.as_str())
                 .style(Style::default().fg(theme().error))
-                .block(ui::panel("Topics", true))
+                .block(ui::panel(label, true))
                 .wrap(Wrap { trim: true });
             frame.render_widget(paragraph, area);
             return;
         }
 
-        let visible = self.visible_topics();
-        let len = visible.len();
+        // `len` computed and dropped before the `sidebar_selected` write
+        // below -- `visible_topics()`/`visible_groups()` elide to
+        // borrowing all of `&self`, so holding either's `Vec<&_>` across
+        // that write (as a single `let visible = ...` spanning both)
+        // borrow-checker-fails despite `sidebar_selected` and
+        // `topics`/`groups` being disjoint fields.
+        let len = self.sidebar_len();
         self.sidebar_selected = self.sidebar_selected.min(len.saturating_sub(1));
 
-        let items: Vec<ListItem> = visible
-            .iter()
-            .map(|t| {
-                let tailing = self.session.tailing_topic.as_deref() == Some(t.name.as_str());
-                let marker = if tailing { "● " } else { "  " };
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{marker}{}", t.name),
-                        Style::default().fg(theme().text),
-                    ),
-                    Span::styled(
-                        format!("  {} partitions", t.partitions),
-                        Style::default().fg(theme().text_dim),
-                    ),
-                ]))
-            })
-            .collect();
+        let items: Vec<ListItem> = match self.mode {
+            KafkaMode::Topics => self
+                .visible_topics()
+                .iter()
+                .map(|t| {
+                    let tailing = self.session.tailing_topic.as_deref() == Some(t.name.as_str());
+                    let marker = if tailing { "● " } else { "  " };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{marker}{}", t.name),
+                            Style::default().fg(theme().text),
+                        ),
+                        Span::styled(
+                            format!("  {} partitions", t.partitions),
+                            Style::default().fg(theme().text_dim),
+                        ),
+                    ]))
+                })
+                .collect(),
+            KafkaMode::Groups => self
+                .visible_groups()
+                .iter()
+                .map(|g| {
+                    let shown = self.selected_group.as_deref() == Some(g.name.as_str());
+                    let marker = if shown { "● " } else { "  " };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{marker}{}", g.name),
+                            Style::default().fg(theme().text),
+                        ),
+                        Span::styled(
+                            format!("  {} ({} members)", g.state, g.members),
+                            Style::default().fg(theme().text_dim),
+                        ),
+                    ]))
+                })
+                .collect(),
+        };
 
         let mut state = ListState::default();
         if len > 0 {
             state.select(Some(self.sidebar_selected));
         }
         let title = if self.filter.is_empty() {
-            "Topics".to_string()
+            label.to_string()
         } else {
-            format!("Topics — filter: {}", self.filter)
+            format!("{label} — filter: {}", self.filter)
         };
         let list = List::new(items)
             .block(ui::panel(&title, true))
@@ -284,6 +408,13 @@ impl KafkaScreen {
     }
 
     fn draw_main(&mut self, frame: &mut Frame, area: Rect) {
+        match self.mode {
+            KafkaMode::Topics => self.draw_messages(frame, area),
+            KafkaMode::Groups => self.draw_lag(frame, area),
+        }
+    }
+
+    fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
         let Some(topic) = &self.session.tailing_topic else {
             let placeholder =
                 Paragraph::new("Select a topic and press enter to tail (b: from the beginning)")
@@ -330,6 +461,54 @@ impl KafkaScreen {
             ),
             false,
         ));
+        frame.render_widget(table, area);
+    }
+
+    fn draw_lag(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(group) = &self.selected_group else {
+            let placeholder =
+                Paragraph::new("Select a consumer group and press enter to show its lag")
+                    .style(Style::default().fg(theme().text_dim))
+                    .block(ui::panel("Lag", false));
+            frame.render_widget(placeholder, area);
+            return;
+        };
+
+        let rows: Vec<Row> = self
+            .session
+            .group_lag
+            .iter()
+            .map(|r| {
+                Row::new(vec![
+                    Cell::from(r.topic.clone()),
+                    Cell::from(r.partition.to_string()),
+                    Cell::from(r.committed.to_string()),
+                    Cell::from(r.high_watermark.to_string()),
+                    Cell::from(r.lag().to_string()),
+                ])
+            })
+            .collect();
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Min(16),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(15),
+                Constraint::Length(8),
+            ],
+        )
+        .header(
+            Row::new(vec![
+                "topic",
+                "partition",
+                "committed",
+                "high-watermark",
+                "lag",
+            ])
+            .style(Style::default().fg(theme().text_dim)),
+        )
+        .block(ui::panel(&format!("Lag — {group}"), false));
         frame.render_widget(table, area);
     }
 
@@ -405,18 +584,21 @@ impl Component for KafkaScreen {
             vim_list::apply(
                 mv,
                 &mut selected,
-                self.visible_topics().len(),
+                self.sidebar_len(),
                 self.sidebar_visible_height,
             );
             self.sidebar_selected = selected;
             return None;
         }
         match command {
-            Command::KafkaRefresh => self.session.list_topics(),
-            Command::KafkaTailLatest => self.tail_selected(false),
-            Command::KafkaTailEarliest => self.tail_selected(true),
-            Command::KafkaPauseFollow => self.toggle_pause(),
-            Command::KafkaPublish => self.open_compose(),
+            Command::KafkaToggleMode => self.toggle_mode(),
+            Command::KafkaRefresh => self.refresh(),
+            Command::KafkaOpen => self.open_selected(),
+            Command::KafkaTailEarliest if self.mode == KafkaMode::Topics => {
+                self.tail_selected(true)
+            }
+            Command::KafkaPauseFollow if self.mode == KafkaMode::Topics => self.toggle_pause(),
+            Command::KafkaPublish if self.mode == KafkaMode::Topics => self.open_compose(),
             Command::Search => self.open_filter(),
             Command::Help => return Some(Action::ShowHelp),
             Command::Back => return Some(Action::BackToPicker),
@@ -451,10 +633,23 @@ impl Component for KafkaScreen {
 
     fn status_hints(&self) -> Vec<ui::Hint> {
         let mut hints = Vec::new();
+        hints.extend(ui::hint(Context::Kafka, Command::KafkaToggleMode, "mode"));
         hints.extend(ui::hint(Context::Kafka, Command::KafkaRefresh, "refresh"));
-        hints.extend(ui::hint(Context::Kafka, Command::KafkaTailLatest, "tail"));
-        hints.extend(ui::hint(Context::Kafka, Command::KafkaPauseFollow, "pause"));
-        hints.extend(ui::hint(Context::Kafka, Command::KafkaPublish, "publish"));
+        match self.mode {
+            KafkaMode::Topics => {
+                hints.extend(ui::hint(Context::Kafka, Command::KafkaOpen, "tail"));
+                hints.extend(ui::hint(
+                    Context::Kafka,
+                    Command::KafkaTailEarliest,
+                    "from start",
+                ));
+                hints.extend(ui::hint(Context::Kafka, Command::KafkaPauseFollow, "pause"));
+                hints.extend(ui::hint(Context::Kafka, Command::KafkaPublish, "publish"));
+            }
+            KafkaMode::Groups => {
+                hints.extend(ui::hint(Context::Kafka, Command::KafkaOpen, "lag"));
+            }
+        }
         hints.extend(ui::hint(Context::Kafka, Command::Search, "filter"));
         hints.extend(ui::hint(Context::Kafka, Command::Back, "back"));
         hints
@@ -487,6 +682,105 @@ mod tests {
 
         assert_eq!(screen.session.tailing_topic, None);
         assert_eq!(screen.paused_at_len, None);
+    }
+
+    #[tokio::test]
+    async fn starts_in_topics_mode() {
+        let screen = screen();
+
+        assert_eq!(screen.mode, KafkaMode::Topics);
+    }
+
+    #[tokio::test]
+    async fn toggle_mode_switches_and_resets_the_cursor_and_filter() {
+        let mut screen = screen();
+        screen.sidebar_selected = 3;
+        screen.filter = "ord".to_string();
+
+        screen.toggle_mode();
+
+        assert_eq!(screen.mode, KafkaMode::Groups);
+        assert_eq!(screen.sidebar_selected, 0);
+        assert!(screen.filter.is_empty());
+
+        screen.toggle_mode();
+        assert_eq!(screen.mode, KafkaMode::Topics);
+    }
+
+    #[tokio::test]
+    async fn filter_narrows_visible_groups_case_insensitively() {
+        let mut screen = screen();
+        screen.session.groups = vec![
+            crate::ConsumerGroupInfo {
+                name: "orders-consumer".to_string(),
+                state: "Stable".to_string(),
+                members: 2,
+            },
+            crate::ConsumerGroupInfo {
+                name: "payments-consumer".to_string(),
+                state: "Stable".to_string(),
+                members: 1,
+            },
+            crate::ConsumerGroupInfo {
+                name: "ORDER-REPORTING".to_string(),
+                state: "Empty".to_string(),
+                members: 0,
+            },
+        ];
+
+        screen.filter = "order".to_string();
+        let names: Vec<&str> = screen
+            .visible_groups()
+            .into_iter()
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["orders-consumer", "ORDER-REPORTING"]);
+    }
+
+    #[tokio::test]
+    async fn show_lag_selected_remembers_the_highlighted_group() {
+        let mut screen = screen();
+        screen.mode = KafkaMode::Groups;
+        screen.session.groups = vec![crate::ConsumerGroupInfo {
+            name: "my-group".to_string(),
+            state: "Stable".to_string(),
+            members: 1,
+        }];
+
+        screen.show_lag_selected();
+
+        assert_eq!(screen.selected_group.as_deref(), Some("my-group"));
+    }
+
+    #[tokio::test]
+    async fn open_selected_tails_the_selected_topic_in_topics_mode() {
+        let mut topics_screen = screen();
+        topics_screen.session.topics = vec![crate::TopicInfo {
+            name: "orders".to_string(),
+            partitions: 1,
+        }];
+
+        topics_screen.open_selected();
+
+        assert_eq!(
+            topics_screen.session.tailing_topic.as_deref(),
+            Some("orders")
+        );
+    }
+
+    #[tokio::test]
+    async fn open_selected_shows_lag_for_the_selected_group_in_groups_mode() {
+        let mut groups_screen = screen();
+        groups_screen.mode = KafkaMode::Groups;
+        groups_screen.session.groups = vec![crate::ConsumerGroupInfo {
+            name: "my-group".to_string(),
+            state: "Stable".to_string(),
+            members: 1,
+        }];
+
+        groups_screen.open_selected();
+
+        assert_eq!(groups_screen.selected_group.as_deref(), Some("my-group"));
     }
 
     #[tokio::test]

@@ -401,15 +401,24 @@ pub enum Command {
     RabbitOpen,
     /// Open the publish compose panel.
     RabbitPublish,
-    /// Re-fetch the topic list.
+    /// Switch a Kafka screen between its Topics and Groups sidebar.
+    KafkaToggleMode,
+    /// Re-fetch the current sidebar list (topics or consumer groups,
+    /// depending on the current mode), and the selected group's lag if one
+    /// is already shown.
     KafkaRefresh,
-    /// Tail the selected Kafka topic from the latest offset.
-    KafkaTailLatest,
-    /// Tail the selected Kafka topic from the earliest offset.
+    /// Topics mode: tail the selected topic from the latest offset. Groups
+    /// mode: compute and show per-partition lag for the selected consumer
+    /// group.
+    KafkaOpen,
+    /// Tail the selected Kafka topic from the earliest offset. Topics mode
+    /// only -- no equivalent in Groups mode.
     KafkaTailEarliest,
-    /// Pause/resume following new messages in the current tail.
+    /// Pause/resume following new messages in the current tail. Topics
+    /// mode only.
     KafkaPauseFollow,
-    /// Open the publish compose panel for the selected topic.
+    /// Open the publish compose panel for the selected topic. Topics mode
+    /// only.
     KafkaPublish,
     /// `Enter` in the Socket screen's input line: sends its text (plus a
     /// trailing `\n` if `SocketToggleAppendNewline` is on).
@@ -608,8 +617,9 @@ impl Command {
             Self::RabbitRefresh => "rabbit-refresh",
             Self::RabbitOpen => "rabbit-open",
             Self::RabbitPublish => "rabbit-publish",
+            Self::KafkaToggleMode => "kafka-toggle-mode",
             Self::KafkaRefresh => "kafka-refresh",
-            Self::KafkaTailLatest => "kafka-tail-latest",
+            Self::KafkaOpen => "kafka-open",
             Self::KafkaTailEarliest => "kafka-tail-earliest",
             Self::KafkaPauseFollow => "kafka-pause-follow",
             Self::KafkaPublish => "kafka-publish",
@@ -678,7 +688,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 134] = [
+    const ALL: [Self; 135] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -750,8 +760,9 @@ impl Command {
         Self::RabbitRefresh,
         Self::RabbitOpen,
         Self::RabbitPublish,
+        Self::KafkaToggleMode,
         Self::KafkaRefresh,
-        Self::KafkaTailLatest,
+        Self::KafkaOpen,
         Self::KafkaTailEarliest,
         Self::KafkaPauseFollow,
         Self::KafkaPublish,
@@ -889,8 +900,9 @@ impl Command {
             Self::RabbitRefresh => "Refresh the current list/selection",
             Self::RabbitOpen => "Peek messages / show bindings for the selection",
             Self::RabbitPublish => "Publish a message",
-            Self::KafkaRefresh => "Refresh the topic list",
-            Self::KafkaTailLatest => "Tail the selected topic from the latest offset",
+            Self::KafkaToggleMode => "Switch between Kafka Topics and Groups",
+            Self::KafkaRefresh => "Refresh the current list/selection",
+            Self::KafkaOpen => "Tail from latest (Topics) / show consumer lag (Groups)",
             Self::KafkaTailEarliest => "Tail the selected topic from the earliest offset",
             Self::KafkaPauseFollow => "Pause/resume following new messages",
             Self::KafkaPublish => "Publish a message to the selected topic",
@@ -1160,8 +1172,9 @@ impl Default for Keymap {
         bindings.insert(
             Context::Kafka,
             parse_defaults(&[
+                ("f2", Command::KafkaToggleMode),
                 ("r", Command::KafkaRefresh),
-                ("enter", Command::KafkaTailLatest),
+                ("enter", Command::KafkaOpen),
                 ("b", Command::KafkaTailEarliest),
                 ("space", Command::KafkaPauseFollow),
                 ("p", Command::KafkaPublish),
