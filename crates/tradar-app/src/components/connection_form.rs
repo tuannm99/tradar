@@ -69,6 +69,33 @@ impl Field {
     }
 }
 
+/// An example `target` for `driver_id` (a `ConnectorDescriptor::id`), shown
+/// as a dim hint under the Target field and appended to a failed connect's
+/// error message (`main.rs::spawn_connect`) -- a blank text field gives no
+/// clue on its own whether a driver wants a URI, a bare `host:port`, or a
+/// file path, and the previous behavior (show nothing, let a wrong guess
+/// fail at connect time) left the user to find the right shape from
+/// `README.md` or trial and error. `None` for a driver id this hasn't been
+/// taught an example for -- a connector added without updating this list
+/// shows no hint rather than a wrong one, same spirit as `drivers` listing
+/// only what's actually compiled in rather than guessing.
+pub fn target_hint(driver_id: &str) -> Option<&'static str> {
+    match driver_id {
+        "postgres" => Some("postgres://user:password@localhost:5432/mydb"),
+        "sqlite" => Some("./data.db"),
+        "mongo" => Some("mongodb://localhost:27017/mydb"),
+        "elasticsearch" => Some("http://localhost:9200"),
+        "redis" => Some("redis://localhost:6379/0"),
+        "cassandra" => Some("localhost:9042"),
+        "clickhouse" => Some("http://user:password@localhost:8123/mydb"),
+        "rabbitmq" => Some("http://user:pass@localhost:15672/vhost"),
+        "kafka" => Some("localhost:9092,localhost:9093"),
+        "http" => Some("optional -- e.g. https://api.example.com"),
+        "socket" => Some("localhost:9000"),
+        _ => None,
+    }
+}
+
 pub struct ConnectionFormComponent {
     pub mode: FormMode,
     field: Field,
@@ -233,6 +260,17 @@ impl ConnectionFormComponent {
                 }
             }
             lines.push(Line::from(spans));
+            // Right under Target, not Driver -- the hint is about what to
+            // type there, and it has to follow Driver in `Field::ORDER`
+            // anyway to know which driver's format to show.
+            if field == Field::Target
+                && let Some(hint) = self.drivers.get(self.driver).and_then(|d| target_hint(d))
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("{:<8}e.g. {hint}", ""),
+                    Style::default().fg(theme.text_dim),
+                )));
+            }
         }
 
         lines.push(Line::from(""));
@@ -280,6 +318,62 @@ mod tests {
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn target_hint_covers_every_compiled_in_connector() {
+        for id in [
+            "postgres",
+            "sqlite",
+            "mongo",
+            "elasticsearch",
+            "redis",
+            "cassandra",
+            "clickhouse",
+            "rabbitmq",
+            "kafka",
+            "http",
+            "socket",
+        ] {
+            assert!(target_hint(id).is_some(), "no hint for driver id {id:?}");
+        }
+    }
+
+    #[test]
+    fn target_hint_is_none_for_an_unknown_driver_id() {
+        assert_eq!(target_hint("not-a-real-driver"), None);
+    }
+
+    #[test]
+    fn draw_shows_a_target_hint_for_the_selected_driver() {
+        let form = form(); // driver 0 == "postgres"
+        let backend = TestBackend::new(90, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| form.draw(frame, frame.area()))
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("e.g."), "buffer was: {text}");
+        assert!(text.contains("postgres://"), "buffer was: {text}");
+    }
+
+    #[test]
+    fn the_target_hint_changes_when_a_different_driver_is_picked() {
+        let mut form = form(); // drivers: ["postgres", "sqlite"]
+        form.handle_key_event(KeyCode::Tab, KeyModifiers::NONE); // -> driver field
+        form.handle_key_event(KeyCode::Right, KeyModifiers::NONE); // -> sqlite
+
+        let backend = TestBackend::new(90, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| form.draw(frame, frame.area()))
+            .unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains(".db"), "buffer was: {text}");
+        assert!(!text.contains("postgres://"), "buffer was: {text}");
     }
 
     #[test]

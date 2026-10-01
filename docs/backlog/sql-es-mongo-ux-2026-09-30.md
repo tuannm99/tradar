@@ -114,7 +114,29 @@ Thêm `starts_mongo_statement()` (mirror `starts_request` của Elasticsearch): 
 - **Gap #5 đã làm (2026-10-01)** — xem mục 5 ở trên. Ranking của Elasticsearch (endpoint/method cũng là "keyword") chưa đụng tới: ES không có cú pháp `db.x.y` để nhận diện như Mongo, và console của nó gõ `METHOD /path` ở đầu dòng chứ không lẫn vào giữa field/index — rủi ro bị field che mất thấp hơn hẳn, không có bằng chứng cụ thể cần sửa.
 - **Gap #8 điều tra, không phải bug** — xem mục 8 ở trên.
 - **Gap #9, #10 đã làm (2026-10-01)** — xem mục 9, 10 ở trên.
-- **Chưa làm, đang chờ quyết định phạm vi**: CRUD snippet `insertOne` của Mongo quote field lồng nhau (vd `address.city`) thành key phẳng có dấu chấm thay vì dựng lại object lồng nhau thật — đúng cho `updateOne`/`deleteOne` (Mongo coi dấu chấm trong filter/`$set` là path expression) nhưng sai cho `insertOne` (tạo field phẳng tên `"address.city"` thay vì `{address: {city: ...}}`). Sửa đúng cần dựng cây lồng nhau từ danh sách field dotted rồi render lại thành object literal nhiều cấp — phức tạp hơn 4 fix vừa rồi, cần `AskUserQuestion` riêng.
-- **Chưa làm, mang tính chủ quan hơn**: connection form không có gợi ý format `target` theo từng driver (Postgres connection string vs Mongo URI vs ES base URL) và lỗi connect thất bại hiện message gốc từ thư viện (`sqlx`/`mongodb`) không có thêm ngữ cảnh — là cải thiện UX rộng hơn (thêm placeholder/help text cho N driver), không phải bug fix hẹp, cần quyết định phạm vi riêng.
+- **Gap #11, #12 đã làm (2026-10-01)** — xem mục 11, 12 ở dưới.
+
+### 11. MongoDB: CRUD snippet `insertOne` dựng object lồng nhau thật (2026-10-01)
+
+Người dùng chọn làm cả hai mục còn lại. `crud_snippet`'s Create arm trước đây tái dùng `object_literal`/`mongo_field_key` (đúng cho Update/Delete, nơi Mongo đọc key có dấu chấm như path expression) — với field dotted như `address.city` (từ `flatten_document` lấy mẫu document lồng nhau), sinh ra `insertOne({"address.city": <value>})`: một field PHẲNG tên đúng là `"address.city"`, không phải nested `{address: {city: ...}}` như dữ liệu thật.
+
+Thêm cây `InsertField` (`Leaf`/`Group`, thứ tự first-seen) dựng từ danh sách field qua `insert_field_path` (đệ quy thật, không dùng loop-with-reborrow — gặp lỗi borrow-checker E0499/E0384 với cách viết loop ban đầu, sửa bằng đệ quy cho dễ hơn). `render_insert_group`/`render_insert_node` render lại thành JS object literal nhiều cấp, thụt lề tăng dần theo độ sâu (2 space/cấp), chỉ xuống dòng khi group có ≥2 field — một field dotted duy nhất vẫn ra một dòng (`{address: {city: <value>}}`). `object_literal` giữ nguyên không đổi, vẫn dùng cho Update/Delete.
+
+6 test mới: nested fields ra đúng object lồng nhau nhiều dòng (và không còn chứa chuỗi `"address.city"` dạng key phẳng), chọn đúng 1 field dotted vẫn ra 1 dòng, Update/Delete vẫn quote phẳng như cũ (test chốt hành vi không đổi), cộng 3 test cũ (`crud_snippet_create_with_a_real_schema_...`, `..._explicit_selection_...`) vẫn pass y nguyên không sửa — xác nhận field phẳng (không dấu chấm) không đổi output.
+
+### 12. Connection form: gợi ý format `target` theo driver (2026-10-01)
+
+`ConnectionFormComponent` trước đây không gợi ý gì về format `target` — field trống hoàn toàn, người dùng phải đoán hoặc tra README. Lỗi connect thất bại cũng chỉ hiện nguyên văn lỗi từ `sqlx`/`mongodb`/... (nói về việc kết nối thất bại thế nào, không nói target đúng phải trông ra sao).
+
+Thêm `target_hint(driver_id) -> Option<&'static str>` (`connection_form.rs`, `pub` vì `main.rs` là crate riêng — binary và lib trong cùng package không tự thấy `pub(crate)` của nhau, gặp lỗi visibility lúc đầu rồi mới đổi sang `pub`) — map tĩnh cho cả 11 driver đã compile (ví dụ Postgres `postgres://user:password@localhost:5432/mydb`, Cassandra `localhost:9042`, HTTP `optional -- e.g. https://api.example.com`). `draw()` hiện dòng `e.g. <hint>` mờ ngay dưới field Target, tự đổi theo driver đang chọn (`←`/`→`) kể cả chưa gõ gì vào Target. `main.rs::spawn_connect`'s nhánh `Err(e)` nối thêm `"\nexpected target format: <hint>"` vào message lỗi khi connect thất bại và driver đó có hint.
+
+7 test mới: tất cả 11 driver id đều có hint (fail nếu ai thêm connector mới quên cập nhật list), driver id lạ trả `None`, draw() hiện đúng hint cho driver mặc định (postgres), hint đổi đúng khi chọn driver khác (`.db` cho sqlite, không còn `postgres://`).
+
+## Test (gap #11, #12)
+
+- `cargo test -p tradar-connector-mongo`: 73 test, 50 pass (44+6 mới pure), 26 fail Docker-integration sẵn có (không đổi).
+- `cargo test -p tradar-app`: 163 test lib.rs pass (bao gồm 5 test connection_form mới — target_hint × 2, draw hint × 2, cộng 1 driver-cycle cũ không đổi), main.rs (binary) không có test nào từ trước, không đổi.
+- `cargo clippy -p tradar-connector-mongo -p tradar-app --all-targets -- -D warnings`: sạch.
+- `cargo build`/`clippy --all-targets -D warnings`/`cargo fmt --check` toàn workspace (kafka-disable trick, khôi phục qua `cp`, xác nhận lại bằng `git diff --stat` sau khi khôi phục để chắc không mất đổi thật — từng suýt hiểu nhầm backup ghi đè lúc restore, kiểm tra kỹ bằng grep/Read xác nhận không mất gì): sạch.
 - Postgres/SQLite/Cassandra/ClickHouse không có `ColumnInfo::indexed` thật — field mới chỉ Mongo dùng, các driver khác luôn `false` (không phải bug, chỉ là scope hẹp theo đúng gap đã chọn).
 - `near_token_marker` không xử lý được trường hợp token trích dẫn xuất hiện nhiều lần trong câu lệnh mà lỗi thật nằm ở lần xuất hiện sau — lấy lần đầu tiên, chấp nhận như một giới hạn đã biết (ghi rõ trong doc comment).
