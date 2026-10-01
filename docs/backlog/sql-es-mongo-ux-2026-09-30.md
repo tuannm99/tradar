@@ -72,15 +72,23 @@ Thêm guard đầu hàm: `if self.columns().is_empty() { return; }` — tái dù
 
 2 test mới: sort trong JSON view là no-op (`self.sort` vẫn `None` sau khi bấm), sort hoạt động bình thường ngay khi vừa toggle sang table view.
 
-## Test (gap #6, #7)
+### 8. Điều tra nghi vấn auto-close phá escape `'O''Brien'` — không phải bug thật (2026-10-01)
+
+Agent audit nghi: gõ literal SQL có escape kiểu `'O''Brien'` sẽ bị auto-close/skip-over làm rối, vì dấu `'` thứ hai của cặp escape không nằm cạnh closer đã auto-insert (giống dấu đầu) mà lại tự mở một cặp `''` mới — nghe hợp lý trên lý thuyết. Người dùng chọn "làm luôn, cẩn thận test kỹ".
+
+Viết test thực nghiệm (`type_str` mô phỏng gõ từng ký tự) thay vì chỉ suy luận tay — kết quả: **không có bug**. Dấu nháy đơn tự ghép cặp với chính nó (`auto_close_for('\'') == Some('\'')`), nên cặp `''` "thừa" tự mở ra ở bước đó chỉ là closer bị đẩy dần về sau khi gõ tiếp các ký tự còn lại (`Brien`), rồi chính nó bị tiêu thụ bởi dấu `'` đóng thật của literal qua skip-over y hệt mọi trường hợp khác — chuỗi ký tự cuối cùng luôn khớp chính xác với những gì gõ vào, không thiếu không thừa. Verify bằng 3 test thực tế: `'O''Brien'`, hai cặp escape trong cùng literal (`'O''Brien''s house'`), và escape ngay đầu literal (`'''a'`) — cả ba đều cho kết quả đúng.
+
+**Không sửa code gì** (không có gì để sửa) — chỉ thêm 3 test khoá lại hành vi đã đúng này làm regression test, phòng khi có ai đó thay đổi logic `type_char`/`auto_close_for` sau này vô tình phá nó. Bài học: một nghi vấn nghe hợp lý về cấu trúc code chưa chắc là bug thật nếu không chạy thử — không nên "sửa" một thứ chưa được xác minh là hỏng.
+
+## Test (gap #6, #7, #8)
 
 - `cargo test -p tradar-connector-elasticsearch`: 34 test, 30 pass (26 cũ + 4 mới), 7 fail Docker-integration sẵn có (không đổi so với trước).
-- `cargo test -p tradar-query-workbench`: 558/558 pass (556 cũ + 2 mới).
+- `cargo test -p tradar-query-workbench`: 561/561 pass (558 + 3 test điều tra gap #8).
 - `cargo clippy -p tradar-connector-elasticsearch -p tradar-query-workbench --all-targets -- -D warnings`: sạch.
 
 ## Chưa làm
 
 - **Gap #5 đã làm (2026-10-01)** — xem mục 5 ở trên. Ranking của Elasticsearch (endpoint/method cũng là "keyword") chưa đụng tới: ES không có cú pháp `db.x.y` để nhận diện như Mongo, và console của nó gõ `METHOD /path` ở đầu dòng chứ không lẫn vào giữa field/index — rủi ro bị field che mất thấp hơn hẳn, không có bằng chứng cụ thể cần sửa.
+- **Gap #8 điều tra, không phải bug** — xem mục 8 ở trên.
 - Postgres/SQLite/Cassandra/ClickHouse không có `ColumnInfo::indexed` thật — field mới chỉ Mongo dùng, các driver khác luôn `false` (không phải bug, chỉ là scope hẹp theo đúng gap đã chọn).
 - `near_token_marker` không xử lý được trường hợp token trích dẫn xuất hiện nhiều lần trong câu lệnh mà lỗi thật nằm ở lần xuất hiện sau — lấy lần đầu tiên, chấp nhận như một giới hạn đã biết (ghi rõ trong doc comment).
-- **Chưa làm, đang hỏi lại phạm vi**: auto-close dấu `'` trong SQL editor không hỗ trợ gõ literal có escape kiểu `'O''Brien'` một cách tự nhiên (gõ `'` thứ hai sau khi đã skip-over lần đầu sẽ mở một cặp `''` mới thay vì chèn literal) — phát hiện trong cùng đợt audit, nhưng sửa đúng cách cần đụng vào logic auto-close/skip-over dùng chung cho mọi bracket/quote trong `query_editor.rs`, rủi ro regression cao hơn 3 gap đã làm, nên để hỏi `AskUserQuestion` riêng trước khi code.
