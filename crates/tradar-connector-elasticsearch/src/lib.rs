@@ -46,6 +46,30 @@ fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
     Some((method, path, body))
 }
 
+/// `Ok` when `body` is valid either as one JSON value, or as NDJSON -- one
+/// JSON value per non-blank line, no separating commas -- the shape
+/// `_bulk` and `_msearch` require instead of a single document. Checked as
+/// a whole first (the common case, and what gives the clean single-value
+/// parse error when it's actually meant to be one object); only re-checked
+/// line by line if that fails, so an ordinary malformed single-object body
+/// still reports the same error it always did rather than a confusing
+/// per-line one.
+fn validate_json_body(body: &str) -> Result<(), String> {
+    if serde_json::from_str::<serde_json::Value>(body).is_ok() {
+        return Ok(());
+    }
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Err(err) = serde_json::from_str::<serde_json::Value>(line) {
+            return Err(format!("invalid JSON body: {err}"));
+        }
+    }
+    Ok(())
+}
+
 /// Escapes a string for safe interpolation inside a *single-quoted* shell
 /// argument, using the standard close-quote / escaped-literal-quote /
 /// reopen-quote technique: every `'` becomes `'\''`. Nothing else is special
@@ -340,9 +364,13 @@ impl QueryDriver for ElasticsearchDriver {
             // `serde_json`'s own error already carries a line/column
             // pointing at the mistake -- better than whatever error body
             // the cluster would otherwise send back for what is, from its
-            // side, just an unparseable request.
-            if let Err(err) = serde_json::from_str::<serde_json::Value>(body) {
-                return Err(anyhow::anyhow!("invalid JSON body: {err}"));
+            // side, just an unparseable request. Also accepts NDJSON (one
+            // JSON value per line, no commas between them) -- `_bulk` and
+            // `_msearch` require exactly that shape, so a body that isn't
+            // one JSON value as a whole is still checked line by line
+            // before being rejected outright.
+            if let Err(err) = validate_json_body(body) {
+                return Err(anyhow::anyhow!(err));
             }
             request = request
                 .header("Content-Type", "application/json")
@@ -921,6 +949,56 @@ mod tests {
                 "POST my-index/_update/1\n{\n  \"doc\": {\n    \"customer\": {\n      \"name\": \"Ada\"\n    }\n  }\n}"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn validate_json_body_accepts_a_single_json_object() {
+        assert_eq!(
+            validate_json_body(r#"{"query": {"match_all": {}}}"#),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_json_body_accepts_ndjson_for_bulk_and_msearch() {
+        let bulk = "{\"index\": {\"_index\": \"my-index\"}}\n{\"field\": \"value\"}";
+        assert_eq!(validate_json_body(bulk), Ok(()));
+    }
+
+    #[test]
+    fn validate_json_body_accepts_ndjson_with_blank_lines_between_entries() {
+        let bulk = "{\"index\": {}}\n\n{\"field\": \"value\"}\n";
+        assert_eq!(validate_json_body(bulk), Ok(()));
+    }
+
+    #[test]
+    fn validate_json_body_rejects_a_malformed_single_object() {
+        assert!(validate_json_body(r#"{"query": {"match_all": {}}"#).is_err());
+    }
+
+    #[test]
+    fn validate_json_body_rejects_ndjson_with_one_bad_line() {
+        let bulk = "{\"index\": {}}\n{not json}";
+        assert!(validate_json_body(bulk).is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_accepts_an_ndjson_bulk_body_rather_than_rejecting_it_as_invalid_json() {
+        // Same unroutable-host trick as the test below: if this reached
+        // `request.send()` it's proof the NDJSON body passed local
+        // validation (a connection-refused/timeout error here, not
+        // "invalid JSON body").
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+
+        let err = driver
+            .execute("POST _bulk\n{\"index\": {\"_index\": \"my-index\"}}\n{\"field\": \"value\"}")
+            .await
+            .unwrap_err();
+
+        assert!(
+            !err.to_string().contains("invalid JSON body"),
+            "a valid NDJSON bulk body must not be rejected as malformed JSON, got: {err}"
         );
     }
 

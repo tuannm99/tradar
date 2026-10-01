@@ -86,9 +86,35 @@ Viết test thực nghiệm (`type_str` mô phỏng gõ từng ký tự) thay v�
 - `cargo test -p tradar-query-workbench`: 561/561 pass (558 + 3 test điều tra gap #8).
 - `cargo clippy -p tradar-connector-elasticsearch -p tradar-query-workbench --all-targets -- -D warnings`: sạch.
 
+### 9. REGRESSION tự gây ra hôm nay: `_bulk`/`_msearch` của Elasticsearch bị validate JSON chặn nhầm (2026-10-01)
+
+Đợt audit thứ 3 phát hiện: fix #2 (validate JSON cục bộ, thêm sáng cùng ngày) dùng `serde_json::from_str::<Value>(body)` — yêu cầu TOÀN BỘ body là đúng một JSON value. Nhưng `_bulk` (đã có sẵn trong `keywords()` như một endpoint được hỗ trợ) và `_msearch` dùng NDJSON thật — nhiều JSON object nối nhau bằng dòng mới, không dấu phẩy, không phải một object duy nhất. Mọi request `_bulk` thật đều bị validate cục bộ chặn với lỗi "trailing characters" trước khi chạm network — gõ đúng format NDJSON chuẩn (giống hệt Kibana Dev Tools) vẫn bị báo sai.
+
+Sửa: `validate_json_body()` thử parse cả body như MỘT JSON value trước (giữ nguyên lỗi rõ ràng cho trường hợp phổ biến — object đơn gõ sai); nếu fail mới thử parse TỪNG DÒNG riêng (bỏ qua dòng trống) — chỉ báo lỗi khi cả hai cách đều fail. Không hardcode tên endpoint `_bulk`/`_msearch` — tổng quát cho mọi NDJSON body.
+
+6 test mới: single-object hợp lệ, NDJSON 2 dòng hợp lệ, NDJSON có dòng trống xen giữa vẫn hợp lệ, single-object sai vẫn báo lỗi như cũ, NDJSON có 1 dòng sai vẫn báo lỗi, và test tích hợp gửi `_bulk` thật qua `execute()` xác nhận không bị chặn cục bộ (dùng cùng trick host-không-route-được để phân biệt "chặn cục bộ" với "lỗi network").
+
+### 10. MongoDB: câu lệnh gõ trải nhiều dòng không còn bị tách sai (2026-10-01)
+
+Cùng đợt audit: `MongoDriver::split_statements()` tách CÂU theo DÒNG — mỗi dòng không rỗng là một câu riêng, không như `tradar-connector-elasticsearch`'s `split_statements`/`starts_request` (đã merge dòng tiếp nối vào câu phía trên từ trước). Hệ quả: gõ một call Mongo trải nhiều dòng theo đúng phong cách mongosh/Compass hay dùng (ví dụ `db.orders.find({` xuống dòng, `status: "open"`, rồi `})`) bị tách thành 3 câu riêng biệt, mỗi câu tự nó không parse được — `Ctrl+Enter`/`Ctrl+A` báo lỗi cú pháp khó hiểu mà không gợi ý gì về giới hạn "một dòng một câu" này.
+
+Thêm `starts_mongo_statement()` (mirror `starts_request` của Elasticsearch): một dòng bắt đầu câu mới nếu bắt đầu bằng `db.`, `use `, hoặc đúng `show dbs`/`show databases`; dòng khác luôn nối vào câu phía trên. `split_statements()` đổi logic y hệt Elasticsearch — mở rộng `current.end`/`current.text` (re-slice từ text gốc, giữ nguyên `\n` nhúng bên trong) thay vì luôn push câu mới. Statement đã merge xuống dòng vẫn parse đúng vì `serde_json`/`find_matching_close_paren` vốn không giả định text một dòng.
+
+6 test mới: call trải nhiều dòng gộp thành một câu, hai call một-dòng vẫn tách đúng như cũ, call nhiều dòng tách đúng khỏi câu kế tiếp, `use`/`show dbs` vẫn nhận diện đúng là câu riêng, và một test tích hợp (cần Docker) chạy thật một `find()` viết trải 3 dòng, verify kết quả đúng.
+
+## Test (gap #9, #10)
+
+- `cargo test -p tradar-connector-elasticsearch`: 42 test, 36 pass (30 cũ + 6 mới), 6 fail Docker-integration sẵn có (không đổi).
+- `cargo test -p tradar-connector-mongo`: 70 test, 44 pass (40 cũ + 4 mới pure), 26 fail Docker-integration sẵn có (25 cũ + 1 test mới cần Docker).
+- `cargo clippy -p tradar-connector-elasticsearch -p tradar-connector-mongo --all-targets -- -D warnings`: sạch.
+- `cargo build`/`clippy --all-targets -D warnings`/`make test-unit`/`cargo fmt --check` toàn workspace (kafka-disable trick): sạch.
+
 ## Chưa làm
 
 - **Gap #5 đã làm (2026-10-01)** — xem mục 5 ở trên. Ranking của Elasticsearch (endpoint/method cũng là "keyword") chưa đụng tới: ES không có cú pháp `db.x.y` để nhận diện như Mongo, và console của nó gõ `METHOD /path` ở đầu dòng chứ không lẫn vào giữa field/index — rủi ro bị field che mất thấp hơn hẳn, không có bằng chứng cụ thể cần sửa.
 - **Gap #8 điều tra, không phải bug** — xem mục 8 ở trên.
+- **Gap #9, #10 đã làm (2026-10-01)** — xem mục 9, 10 ở trên.
+- **Chưa làm, đang chờ quyết định phạm vi**: CRUD snippet `insertOne` của Mongo quote field lồng nhau (vd `address.city`) thành key phẳng có dấu chấm thay vì dựng lại object lồng nhau thật — đúng cho `updateOne`/`deleteOne` (Mongo coi dấu chấm trong filter/`$set` là path expression) nhưng sai cho `insertOne` (tạo field phẳng tên `"address.city"` thay vì `{address: {city: ...}}`). Sửa đúng cần dựng cây lồng nhau từ danh sách field dotted rồi render lại thành object literal nhiều cấp — phức tạp hơn 4 fix vừa rồi, cần `AskUserQuestion` riêng.
+- **Chưa làm, mang tính chủ quan hơn**: connection form không có gợi ý format `target` theo từng driver (Postgres connection string vs Mongo URI vs ES base URL) và lỗi connect thất bại hiện message gốc từ thư viện (`sqlx`/`mongodb`) không có thêm ngữ cảnh — là cải thiện UX rộng hơn (thêm placeholder/help text cho N driver), không phải bug fix hẹp, cần quyết định phạm vi riêng.
 - Postgres/SQLite/Cassandra/ClickHouse không có `ColumnInfo::indexed` thật — field mới chỉ Mongo dùng, các driver khác luôn `false` (không phải bug, chỉ là scope hẹp theo đúng gap đã chọn).
 - `near_token_marker` không xử lý được trường hợp token trích dẫn xuất hiện nhiều lần trong câu lệnh mà lỗi thật nằm ở lần xuất hiện sau — lấy lần đầu tiên, chấp nhận như một giới hạn đã biết (ghi rõ trong doc comment).

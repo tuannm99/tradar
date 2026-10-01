@@ -50,6 +50,19 @@ impl ParsedQuery {
     }
 }
 
+/// Whether `line` begins a new shell statement -- a `db.<collection>...`
+/// call or one of the two shell helpers `execute` special-cases (`use`,
+/// `show dbs`/`show databases`) -- versus continuing the call above it
+/// (a line that's part of a multi-line JSON argument). Mirrors
+/// `tradar-connector-elasticsearch`'s `starts_request`; see
+/// `split_statements`.
+fn starts_mongo_statement(line: &str) -> bool {
+    line.starts_with("db.")
+        || line.starts_with("use ")
+        || line == "show dbs"
+        || line == "show databases"
+}
+
 fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
     let query = query.trim();
     let rest = query.strip_prefix("db.").ok_or_else(|| {
@@ -331,22 +344,37 @@ impl QueryDriver for MongoDriver {
         ]
     }
 
-    /// One `db.<collection>.<method>(...)` per line: the parser accepts a
-    /// single call, so a line is exactly a statement.
+    /// A `db.<collection>.<method>(...)` call, or a `use`/`show dbs`
+    /// shell helper -- same idiom as `tradar-connector-elasticsearch`'s
+    /// `starts_request`, which this mirrors so a call written across
+    /// several lines for readability (the normal mongosh/Compass style,
+    /// e.g. `db.orders.find({\n  status: "open"\n})`) merges into one
+    /// statement instead of each of its lines becoming its own (each
+    /// independently invalid, since none of them alone is a complete
+    /// call) the way a flat one-statement-per-line split used to treat
+    /// it.
     fn split_statements(&self, text: &str) -> Vec<Statement> {
-        let mut statements = Vec::new();
+        let mut statements: Vec<Statement> = Vec::new();
         let mut offset = 0;
         for line in text.split_inclusive('\n') {
             let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                let start = offset + (line.len() - line.trim_start().len());
-                statements.push(Statement {
-                    text: trimmed.to_string(),
-                    start,
-                    end: start + trimmed.len(),
-                });
-            }
+            let line_start = offset + (line.len() - line.trim_start().len());
             offset += line.len();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match (starts_mongo_statement(trimmed), statements.last_mut()) {
+                (false, Some(current)) => {
+                    // Continuation of the call above: extend it to here.
+                    current.end = line_start + trimmed.len();
+                    current.text = text[current.start..current.end].trim_end().to_string();
+                }
+                _ => statements.push(Statement {
+                    text: trimmed.to_string(),
+                    start: line_start,
+                    end: line_start + trimmed.len(),
+                }),
+            }
         }
         statements
     }
@@ -1083,6 +1111,77 @@ pub fn connector() -> Box<dyn Connector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_statements_treats_a_multi_line_call_as_one_statement() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements = driver.split_statements("db.orders.find({\n  status: \"open\"\n})");
+
+        assert_eq!(statements.len(), 1, "statements were: {statements:?}");
+        assert_eq!(
+            statements[0].text,
+            "db.orders.find({\n  status: \"open\"\n})"
+        );
+    }
+
+    #[test]
+    fn split_statements_still_splits_two_separate_single_line_calls() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements = driver.split_statements("db.orders.find({})\ndb.users.find({})");
+
+        assert_eq!(statements.len(), 2, "statements were: {statements:?}");
+        assert_eq!(statements[0].text, "db.orders.find({})");
+        assert_eq!(statements[1].text, "db.users.find({})");
+    }
+
+    #[test]
+    fn split_statements_keeps_a_multi_line_call_separate_from_the_next_one() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements =
+            driver.split_statements("db.orders.find({\n  status: \"open\"\n})\ndb.users.find({})");
+
+        assert_eq!(statements.len(), 2, "statements were: {statements:?}");
+        assert_eq!(
+            statements[0].text,
+            "db.orders.find({\n  status: \"open\"\n})"
+        );
+        assert_eq!(statements[1].text, "db.users.find({})");
+    }
+
+    #[test]
+    fn split_statements_recognizes_use_and_show_dbs_as_their_own_statements() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let statements = driver.split_statements("use reporting\nshow dbs");
+
+        assert_eq!(statements.len(), 2, "statements were: {statements:?}");
+        assert_eq!(statements[0].text, "use reporting");
+        assert_eq!(statements[1].text, "show dbs");
+    }
+
+    #[tokio::test]
+    async fn a_multi_line_find_call_actually_executes_correctly() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"name": "Ada", "status": "open"})"#)
+            .await
+            .unwrap();
+
+        let statements = driver.split_statements("db.users.find({\n  \"status\": \"open\"\n})");
+        assert_eq!(statements.len(), 1);
+        let result = driver.execute(&statements[0].text).await.unwrap();
+
+        match result {
+            QueryResult::Documents(docs) => assert_eq!(docs.len(), 1),
+            other => panic!("expected Documents, got {other:?}"),
+        }
+    }
 
     #[test]
     fn crud_snippet_covers_all_four_ops() {
