@@ -48,6 +48,8 @@ fn registry() -> HashMap<String, Box<dyn Connector>> {
     let mut connectors: Vec<Box<dyn Connector>> = Vec::new();
     #[cfg(feature = "postgres")]
     connectors.push(tradar_connector_postgres::connector());
+    #[cfg(feature = "mysql")]
+    connectors.push(tradar_connector_mysql::connector());
     #[cfg(feature = "sqlite")]
     connectors.push(tradar_connector_sqlite::connector());
     #[cfg(feature = "elasticsearch")]

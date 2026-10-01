@@ -4999,6 +4999,7 @@ dependencies = [
  "tradar-connector-http",
  "tradar-connector-kafka",
  "tradar-connector-mongo",
+ "tradar-connector-mysql",
  "tradar-connector-postgres",
  "tradar-connector-rabbitmq",
  "tradar-connector-redis",
@@ -5095,6 +5096,21 @@ dependencies = [
  "futures-util",
  "mongodb",
  "serde_json",
+ "testcontainers-modules",
+ "tokio",
+ "tradar-connector-spi",
+ "tradar-core",
+ "tradar-query-workbench",
+]
+
+[[package]]
+name = "tradar-connector-mysql"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "sqlx",
  "testcontainers-modules",
  "tokio",
  "tradar-connector-spi",

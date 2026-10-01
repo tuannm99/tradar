@@ -389,13 +389,13 @@ impl QueryScreenComponent {
         let outline = flatten_outline(engine.schema());
 
         let mut query_editor = QueryEditorComponent::new();
-        // Postgres/SQLite/ClickHouse speak real SQL close enough to the
-        // `tree-sitter-sequel` grammar to highlight -- Mongo/Elasticsearch/
-        // Redis use their own hand-rolled query shapes with no grammar to
-        // match, so they stay plain text.
+        // Postgres/MySQL/SQLite/ClickHouse speak real SQL close enough to
+        // the `tree-sitter-sequel` grammar to highlight -- Mongo/
+        // Elasticsearch/Redis use their own hand-rolled query shapes with no
+        // grammar to match, so they stay plain text.
         if matches!(
             engine.connection().driver.as_str(),
-            "postgres" | "sqlite" | "clickhouse"
+            "postgres" | "mysql" | "sqlite" | "clickhouse"
         ) {
             query_editor.set_dialect(Dialect::Sql);
         }

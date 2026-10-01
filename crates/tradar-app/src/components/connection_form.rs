@@ -82,6 +82,7 @@ impl Field {
 pub fn target_hint(driver_id: &str) -> Option<&'static str> {
     match driver_id {
         "postgres" => Some("postgres://user:password@localhost:5432/mydb"),
+        "mysql" => Some("mysql://user:password@localhost:3306/mydb"),
         "sqlite" => Some("./data.db"),
         "mongo" => Some("mongodb://localhost:27017/mydb"),
         "elasticsearch" => Some("http://localhost:9200"),
