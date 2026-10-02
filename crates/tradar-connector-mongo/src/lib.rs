@@ -18,7 +18,7 @@ use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
-    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
+    self as query_driver, ColumnInfo, MAX_ROWS, QueryDriver, QueryResult, SchemaInfo, Statement,
     qualify_colliding_names,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
@@ -504,9 +504,10 @@ impl QueryDriver for MongoDriver {
                 anyhow::bail!("use requires a database name");
             }
             *self.current_db.lock().unwrap() = Some(name.to_string());
-            return Ok(QueryResult::Documents(vec![
-                serde_json::json!({ "switched to db": name }),
-            ]));
+            return Ok(QueryResult::Documents {
+                items: vec![serde_json::json!({ "switched to db": name })],
+                truncated: false,
+            });
         }
         if trimmed == "show dbs" || trimmed == "show databases" {
             let client = self
@@ -525,7 +526,10 @@ impl QueryDriver for MongoDriver {
                     })
                 })
                 .collect();
-            return Ok(QueryResult::Documents(docs));
+            return Ok(QueryResult::Documents {
+                items: docs,
+                truncated: false,
+            });
         }
 
         let parsed = parse_shell_query(trimmed)?;
@@ -538,8 +542,8 @@ impl QueryDriver for MongoDriver {
         // paths wrap an ObjectId/DateTime the same way, so simplifying
         // once here covers every method uniformly instead of repeating
         // the call at each of the eight call sites in `run_method`.
-        if let QueryResult::Documents(docs) = &mut result {
-            for doc in docs {
+        if let QueryResult::Documents { items, .. } = &mut result {
+            for doc in items {
                 simplify_extjson(doc);
             }
         }
@@ -941,15 +945,33 @@ async fn run_method(
 
             let mut cursor = builder.await?;
             let mut docs = Vec::new();
+            let mut total: usize = 0;
+            let mut truncated = false;
             while let Some(doc) = cursor.try_next().await? {
+                total += 1;
+                if wants_count {
+                    // `.count()` needs the real total, not just however
+                    // many fit under `MAX_ROWS` -- so this path scans the
+                    // whole cursor without ever materialising a document,
+                    // same memory profile as the capped path below.
+                    continue;
+                }
+                if docs.len() >= MAX_ROWS {
+                    truncated = true;
+                    break;
+                }
                 docs.push(Bson::Document(doc).into_relaxed_extjson());
             }
             if wants_count {
-                Ok(QueryResult::Documents(vec![
-                    serde_json::json!({ "count": docs.len() }),
-                ]))
+                Ok(QueryResult::Documents {
+                    items: vec![serde_json::json!({ "count": total })],
+                    truncated: false,
+                })
             } else {
-                Ok(QueryResult::Documents(docs))
+                Ok(QueryResult::Documents {
+                    items: docs,
+                    truncated,
+                })
             }
         }
         "findOne" => {
@@ -968,7 +990,10 @@ async fn run_method(
                 Some(doc) => vec![Bson::Document(doc).into_relaxed_extjson()],
                 None => Vec::new(),
             };
-            Ok(QueryResult::Documents(docs))
+            Ok(QueryResult::Documents {
+                items: docs,
+                truncated: false,
+            })
         }
         "countDocuments" => {
             reject_chain()?;
@@ -979,9 +1004,10 @@ async fn run_method(
                 doc_arg(0)?
             };
             let count = collection.count_documents(filter).await?;
-            Ok(QueryResult::Documents(vec![
-                serde_json::json!({ "count": count }),
-            ]))
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::json!({ "count": count })],
+                truncated: false,
+            })
         }
         "aggregate" => {
             reject_chain()?;
@@ -1000,16 +1026,27 @@ async fn run_method(
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let mut cursor = collection.aggregate(pipeline).await?;
             let mut docs = Vec::new();
+            let mut truncated = false;
             while let Some(doc) = cursor.try_next().await? {
+                if docs.len() >= MAX_ROWS {
+                    truncated = true;
+                    break;
+                }
                 docs.push(Bson::Document(doc).into_relaxed_extjson());
             }
-            Ok(QueryResult::Documents(docs))
+            Ok(QueryResult::Documents {
+                items: docs,
+                truncated,
+            })
         }
         "insertOne" => {
             reject_chain()?;
             max_args(1)?;
             let result = collection.insert_one(doc_arg(0)?).await?;
-            Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::to_value(result)?],
+                truncated: false,
+            })
         }
         "insertMany" => {
             reject_chain()?;
@@ -1024,32 +1061,47 @@ async fn run_method(
                 .map(json_to_document)
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let result = collection.insert_many(docs).await?;
-            Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::to_value(result)?],
+                truncated: false,
+            })
         }
         "updateOne" => {
             reject_chain()?;
             // filter, update; a 3rd "options" argument is not supported.
             max_args(2)?;
             let result = collection.update_one(doc_arg(0)?, doc_arg(1)?).await?;
-            Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::to_value(result)?],
+                truncated: false,
+            })
         }
         "updateMany" => {
             reject_chain()?;
             max_args(2)?;
             let result = collection.update_many(doc_arg(0)?, doc_arg(1)?).await?;
-            Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::to_value(result)?],
+                truncated: false,
+            })
         }
         "deleteOne" => {
             reject_chain()?;
             max_args(1)?;
             let result = collection.delete_one(doc_arg(0)?).await?;
-            Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::to_value(result)?],
+                truncated: false,
+            })
         }
         "deleteMany" => {
             reject_chain()?;
             max_args(1)?;
             let result = collection.delete_many(doc_arg(0)?).await?;
-            Ok(QueryResult::Documents(vec![serde_json::to_value(result)?]))
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::to_value(result)?],
+                truncated: false,
+            })
         }
         other => {
             anyhow::bail!("unsupported query: db.<collection>.{other}(...) is not implemented")
@@ -1278,7 +1330,7 @@ mod tests {
         let result = driver.execute(&statements[0].text).await.unwrap();
 
         match result {
-            QueryResult::Documents(docs) => assert_eq!(docs.len(), 1),
+            QueryResult::Documents { items: docs, .. } => assert_eq!(docs.len(), 1),
             other => panic!("expected Documents, got {other:?}"),
         }
     }
@@ -2084,7 +2136,7 @@ mod tests {
 
         let result = driver.execute("show dbs").await.unwrap();
 
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         assert!(
@@ -2110,7 +2162,7 @@ mod tests {
             .unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs.len(), 1);
                 assert_eq!(docs[0]["name"], "Ada");
             }
@@ -2134,7 +2186,7 @@ mod tests {
             .await
             .unwrap();
 
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         let id = docs[0]["_id"].as_str().expect("_id must be a string");
@@ -2169,7 +2221,7 @@ mod tests {
             .execute(r#"db.users.find({"name": "Ada"})"#)
             .await
             .unwrap();
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         let id = docs[0]["_id"].as_str().unwrap().to_string();
@@ -2190,7 +2242,7 @@ mod tests {
             .execute(&format!(r#"db.users.find({{"_id": {id}}})"#))
             .await
             .unwrap();
-        let QueryResult::Documents(docs) = after_update else {
+        let QueryResult::Documents { items: docs, .. } = after_update else {
             panic!("expected Documents");
         };
         assert_eq!(docs[0]["age"], 31, "doc after update: {:?}", docs[0]);
@@ -2208,7 +2260,7 @@ mod tests {
             .execute(&format!(r#"db.users.find({{"_id": {id}}})"#))
             .await
             .unwrap();
-        let QueryResult::Documents(docs) = after_delete else {
+        let QueryResult::Documents { items: docs, .. } = after_delete else {
             panic!("expected Documents");
         };
         assert!(docs.is_empty(), "doc should be deleted: {docs:?}");
@@ -2226,7 +2278,7 @@ mod tests {
             .await
             .unwrap();
 
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         let id = docs[0]["insertedId"]
@@ -2255,13 +2307,45 @@ mod tests {
             .unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs.len(), 1);
                 assert_eq!(docs[0]["item"], "pen");
                 assert_eq!(docs[0]["qty"], 2);
             }
             other => panic!("expected Documents, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_aggregate_caps_at_max_rows_and_reports_truncated() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        let docs: Vec<serde_json::Value> = (0..MAX_ROWS + 1)
+            .map(|i| serde_json::json!({"n": i}))
+            .collect();
+        driver
+            .execute(&format!(
+                "db.items.insertMany({})",
+                serde_json::to_string(&docs).unwrap()
+            ))
+            .await
+            .unwrap();
+
+        let result = driver
+            .execute(r#"db.items.aggregate([{"$match": {}}])"#)
+            .await
+            .unwrap();
+
+        let QueryResult::Documents { items, truncated } = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(items.len(), MAX_ROWS);
+        assert!(
+            truncated,
+            "more matches than MAX_ROWS must be reported as truncated"
+        );
     }
 
     #[tokio::test]
@@ -2280,7 +2364,7 @@ mod tests {
             .await
             .unwrap();
 
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         assert_eq!(docs.len(), 1);
@@ -2312,7 +2396,7 @@ mod tests {
             .await
             .unwrap();
 
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         assert_eq!(docs.len(), 1, "docs were: {docs:?}");
@@ -2337,10 +2421,91 @@ mod tests {
             .await
             .unwrap();
 
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         assert_eq!(docs, vec![serde_json::json!({"count": 3})]);
+    }
+
+    #[tokio::test]
+    async fn execute_find_caps_at_max_rows_and_reports_truncated() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        let docs: Vec<serde_json::Value> = (0..MAX_ROWS + 1)
+            .map(|i| serde_json::json!({"n": i}))
+            .collect();
+        driver
+            .execute(&format!(
+                "db.items.insertMany({})",
+                serde_json::to_string(&docs).unwrap()
+            ))
+            .await
+            .unwrap();
+
+        let result = driver.execute("db.items.find({})").await.unwrap();
+
+        let QueryResult::Documents { items, truncated } = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(items.len(), MAX_ROWS);
+        assert!(
+            truncated,
+            "more documents than MAX_ROWS must be reported as truncated"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_find_chained_count_is_accurate_even_past_max_rows() {
+        // `.count()` must still report the real total -- it must not be
+        // capped the same way the document list itself is, since the whole
+        // point of `.count()` is an accurate number, not a sample.
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        let docs: Vec<serde_json::Value> = (0..MAX_ROWS + 1)
+            .map(|i| serde_json::json!({"n": i}))
+            .collect();
+        driver
+            .execute(&format!(
+                "db.items.insertMany({})",
+                serde_json::to_string(&docs).unwrap()
+            ))
+            .await
+            .unwrap();
+
+        let result = driver.execute("db.items.find({}).count()").await.unwrap();
+
+        let QueryResult::Documents { items, truncated } = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(items, vec![serde_json::json!({"count": MAX_ROWS + 1})]);
+        assert!(
+            !truncated,
+            "a count report is one document, never itself truncated"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_find_under_the_cap_is_not_truncated() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.items.insertOne({"n": 1})"#)
+            .await
+            .unwrap();
+
+        let result = driver.execute("db.items.find({})").await.unwrap();
+
+        let QueryResult::Documents { items, truncated } = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(items.len(), 1);
+        assert!(!truncated);
     }
 
     #[tokio::test]
@@ -2358,7 +2523,7 @@ mod tests {
             .execute(r#"db.users.findOne({"name": "Ada"})"#)
             .await
             .unwrap();
-        let QueryResult::Documents(docs) = found else {
+        let QueryResult::Documents { items: docs, .. } = found else {
             panic!("expected Documents");
         };
         assert_eq!(docs.len(), 1);
@@ -2368,7 +2533,7 @@ mod tests {
             .execute(r#"db.users.findOne({"name": "nobody"})"#)
             .await
             .unwrap();
-        let QueryResult::Documents(docs) = missing else {
+        let QueryResult::Documents { items: docs, .. } = missing else {
             panic!("expected Documents");
         };
         assert!(docs.is_empty(), "docs were: {docs:?}");
@@ -2392,7 +2557,7 @@ mod tests {
             .await
             .unwrap();
 
-        let QueryResult::Documents(docs) = result else {
+        let QueryResult::Documents { items: docs, .. } = result else {
             panic!("expected Documents");
         };
         assert_eq!(docs, vec![serde_json::json!({"count": 2})]);

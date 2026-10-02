@@ -49,6 +49,13 @@ pub struct SnippetPickerComponent {
     /// confirming a menu item runs through the exact same `dispatch_command`
     /// a keyboard shortcut would.
     context_menu: Option<ui::ContextMenu>,
+    /// A case-insensitive substring narrowing `entries` by name or text --
+    /// same idiom as `NavigatorComponent::filter`. Kept even while
+    /// `filter_input` is closed so the title can still say what's applied
+    /// and a fresh `/` prefills it rather than starting over.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
 }
 
 impl SnippetPickerComponent {
@@ -72,6 +79,8 @@ impl SnippetPickerComponent {
             list_area: Rect::ZERO,
             double_click: DoubleClickTracker::new(),
             context_menu: None,
+            filter: String::new(),
+            filter_input: None,
         }
     }
 
@@ -79,13 +88,61 @@ impl SnippetPickerComponent {
         self.entries = tradar_core::storage::snippets()
             .map(|s| s.for_driver(&self.driver))
             .unwrap_or_default();
-        if self.selected >= self.entries.len() {
-            self.selected = self.entries.len().saturating_sub(1);
+        let len = self.visible_entries().len();
+        if self.selected >= len {
+            self.selected = len.saturating_sub(1);
         }
     }
 
+    /// `entries` narrowed by `filter` (matched against name or text), when
+    /// one's applied -- same idiom as `NavigatorComponent::visible_rows`.
+    fn visible_entries(&self) -> Vec<&SavedSnippet> {
+        if self.filter.is_empty() {
+            return self.entries.iter().collect();
+        }
+        let needle = self.filter.to_lowercase();
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.name.to_lowercase().contains(&needle)
+                    || entry.text.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
     pub fn selected_entry(&self) -> Option<&SavedSnippet> {
-        self.entries.get(self.selected)
+        self.visible_entries().into_iter().nth(self.selected)
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied.
+    fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys. `Esc` cancels -- clears
+    /// the bar *and* whatever was applied. `Enter` keeps the filter and
+    /// closes the bar. Anything else is text editing, applied live.
+    fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+                self.selected = 0;
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+                self.selected = 0;
+            }
+        }
     }
 
     pub fn handle_key_event(
@@ -143,6 +200,11 @@ impl SnippetPickerComponent {
             return None;
         }
 
+        if self.is_filtering() {
+            self.filter_key_event(code, modifiers);
+            return None;
+        }
+
         let key = KeyPress::new(code, modifiers);
         let Resolution::Command(command) =
             keymap().resolve_in(&[Context::Snippets, Context::List], &mut self.pending, key)
@@ -151,12 +213,13 @@ impl SnippetPickerComponent {
         };
 
         if let Some(mv) = command.as_vim_move() {
-            vim_list::apply(
-                mv,
-                &mut self.selected,
-                self.entries.len(),
-                self.visible_height,
-            );
+            let len = self.visible_entries().len();
+            vim_list::apply(mv, &mut self.selected, len, self.visible_height);
+            return None;
+        }
+
+        if command == Command::Search {
+            self.open_filter();
             return None;
         }
 
@@ -202,7 +265,7 @@ impl SnippetPickerComponent {
             }
             return None;
         }
-        if self.renaming.is_some() || self.confirming_delete {
+        if self.renaming.is_some() || self.confirming_delete || self.is_filtering() {
             return None;
         }
         let inner = Rect {
@@ -217,7 +280,7 @@ impl SnippetPickerComponent {
                     inner,
                     self.list_state.offset(),
                     event.row,
-                    self.entries.len(),
+                    self.visible_entries().len(),
                 )?;
                 self.selected = index;
                 if self.double_click.click(index) {
@@ -230,7 +293,7 @@ impl SnippetPickerComponent {
                     inner,
                     self.list_state.offset(),
                     event.row,
-                    self.entries.len(),
+                    self.visible_entries().len(),
                 )?;
                 self.selected = index;
                 let items = vec![
@@ -242,19 +305,21 @@ impl SnippetPickerComponent {
                 None
             }
             MouseEventKind::ScrollDown => {
+                let len = self.visible_entries().len();
                 vim_list::apply(
                     vim_list::VimMove::Down,
                     &mut self.selected,
-                    self.entries.len(),
+                    len,
                     self.visible_height,
                 );
                 None
             }
             MouseEventKind::ScrollUp => {
+                let len = self.visible_entries().len();
                 vim_list::apply(
                     vim_list::VimMove::Up,
                     &mut self.selected,
-                    self.entries.len(),
+                    len,
                     self.visible_height,
                 );
                 None
@@ -265,15 +330,18 @@ impl SnippetPickerComponent {
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let theme = theme();
-        let (list_area, rename_bar_area) = if self.renaming.is_some() {
+        // `renaming` and `filter_input` are never both `Some` at once (each
+        // is checked before the other ever gets a chance to open), so there's
+        // only ever one bottom bar to make room for.
+        let (list_area, bottom_bar_area) = if self.renaming.is_some() || self.is_filtering() {
             let (list_area, bar) = ui::split_bottom_bar(area, 1);
             (list_area, Some(bar))
         } else {
             (area, None)
         };
 
-        let items: Vec<ListItem> = self
-            .entries
+        let visible = self.visible_entries();
+        let items: Vec<ListItem> = visible
             .iter()
             .map(|entry| {
                 ListItem::new(Line::from(vec![
@@ -285,9 +353,10 @@ impl SnippetPickerComponent {
                 ]))
             })
             .collect();
+        let visible_len = items.len();
 
         self.list_area = list_area;
-        if !self.entries.is_empty() {
+        if visible_len > 0 {
             self.list_state.select(Some(self.selected));
         }
 
@@ -306,9 +375,14 @@ impl SnippetPickerComponent {
             .unwrap_or_default();
         let title = if self.confirming_delete {
             format!("Snippets — delete '{}'? y/N", self.selected_name())
-        } else {
+        } else if self.filter.is_empty() {
             format!(
                 "Snippets — {confirm} insert, {rename} rename, {delete} delete, {cancel} cancel"
+            )
+        } else {
+            format!(
+                "Snippets — filter: {} — {confirm} insert, {rename} rename, {delete} delete, {cancel} cancel",
+                self.filter
             )
         };
         let list = List::new(items)
@@ -316,10 +390,16 @@ impl SnippetPickerComponent {
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, list_area, &mut self.list_state);
 
-        if let (Some(bar_area), Some(input)) = (rename_bar_area, &self.renaming) {
-            let mut spans = vec![Span::styled("rename: ", Style::default().fg(theme.accent))];
-            spans.extend(input.spans(true));
-            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        if let Some(bar_area) = bottom_bar_area {
+            if let Some(input) = &self.renaming {
+                let mut spans = vec![Span::styled("rename: ", Style::default().fg(theme.accent))];
+                spans.extend(input.spans(true));
+                frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+            } else if let Some(input) = &self.filter_input {
+                let mut spans = vec![Span::styled("/", Style::default().fg(theme.accent))];
+                spans.extend(input.spans(true));
+                frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+            }
         }
 
         if let Some(menu) = &self.context_menu {
@@ -423,6 +503,75 @@ mod tests {
         let outcome = picker.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert_eq!(outcome, Some(SnippetOutcome::Cancelled));
+    }
+
+    #[test]
+    fn slash_opens_the_filter_and_narrows_by_name_or_text() {
+        let mut picker = picker();
+
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(picker.is_filtering());
+        for c in "orders".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(
+            picker.selected_entry().map(|e| e.name.as_str()),
+            Some("count-orders"),
+            "matched by text (SELECT ... FROM orders), not just name"
+        );
+    }
+
+    #[test]
+    fn esc_in_the_filter_clears_it_and_resets_the_cursor() {
+        let mut picker = picker();
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "count".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        picker.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(!picker.is_filtering());
+        assert!(picker.filter.is_empty());
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn inserting_while_filtered_inserts_the_matching_entry_not_the_raw_index() {
+        let mut picker = picker();
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "count".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE); // closes the bar
+
+        let outcome = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            outcome,
+            Some(SnippetOutcome::Insert(
+                "SELECT count(*) FROM orders;".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn renaming_while_filtered_renames_the_matching_entry() {
+        let mut picker = picker();
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "count".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE); // closes the bar
+
+        picker.handle_key_event(KeyCode::Char('r'), KeyModifiers::NONE);
+
+        assert_eq!(
+            picker.renaming.as_ref().map(|input| input.text()),
+            Some("count-orders".to_string()),
+            "must prefill the filtered entry's name, not whatever raw index 0 is"
+        );
     }
 
     #[test]

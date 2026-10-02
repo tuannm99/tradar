@@ -193,9 +193,10 @@ impl QueryDriver for RedisDriver {
         }
         let value: redis::Value = cmd.query_async(&mut connection).await?;
 
-        Ok(QueryResult::Documents(vec![shape_reply(
-            command, args, &value,
-        )]))
+        Ok(QueryResult::Documents {
+            items: vec![shape_reply(command, args, &value)],
+            truncated: false,
+        })
     }
 
     /// The browse sidebar's Enter action: run the command that shows
@@ -304,10 +305,10 @@ impl BrowseKind {
 /// `result` unchanged if it isn't the single-`Documents` shape `execute()`
 /// always produces -- defensive, not expected to trigger.
 fn reshape_for_browse(kind: BrowseKind, result: QueryResult) -> QueryResult {
-    let QueryResult::Documents(docs) = &result else {
+    let QueryResult::Documents { items, .. } = &result else {
         return result;
     };
-    let Some(value) = docs.first() else {
+    let Some(value) = items.first() else {
         return result;
     };
 
@@ -597,7 +598,7 @@ mod tests {
         let result = driver.execute("HGETALL user:1").await.unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs[0]["name"], "Ada");
                 assert_eq!(docs[0]["age"], "36");
             }
@@ -622,7 +623,7 @@ mod tests {
             .unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(
                     docs[0],
                     serde_json::json!([

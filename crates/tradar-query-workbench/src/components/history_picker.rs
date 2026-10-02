@@ -7,12 +7,12 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::Span;
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::theme::theme;
-use tradar_core::ui::{self, DoubleClickTracker};
+use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +34,13 @@ pub struct HistoryPickerComponent {
     list_state: ListState,
     list_area: Rect,
     double_click: DoubleClickTracker,
+    /// A case-insensitive substring narrowing `entries` -- same idiom as
+    /// `NavigatorComponent::filter`. Kept even while `filter_input` is
+    /// closed so the title can still say what's applied and a fresh `/`
+    /// prefills it rather than starting over.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
 }
 
 impl HistoryPickerComponent {
@@ -49,6 +56,8 @@ impl HistoryPickerComponent {
             list_state: ListState::default(),
             list_area: Rect::ZERO,
             double_click: DoubleClickTracker::new(),
+            filter: String::new(),
+            filter_input: None,
         }
     }
 
@@ -59,8 +68,54 @@ impl HistoryPickerComponent {
         self
     }
 
+    /// `entries` narrowed by `filter`, when one's applied -- same idiom as
+    /// `NavigatorComponent::visible_rows`.
+    fn visible_entries(&self) -> Vec<&String> {
+        if self.filter.is_empty() {
+            return self.entries.iter().collect();
+        }
+        let needle = self.filter.to_lowercase();
+        self.entries
+            .iter()
+            .filter(|entry| entry.to_lowercase().contains(&needle))
+            .collect()
+    }
+
     pub fn selected_entry(&self) -> Option<&str> {
-        self.entries.get(self.selected).map(String::as_str)
+        self.visible_entries()
+            .get(self.selected)
+            .map(|s| s.as_str())
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied.
+    fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys. `Esc` cancels -- clears
+    /// the bar *and* whatever was applied. `Enter` keeps the filter and
+    /// closes the bar. Anything else is text editing, applied live.
+    fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+                self.selected = 0;
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+                self.selected = 0;
+            }
+        }
     }
 
     pub fn handle_key_event(
@@ -68,20 +123,23 @@ impl HistoryPickerComponent {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<HistoryOutcome> {
+        if self.is_filtering() {
+            self.filter_key_event(code, modifiers);
+            return None;
+        }
+
         let key = KeyPress::new(code, modifiers);
-        let Resolution::Command(command) =
-            keymap().resolve_in(&[Context::Prompt, Context::List], &mut self.pending, key)
-        else {
+        let Resolution::Command(command) = keymap().resolve_in(
+            &[Context::History, Context::Prompt, Context::List],
+            &mut self.pending,
+            key,
+        ) else {
             return None;
         };
 
         if let Some(mv) = command.as_vim_move() {
-            vim_list::apply(
-                mv,
-                &mut self.selected,
-                self.entries.len(),
-                self.visible_height,
-            );
+            let len = self.visible_entries().len();
+            vim_list::apply(mv, &mut self.selected, len, self.visible_height);
             return None;
         }
 
@@ -90,6 +148,10 @@ impl HistoryPickerComponent {
             Command::Confirm => self
                 .selected_entry()
                 .map(|entry| HistoryOutcome::Selected(entry.to_string())),
+            Command::Search => {
+                self.open_filter();
+                None
+            }
             _ => None,
         }
     }
@@ -106,22 +168,25 @@ impl HistoryPickerComponent {
             width: self.list_area.width.saturating_sub(2),
             height: self.list_area.height.saturating_sub(2),
         };
-        let index = ui::index_at(
-            inner,
-            self.list_state.offset(),
-            event.row,
-            self.entries.len(),
-        )?;
+        let visible: Vec<String> = self.visible_entries().into_iter().cloned().collect();
+        let index = ui::index_at(inner, self.list_state.offset(), event.row, visible.len())?;
         self.selected = index;
         self.double_click
             .click(index)
-            .then(|| HistoryOutcome::Selected(self.entries[index].clone()))
+            .then(|| HistoryOutcome::Selected(visible[index].clone()))
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let theme = theme();
-        let items: Vec<ListItem> = self
-            .entries
+        let (area, filter_bar_area) = if self.filter_input.is_some() {
+            let (list_area, bar) = ui::split_bottom_bar(area, 1);
+            (list_area, Some(bar))
+        } else {
+            (area, None)
+        };
+
+        let visible = self.visible_entries();
+        let items: Vec<ListItem> = visible
             .iter()
             .map(|entry| {
                 ListItem::new(Span::styled(
@@ -130,9 +195,10 @@ impl HistoryPickerComponent {
                 ))
             })
             .collect();
+        let visible_len = items.len();
 
         self.list_area = area;
-        if !self.entries.is_empty() {
+        if visible_len > 0 {
             self.list_state.select(Some(self.selected));
         }
 
@@ -143,13 +209,24 @@ impl HistoryPickerComponent {
         let cancel = keymap()
             .binding_for(Context::Prompt, Command::Cancel)
             .unwrap_or_default();
+        let title = if self.filter.is_empty() {
+            format!("{} — {confirm} load, {cancel} cancel", self.title)
+        } else {
+            format!(
+                "{} — filter: {} — {confirm} load, {cancel} cancel",
+                self.title, self.filter
+            )
+        };
         let list = List::new(items)
-            .block(ui::panel(
-                &format!("{} — {confirm} load, {cancel} cancel", self.title),
-                true,
-            ))
+            .block(ui::panel(&title, true))
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, area, &mut self.list_state);
+
+        if let (Some(bar_area), Some(input)) = (filter_bar_area, &self.filter_input) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme.accent))];
+            spans.extend(input.spans(true));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
     }
 }
 
@@ -258,6 +335,89 @@ mod tests {
         let outcome = picker.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
 
         assert_eq!(outcome, Some(HistoryOutcome::Cancelled));
+    }
+
+    #[test]
+    fn slash_opens_the_filter_and_narrows_entries_case_insensitively() {
+        let mut picker = HistoryPickerComponent::new(vec![
+            "SELECT orders".to_string(),
+            "select payments".to_string(),
+            "delete users".to_string(),
+        ]);
+
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(picker.is_filtering());
+        for c in "select".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(picker.selected_entry(), Some("SELECT orders"));
+        let visible: Vec<&str> = picker
+            .visible_entries()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(visible, vec!["SELECT orders", "select payments"]);
+    }
+
+    #[test]
+    fn esc_in_the_filter_clears_it_and_resets_the_cursor() {
+        let mut picker =
+            HistoryPickerComponent::new(vec!["select 1".to_string(), "select 2".to_string()]);
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "select".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        picker.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE);
+
+        picker.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(!picker.is_filtering());
+        assert!(picker.filter.is_empty());
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.visible_entries().len(), 2);
+    }
+
+    #[test]
+    fn enter_in_the_filter_keeps_it_applied_and_closes_the_bar() {
+        let mut picker =
+            HistoryPickerComponent::new(vec!["select 1".to_string(), "delete users".to_string()]);
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "select".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(!picker.is_filtering());
+        assert_eq!(picker.filter, "select");
+        assert_eq!(
+            picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE),
+            Some(HistoryOutcome::Selected("select 1".to_string())),
+            "the real Enter (not the filter's) must still load the filtered entry"
+        );
+    }
+
+    #[test]
+    fn loading_an_entry_while_filtered_loads_the_matching_one_not_the_raw_index() {
+        let mut picker = HistoryPickerComponent::new(vec![
+            "select 1".to_string(),
+            "delete users".to_string(),
+            "select 2".to_string(),
+        ]);
+        picker.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "select".chars() {
+            picker.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE); // close the bar
+        picker.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE); // "select 2"
+
+        let outcome = picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            outcome,
+            Some(HistoryOutcome::Selected("select 2".to_string()))
+        );
     }
 
     #[test]

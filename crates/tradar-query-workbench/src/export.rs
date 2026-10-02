@@ -17,7 +17,7 @@ pub fn to_csv(result: &QueryResult) -> Result<String, String> {
             }
             Ok(out)
         }
-        QueryResult::Documents(_) => Err(
+        QueryResult::Documents { .. } => Err(
             "CSV export needs a table result -- this connector returns documents, use a .json path instead"
                 .to_string(),
         ),
@@ -41,8 +41,8 @@ pub fn to_json(result: &QueryResult) -> Result<String, String> {
                 .collect();
             serde_json::to_string_pretty(&docs).map_err(|e| e.to_string())
         }
-        QueryResult::Documents(docs) => {
-            serde_json::to_string_pretty(docs).map_err(|e| e.to_string())
+        QueryResult::Documents { items, .. } => {
+            serde_json::to_string_pretty(items).map_err(|e| e.to_string())
         }
         QueryResult::Affected { .. } => Err("nothing to export".to_string()),
     }
@@ -102,7 +102,10 @@ mod tests {
 
     #[test]
     fn csv_refuses_documents_with_a_clear_message() {
-        let result = QueryResult::Documents(vec![serde_json::json!({"a": 1})]);
+        let result = QueryResult::Documents {
+            items: vec![serde_json::json!({"a": 1})],
+            truncated: false,
+        };
 
         let error = to_csv(&result).unwrap_err();
 
@@ -132,7 +135,10 @@ mod tests {
 
     #[test]
     fn json_from_documents_passes_them_through_pretty_printed() {
-        let result = QueryResult::Documents(vec![serde_json::json!({"a": 1})]);
+        let result = QueryResult::Documents {
+            items: vec![serde_json::json!({"a": 1})],
+            truncated: false,
+        };
 
         let json = to_json(&result).unwrap();
 

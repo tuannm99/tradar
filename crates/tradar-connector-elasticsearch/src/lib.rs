@@ -137,8 +137,14 @@ fn handle_response(status: reqwest::StatusCode, text: String) -> anyhow::Result<
     // it always has, the whole response as one `Documents` entry, since
     // there's no per-row structure to unwrap.
     match unwrap_search_hits(&json) {
-        Some(docs) => Ok(QueryResult::Documents(docs)),
-        None => Ok(QueryResult::Documents(vec![json])),
+        Some(docs) => Ok(QueryResult::Documents {
+            items: docs,
+            truncated: false,
+        }),
+        None => Ok(QueryResult::Documents {
+            items: vec![json],
+            truncated: false,
+        }),
     }
 }
 
@@ -658,7 +664,7 @@ mod tests {
         .unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs, vec![serde_json::json!({"status": "green"})]);
             }
             other => panic!("expected Documents, got {other:?}"),
@@ -699,7 +705,7 @@ mod tests {
         .unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs.len(), 1);
                 assert!(docs[0].is_string());
             }
@@ -1073,7 +1079,7 @@ mod tests {
         let result = driver.execute("GET _cluster/health").await.unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs.len(), 1);
                 assert!(docs[0].get("status").is_some(), "response was: {docs:?}");
             }
@@ -1092,7 +1098,7 @@ mod tests {
 
         let result = result.unwrap_or_else(|e| panic!("expected Ok, got error: {e:?}"));
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs.len(), 1);
                 assert!(
                     docs[0].is_string(),
@@ -1131,7 +1137,7 @@ mod tests {
             .unwrap();
 
         match result {
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 assert_eq!(docs.len(), 2, "docs were: {docs:?}");
                 for doc in &docs {
                     assert!(doc.get("_id").is_some(), "doc was: {doc:?}");

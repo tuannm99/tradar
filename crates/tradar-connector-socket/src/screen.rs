@@ -145,7 +145,15 @@ impl SocketScreen {
                 )
             }
         );
-        let block = ui::panel(&title, false);
+        let mut block = ui::panel(&title, false);
+        if !self.session.connected {
+            // Same "a dropped connection outranks the usual border color"
+            // rule `QueryEditorComponent::draw` uses for SQL/Mongo/ES's
+            // own disconnected badge -- the title text already says
+            // "disconnected", but nothing colored it, so it read exactly
+            // like a normal, connected panel title.
+            block = block.border_style(Style::default().fg(theme().error));
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
         self.visible_height = inner.height as usize;
@@ -332,6 +340,22 @@ mod tests {
         // triggered `reconnect()` rather than being swallowed as text.
         assert!(!screen.session.connected);
         assert_eq!(screen.input.text(), "", "must not have been typed");
+    }
+
+    #[tokio::test]
+    async fn drawing_while_disconnected_does_not_panic() {
+        // Smoke test for the error-colored border on a dropped connection
+        // (`draw_log`'s `border_style` override) -- this project doesn't
+        // assert on rendered colors anywhere, just that the state renders.
+        let mut screen = screen().await;
+        screen.session.connected = false;
+        screen.session.error = Some("connection reset".to_string());
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
     }
 
     #[tokio::test]

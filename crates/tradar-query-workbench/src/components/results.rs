@@ -464,7 +464,7 @@ impl ResultsComponent {
     pub fn set_result(&mut self, result: QueryResult) {
         self.version += 1;
         self.doc_table = match &result {
-            QueryResult::Documents(docs) => Some(documents_as_table(docs)),
+            QueryResult::Documents { items, .. } => Some(documents_as_table(items)),
             _ => None,
         };
         self.last_result = Some(result);
@@ -575,7 +575,7 @@ impl ResultsComponent {
             // compare, same as any column of unknown type. `columns` (the
             // flattened table's own header) is real, though, so `col:value`
             // still scopes correctly here.
-            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => self
+            Some(QueryResult::Documents { .. }) if self.doc_view == DocumentView::Table => self
                 .doc_table
                 .as_ref()
                 .map(|(columns, rows)| {
@@ -586,7 +586,7 @@ impl ResultsComponent {
             // condition falls back to a bare substring, checked against the
             // whole document's JSON text rather than one cell (see
             // `ParsedFilter::matches_text`).
-            Some(QueryResult::Documents(docs)) => {
+            Some(QueryResult::Documents { items: docs, .. }) => {
                 let parsed = crate::filter::ParsedFilter::parse(&self.filter, &[]);
                 docs.iter()
                     .enumerate()
@@ -642,7 +642,7 @@ impl ResultsComponent {
     fn total_count(&self) -> usize {
         match &self.last_result {
             Some(QueryResult::Table { rows, .. }) => rows.len(),
-            Some(QueryResult::Documents(docs)) => docs.len(),
+            Some(QueryResult::Documents { items: docs, .. }) => docs.len(),
             // Nothing to select: it's a one-line report, not a list.
             Some(QueryResult::Affected { .. }) | None => 0,
         }
@@ -655,7 +655,9 @@ impl ResultsComponent {
     /// even while the JSON view's own cursor moves line by line.
     fn cursor_count(&self) -> usize {
         match &self.last_result {
-            Some(QueryResult::Documents(docs)) if self.doc_view == DocumentView::Json => {
+            Some(QueryResult::Documents { items: docs, .. })
+                if self.doc_view == DocumentView::Json =>
+            {
                 self.cached_json_lines(docs).len()
             }
             _ => self.item_count(),
@@ -688,7 +690,7 @@ impl ResultsComponent {
     /// -- landing back at the top is less surprising than landing on an
     /// arbitrary row/line the toggle happens to share an index with.
     pub fn toggle_document_view(&mut self) {
-        if !matches!(self.last_result, Some(QueryResult::Documents(_))) {
+        if !matches!(self.last_result, Some(QueryResult::Documents { .. })) {
             return;
         }
         self.version += 1;
@@ -787,7 +789,7 @@ impl ResultsComponent {
     pub fn columns(&self) -> &[String] {
         match &self.last_result {
             Some(QueryResult::Table { columns, .. }) => columns,
-            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => self
+            Some(QueryResult::Documents { .. }) if self.doc_view == DocumentView::Table => self
                 .doc_table
                 .as_ref()
                 .map_or(&[], |(columns, _)| columns.as_slice()),
@@ -802,7 +804,7 @@ impl ResultsComponent {
         let index = self.selected_item()?;
         match &self.last_result {
             Some(QueryResult::Table { rows, .. }) => rows.get(index),
-            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Table => {
+            Some(QueryResult::Documents { .. }) if self.doc_view == DocumentView::Table => {
                 self.doc_table.as_ref()?.1.get(index)
             }
             _ => None,
@@ -823,7 +825,7 @@ impl ResultsComponent {
             return false;
         }
         let offset = match &self.last_result {
-            Some(QueryResult::Documents(_)) if self.doc_view == DocumentView::Json => {
+            Some(QueryResult::Documents { .. }) if self.doc_view == DocumentView::Json => {
                 self.list_state.offset()
             }
             _ => self.table_state.offset(),
@@ -874,7 +876,7 @@ impl ResultsComponent {
         // JSON view's cursor is a *line* (`json_lines`), not a document --
         // `y` yanks exactly that line, vim `yy`-on-a-line-of-text style,
         // not the whole document it happens to be part of.
-        if let Some(QueryResult::Documents(docs)) = self.last_result.as_ref()
+        if let Some(QueryResult::Documents { items: docs, .. }) = self.last_result.as_ref()
             && self.doc_view == DocumentView::Json
         {
             return self.cached_json_lines(docs).get(self.selected).cloned();
@@ -884,7 +886,7 @@ impl ResultsComponent {
             QueryResult::Table { rows, .. } => rows.get(index).map(|row| row.join("\t")),
             // Table view of a `Documents` result: tab-separated like any
             // other table.
-            QueryResult::Documents(_) => self
+            QueryResult::Documents { .. } => self
                 .doc_table
                 .as_ref()?
                 .1
@@ -956,7 +958,7 @@ impl ResultsComponent {
                 }
                 title
             }
-            (None, Some(QueryResult::Documents(_))) => {
+            (None, Some(QueryResult::Documents { truncated, .. })) => {
                 let total = self.total_count();
                 // Still says "documents", even in table view: the data is a
                 // set of documents no matter how it's rendered, and saying
@@ -967,15 +969,19 @@ impl ResultsComponent {
                 } else {
                     ""
                 };
-                if self.filter.is_empty() {
-                    format!("Results ({}){view}", count(total, "document"))
-                } else {
+                if !self.filter.is_empty() {
                     format!(
                         "Results ({} of {} — filter: {}){view}",
                         self.item_count(),
                         count(total, "document"),
                         self.filter
                     )
+                } else if *truncated {
+                    // Same "say so loudly" rule `Table::truncated` follows
+                    // above.
+                    format!("Results (first {total} documents — truncated){view}")
+                } else {
+                    format!("Results ({}){view}", count(total, "document"))
                 }
             }
             (None, Some(QueryResult::Affected { .. })) => "Results".to_string(),
@@ -1051,7 +1057,7 @@ impl ResultsComponent {
                     &mut self.table_state,
                 );
             }
-            QueryResult::Documents(_) if self.doc_view == DocumentView::Table => {
+            QueryResult::Documents { .. } if self.doc_view == DocumentView::Table => {
                 let Some((columns, rows)) = &self.doc_table else {
                     return;
                 };
@@ -1093,7 +1099,7 @@ impl ResultsComponent {
                     inner,
                 );
             }
-            QueryResult::Documents(docs) => {
+            QueryResult::Documents { items: docs, .. } => {
                 self.visible_height = inner.height as usize;
 
                 // One `ListItem` per *line*, not per document (a blank line
@@ -1869,10 +1875,10 @@ mod tests {
     #[test]
     fn selected_text_yanks_only_the_current_line_in_json_view() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![
-            serde_json::json!({"a": 1}),
-            serde_json::json!({"b": 2}),
-        ]));
+        results.set_result(QueryResult::Documents {
+            items: vec![serde_json::json!({"a": 1}), serde_json::json!({"b": 2})],
+            truncated: false,
+        });
 
         assert_eq!(
             results.selected_text().as_deref(),
@@ -1905,9 +1911,10 @@ mod tests {
     #[test]
     fn draw_shows_documents_pretty_printed() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![
-            serde_json::json!({"name": "Ada"}),
-        ]));
+        results.set_result(QueryResult::Documents {
+            items: vec![serde_json::json!({"name": "Ada"})],
+            truncated: false,
+        });
 
         let text = draw_component(&mut results, 40, 10);
 
@@ -1921,7 +1928,10 @@ mod tests {
         for i in 0..20 {
             doc.insert(format!("field{i:02}"), serde_json::json!(i));
         }
-        results.set_result(QueryResult::Documents(vec![serde_json::Value::Object(doc)]));
+        results.set_result(QueryResult::Documents {
+            items: vec![serde_json::Value::Object(doc)],
+            truncated: false,
+        });
 
         // A panel far too short to show all 20 fields (plus the braces) at
         // once -- before this, `j` jumped straight to the next document
@@ -2098,10 +2108,13 @@ mod tests {
         );
 
         // Documents/JSON view: `cached_json_lines` specifically.
-        results.set_result(QueryResult::Documents(vec![
-            serde_json::json!({"name": "Ada"}),
-            serde_json::json!({"name": "Lin"}),
-        ]));
+        results.set_result(QueryResult::Documents {
+            items: vec![
+                serde_json::json!({"name": "Ada"}),
+                serde_json::json!({"name": "Lin"}),
+            ],
+            truncated: false,
+        });
         assert_eq!(
             results.cursor_count(),
             7,
@@ -2248,10 +2261,13 @@ mod tests {
     #[test]
     fn documents_are_filtered_on_their_json_text() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![
-            serde_json::json!({"name": "Ada"}),
-            serde_json::json!({"name": "Lin"}),
-        ]));
+        results.set_result(QueryResult::Documents {
+            items: vec![
+                serde_json::json!({"name": "Ada"}),
+                serde_json::json!({"name": "Lin"}),
+            ],
+            truncated: false,
+        });
 
         results.set_filter("lin");
 
@@ -2272,10 +2288,13 @@ mod tests {
     /// first, `city` only on the second -- and a nested object, all in one
     /// result: the shape `documents_as_table` actually has to handle.
     fn heterogeneous_docs() -> QueryResult {
-        QueryResult::Documents(vec![
-            serde_json::json!({"name": "Ada", "age": 28}),
-            serde_json::json!({"name": "Lin", "city": "Hanoi", "meta": {"vip": true}}),
-        ])
+        QueryResult::Documents {
+            items: vec![
+                serde_json::json!({"name": "Ada", "age": 28}),
+                serde_json::json!({"name": "Lin", "city": "Hanoi", "meta": {"vip": true}}),
+            ],
+            truncated: false,
+        }
     }
 
     #[test]
@@ -2360,9 +2379,10 @@ mod tests {
     #[test]
     fn yanking_in_table_view_is_tab_separated_like_any_other_table() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![
-            serde_json::json!({"a": 1, "b": 2}),
-        ]));
+        results.set_result(QueryResult::Documents {
+            items: vec![serde_json::json!({"a": 1, "b": 2})],
+            truncated: false,
+        });
         results.toggle_document_view();
 
         assert_eq!(results.selected_text().as_deref(), Some("1\t2"));
@@ -2371,10 +2391,16 @@ mod tests {
     #[test]
     fn a_refresh_recomputes_the_flattened_table_for_the_new_result() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![serde_json::json!({"a": 1})]));
+        results.set_result(QueryResult::Documents {
+            items: vec![serde_json::json!({"a": 1})],
+            truncated: false,
+        });
         results.toggle_document_view();
 
-        results.set_result(QueryResult::Documents(vec![serde_json::json!({"b": 2})]));
+        results.set_result(QueryResult::Documents {
+            items: vec![serde_json::json!({"b": 2})],
+            truncated: false,
+        });
 
         assert_eq!(
             results.columns(),
@@ -2430,7 +2456,10 @@ mod tests {
     #[test]
     fn toggle_preview_is_a_no_op_without_a_selected_cell() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![serde_json::json!({"a": 1})]));
+        results.set_result(QueryResult::Documents {
+            items: vec![serde_json::json!({"a": 1})],
+            truncated: false,
+        });
 
         results.toggle_preview();
         let text = draw_component(&mut results, 60, 16);
@@ -2534,10 +2563,13 @@ mod tests {
     #[test]
     fn sort_by_column_is_a_no_op_in_the_raw_json_view_of_a_documents_result() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![
-            serde_json::json!({"name": "Lin"}),
-            serde_json::json!({"name": "Ada"}),
-        ]));
+        results.set_result(QueryResult::Documents {
+            items: vec![
+                serde_json::json!({"name": "Lin"}),
+                serde_json::json!({"name": "Ada"}),
+            ],
+            truncated: false,
+        });
         // The default view for a fresh `Documents` result -- no columns to
         // sort by, same check `selected_cell`/`columns()` already rely on.
         assert!(results.columns().is_empty());
@@ -2554,10 +2586,13 @@ mod tests {
     #[test]
     fn sort_by_column_works_once_a_documents_result_is_toggled_to_table_view() {
         let mut results = ResultsComponent::new();
-        results.set_result(QueryResult::Documents(vec![
-            serde_json::json!({"name": "Lin"}),
-            serde_json::json!({"name": "Ada"}),
-        ]));
+        results.set_result(QueryResult::Documents {
+            items: vec![
+                serde_json::json!({"name": "Lin"}),
+                serde_json::json!({"name": "Ada"}),
+            ],
+            truncated: false,
+        });
         results.toggle_document_view();
         assert!(
             !results.columns().is_empty(),

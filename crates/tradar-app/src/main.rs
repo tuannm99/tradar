@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
+use clap::Parser;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::event::{
     Event, EventStream, KeyEventKind, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
@@ -76,6 +77,19 @@ fn registry() -> HashMap<String, Box<dyn Connector>> {
         .collect()
 }
 
+/// No subcommands or flags of its own yet (`clap` was already a dependency,
+/// just unused) -- this exists purely so `tradar --help`/`--version` print
+/// something and exit instead of silently launching the TUI as if no
+/// argument had been given at all, which is what happened before this
+/// existed (`std::env::args()` was never read anywhere).
+#[derive(Parser)]
+#[command(
+    name = "tradar",
+    version,
+    about = "Terminal-first database exploration and query tool"
+)]
+struct Cli {}
+
 /// The result of a connect attempt, carried across a `tokio::spawn`
 /// boundary. Deliberately *not* `Action::Opened` itself: `Component` isn't
 /// bound to `Send`, so a `Screen` (`Box<dyn Component>`) must be built with
@@ -97,6 +111,12 @@ enum ConnectOutcome {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parses (and, for `--help`/`--version`, prints and exits here --
+    // clap's own behavior, before any terminal setup happens) with no
+    // arguments defined yet beyond those two; nothing to bind to `Cli`'s
+    // fields, since there are none.
+    Cli::parse();
+
     // Theme and key bindings, before anything is drawn. A broken config is
     // reported and skipped rather than being fatal: losing your colors
     // shouldn't stop you reaching your database.
