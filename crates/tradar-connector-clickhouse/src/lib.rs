@@ -87,7 +87,7 @@ impl ClickHouseDriver {
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
-            anyhow::bail!("{}", format_clickhouse_error(status, &text));
+            anyhow::bail!("{}", format_clickhouse_error(status, &text, sql));
         }
         Ok(text)
     }
@@ -135,13 +135,56 @@ fn parse_target(target: &str) -> anyhow::Result<ParsedTarget> {
     })
 }
 
-fn format_clickhouse_error(status: reqwest::StatusCode, body: &str) -> String {
+/// Formats a ClickHouse error, adding a `psql`-style `LINE N: ... ^` marker
+/// (`query_driver::line_and_caret`, shared with Postgres/MySQL/SQLite) when
+/// one can be recovered -- see `clickhouse_error_marker`'s own doc comment
+/// for why that's a token search, not ClickHouse's own numeric position.
+fn format_clickhouse_error(status: reqwest::StatusCode, body: &str, sql: &str) -> String {
     let first_line = body.lines().next().unwrap_or("").trim();
-    if first_line.is_empty() {
+    let message = if first_line.is_empty() {
         format!("clickhouse returned {status}")
     } else {
         format!("clickhouse returned {status}: {first_line}")
+    };
+    match clickhouse_error_marker(body, sql) {
+        Some(marker) => format!("{message}\n{marker}"),
+        None => message,
     }
+}
+
+/// The `LINE N: ... ^` marker for a ClickHouse syntax error, when its
+/// message is shaped like `Syntax error: failed at position N (<token>):
+/// ...`. `N` is ClickHouse's own count of the request body it actually
+/// received (`sql`, which is `query` plus a possibly-appended ` FORMAT
+/// JSON` -- never an issue in practice, since a syntax error always lands
+/// before that suffix) -- but this deliberately **doesn't** trust `N`
+/// directly, since whether it's 0- or 1-based, byte- or char-counted isn't
+/// confirmed against a live server anywhere in this codebase (no Docker in
+/// the sandbox this was written in -- see
+/// `docs/backlog/connector-ux-gaps-2026-10-02.md`). Instead it recovers the
+/// token quoted in `(...)` right after the position and finds *that* by
+/// substring search in `sql`, the same robust trick
+/// `tradar-connector-sqlite`'s `near_token_marker` and
+/// `tradar-connector-mysql`'s own `near_token_marker` already use for
+/// exactly this "no confirmed native position" situation. `None` when the
+/// message isn't shaped that way, or the token it names doesn't actually
+/// occur in `sql`.
+fn clickhouse_error_marker(body: &str, sql: &str) -> Option<String> {
+    let prefix = "failed at position ";
+    let after_prefix = &body[body.find(prefix)? + prefix.len()..];
+    let open = after_prefix.find('(')?;
+    let close = after_prefix[open..].find(')')?;
+    let token = after_prefix[open + 1..open + close].trim();
+    if token.is_empty() {
+        return None;
+    }
+    let byte_index = sql.find(token)?;
+    // `line_and_caret` wants a 1-based *character* index, matching
+    // Postgres's own convention -- counting chars up to the byte offset
+    // `find` returns, so multi-byte UTF-8 ahead of the token doesn't throw
+    // the caret off.
+    let char_index = sql[..byte_index].chars().count() + 1;
+    query_driver::line_and_caret(sql, char_index)
 }
 
 /// Whether `sql` already names its own output format, so `execute` doesn't
@@ -403,6 +446,47 @@ mod tests {
         assert!(!has_format_clause("select 1"));
         // "format" only as part of a longer identifier must not count.
         assert!(!has_format_clause("select reformatted from t"));
+    }
+
+    #[test]
+    fn clickhouse_error_marker_points_at_the_token_s_position() {
+        let body = "Code: 62. DB::Exception: Syntax error: failed at position 18 (is): \
+                     is not valid clickhouse sql. Expected one of: ...";
+        let sql = "SELECT this is not valid clickhouse sql";
+
+        let marker = clickhouse_error_marker(body, sql).unwrap();
+
+        assert!(marker.contains("LINE 1:"), "marker was: {marker}");
+        assert!(marker.contains('^'), "marker was: {marker}");
+    }
+
+    #[test]
+    fn clickhouse_error_marker_is_none_for_a_message_with_no_position() {
+        assert_eq!(
+            clickhouse_error_marker(
+                "Code: 60. DB::Exception: Table default.t doesn't exist",
+                "SELECT * FROM t"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clickhouse_error_marker_is_none_when_the_token_is_not_actually_in_the_sql() {
+        assert_eq!(
+            clickhouse_error_marker("failed at position 3 (xyz): ...", "SELECT * FROM t"),
+            None
+        );
+    }
+
+    #[test]
+    fn format_clickhouse_error_appends_the_marker_when_one_is_found() {
+        let body = "Syntax error: failed at position 18 (is): is not valid clickhouse sql.";
+        let sql = "SELECT this is not valid clickhouse sql";
+
+        let message = format_clickhouse_error(reqwest::StatusCode::BAD_REQUEST, body, sql);
+
+        assert!(message.contains("LINE 1:"), "message was: {message}");
     }
 
     #[test]

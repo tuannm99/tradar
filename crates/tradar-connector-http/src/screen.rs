@@ -83,6 +83,69 @@ struct RequestPicker {
     entries: Vec<SavedHttpRequest>,
     selected: usize,
     visible_height: usize,
+    /// A case-insensitive substring narrowing the list by request name --
+    /// same idiom as `ConnectionPickerComponent::filter`. Kept even while
+    /// `filter_input` is closed so the title can still say what's applied
+    /// and a fresh `/` prefills it rather than starting over.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
+}
+
+impl RequestPicker {
+    /// `entries` narrowed by `filter`, as indices into it -- what
+    /// `selected` actually counts through, and what the list draws. Same
+    /// shape as `ConnectionPickerComponent::visible_indices`.
+    fn visible_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.entries.len()).collect();
+        }
+        let needle = self.filter.to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.name.to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// `selected`, translated from an index into the *visible* list to the
+    /// real index into `entries` -- `None` when the filter matches nothing.
+    fn selected_entry_index(&self) -> Option<usize> {
+        self.visible_indices().get(self.selected).copied()
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied.
+    fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys -- same contract as
+    /// `ConnectionPickerComponent::filter_key_event`.
+    fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+            }
+        }
+        let len = self.visible_indices().len();
+        if self.selected >= len {
+            self.selected = len.saturating_sub(1);
+        }
+    }
 }
 
 pub struct HttpScreen {
@@ -201,6 +264,8 @@ impl HttpScreen {
             entries,
             selected: 0,
             visible_height: 0,
+            filter: String::new(),
+            filter_input: None,
         });
     }
 
@@ -208,9 +273,10 @@ impl HttpScreen {
         let Some(picker) = self.request_picker.take() else {
             return;
         };
-        let Some(entry) = picker.entries.get(picker.selected) else {
+        let Some(index) = picker.selected_entry_index() else {
             return;
         };
+        let entry = &picker.entries[index];
         self.method = HttpMethod::from_str(&entry.method);
         self.url = TextInput::new(&entry.url);
         self.headers.set_text(&entry.headers);
@@ -221,15 +287,19 @@ impl HttpScreen {
         let Some(picker) = self.request_picker.as_mut() else {
             return;
         };
-        let Some(entry) = picker.entries.get(picker.selected).cloned() else {
+        let Some(index) = picker.selected_entry_index() else {
             return;
         };
+        let entry = picker.entries[index].clone();
         if let Some(store) = tradar_core::storage::http_requests() {
             store.delete(&entry.name);
         }
-        picker.entries.remove(picker.selected);
-        if picker.selected >= picker.entries.len() {
-            picker.selected = picker.entries.len().saturating_sub(1);
+        picker.entries.remove(index);
+        // `selected` indexes into the *filtered* list, which just got one
+        // entry shorter -- same clamp `filter_key_event` does.
+        let len = picker.visible_indices().len();
+        if picker.selected >= len {
+            picker.selected = len.saturating_sub(1);
         }
     }
 
@@ -257,6 +327,17 @@ impl HttpScreen {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<Action> {
+        if self
+            .request_picker
+            .as_ref()
+            .is_some_and(RequestPicker::is_filtering)
+        {
+            if let Some(picker) = self.request_picker.as_mut() {
+                picker.filter_key_event(code, modifiers);
+            }
+            return None;
+        }
+
         let key = KeyPress::new(code, modifiers);
         let resolution = keymap().resolve_in(
             &[Context::HttpRequests, Context::List],
@@ -269,7 +350,7 @@ impl HttpScreen {
         };
         if let Some(mv) = command.as_vim_move() {
             if let Some(picker) = self.request_picker.as_mut() {
-                let len = picker.entries.len();
+                let len = picker.visible_indices().len();
                 let visible = picker.visible_height;
                 vim_list::apply(mv, &mut picker.selected, len, visible);
             }
@@ -279,6 +360,11 @@ impl HttpScreen {
             Command::Confirm => self.load_selected_request(),
             Command::Cancel => self.request_picker = None,
             Command::HttpDeleteRequest => self.delete_selected_request(),
+            Command::Search => {
+                if let Some(picker) = self.request_picker.as_mut() {
+                    picker.open_filter();
+                }
+            }
             _ => {}
         }
         None
@@ -447,15 +533,28 @@ impl HttpScreen {
         };
         let popup = ui::centered_rect(60, 50, area);
         frame.render_widget(Clear, popup);
-        let block = ui::panel("Saved requests — enter: load, d: delete, esc: close", true);
+        let title = if picker.filter.is_empty() {
+            "Saved requests — enter: load, d: delete, /: filter, esc: close".to_string()
+        } else {
+            format!("Saved requests — filter: {}", picker.filter)
+        };
+        let block = ui::panel(&title, true);
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        picker.visible_height = inner.height as usize;
 
-        let items: Vec<ListItem> = picker
-            .entries
+        let (list_area, filter_bar_area) = if picker.filter_input.is_some() {
+            let (list_area, bar) = ui::split_bottom_bar(inner, 1);
+            (list_area, Some(bar))
+        } else {
+            (inner, None)
+        };
+        picker.visible_height = list_area.height as usize;
+
+        let visible = picker.visible_indices();
+        let items: Vec<ListItem> = visible
             .iter()
-            .map(|r| {
+            .map(|&index| {
+                let r = &picker.entries[index];
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!(" {:<7}", r.method),
@@ -468,11 +567,17 @@ impl HttpScreen {
             .collect();
 
         let mut state = ListState::default();
-        if !picker.entries.is_empty() {
+        if !visible.is_empty() {
             state.select(Some(picker.selected));
         }
         let list = List::new(items).highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, inner, &mut state);
+        frame.render_stateful_widget(list, list_area, &mut state);
+
+        if let (Some(bar_area), Some(input)) = (filter_bar_area, &picker.filter_input) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme().accent))];
+            spans.extend(input.spans(true));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
     }
 }
 
@@ -784,6 +889,8 @@ mod tests {
             }],
             selected: 0,
             visible_height: 0,
+            filter: String::new(),
+            filter_input: None,
         });
 
         screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
@@ -817,6 +924,8 @@ mod tests {
             ],
             selected: 0,
             visible_height: 0,
+            filter: String::new(),
+            filter_input: None,
         });
 
         screen.handle_key_event(KeyCode::Char('d'), KeyModifiers::NONE);
@@ -824,6 +933,107 @@ mod tests {
         let picker = screen.request_picker.as_ref().unwrap();
         assert_eq!(picker.entries.len(), 1);
         assert_eq!(picker.entries[0].name, "b");
+    }
+
+    fn saved(name: &str) -> SavedHttpRequest {
+        SavedHttpRequest {
+            name: name.to_string(),
+            method: "GET".to_string(),
+            url: format!("/{name}"),
+            headers: String::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn slash_in_the_request_picker_opens_its_filter_bar() {
+        let mut screen = screen();
+        screen.request_picker = Some(RequestPicker {
+            entries: vec![saved("list-users"), saved("list-orders")],
+            selected: 0,
+            visible_height: 0,
+            filter: String::new(),
+            filter_input: None,
+        });
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+
+        assert!(
+            screen
+                .request_picker
+                .as_ref()
+                .is_some_and(RequestPicker::is_filtering)
+        );
+    }
+
+    #[test]
+    fn filter_narrows_visible_requests_case_insensitively() {
+        let mut picker = RequestPicker {
+            entries: vec![
+                saved("list-users"),
+                saved("list-orders"),
+                saved("USER-detail"),
+            ],
+            selected: 0,
+            visible_height: 0,
+            filter: String::new(),
+            filter_input: None,
+        };
+
+        picker.filter = "user".to_string();
+
+        let names: Vec<&str> = picker
+            .visible_indices()
+            .into_iter()
+            .map(|i| picker.entries[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["list-users", "USER-detail"]);
+    }
+
+    #[test]
+    fn esc_in_the_request_picker_filter_clears_it_and_resets_the_cursor() {
+        let mut screen = screen();
+        screen.request_picker = Some(RequestPicker {
+            entries: vec![saved("list-users"), saved("list-orders")],
+            selected: 0,
+            visible_height: 0,
+            filter: String::new(),
+            filter_input: None,
+        });
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "order".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        {
+            let picker = screen.request_picker.as_ref().unwrap();
+            assert_eq!(picker.filter, "order");
+            assert_eq!(picker.visible_indices().len(), 1);
+        }
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        let picker = screen.request_picker.as_ref().unwrap();
+        assert!(!picker.is_filtering());
+        assert!(picker.filter.is_empty());
+        assert_eq!(picker.visible_indices().len(), 2);
+    }
+
+    #[test]
+    fn loading_a_request_while_filtered_loads_the_matching_entry_not_the_raw_index() {
+        let mut screen = screen();
+        screen.request_picker = Some(RequestPicker {
+            entries: vec![saved("alpha"), saved("beta")],
+            selected: 0,
+            visible_height: 0,
+            filter: "beta".to_string(),
+            filter_input: None,
+        });
+
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(screen.request_picker.is_none());
+        assert_eq!(screen.url.text(), "/beta");
     }
 
     #[test]
