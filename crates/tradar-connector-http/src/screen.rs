@@ -179,6 +179,19 @@ pub struct HttpScreen {
     screen_area: Rect,
     /// Open after a right-click on the response pane.
     context_menu: Option<ui::ContextMenu>,
+    /// `Some` while the response-pane search bar has the keys -- same
+    /// incremental-search idiom as `QueryScreenComponent::buffer_search`,
+    /// scoped to the response body's own lines instead of the query
+    /// buffer. `/`/`n`/`N` only ever reach here when `focus == Response`
+    /// (`Context::HttpResponse`), so there's no ambiguity with the
+    /// request builder's own fields.
+    response_search: Option<TextInput>,
+    /// Where `response_scroll` sat before the search bar opened, so `Esc`
+    /// can put it back -- same role as `QueryScreenComponent::search_origin`.
+    response_search_origin: Option<usize>,
+    /// The last pattern searched for, kept after the bar closes so `n`/`N`
+    /// have something to repeat.
+    last_response_search: Option<String>,
 }
 
 impl HttpScreen {
@@ -206,6 +219,9 @@ impl HttpScreen {
             response_area: Rect::ZERO,
             screen_area: Rect::ZERO,
             context_menu: None,
+            response_search: None,
+            response_search_origin: None,
+            last_response_search: None,
         }
     }
 
@@ -234,6 +250,62 @@ impl HttpScreen {
             .as_ref()
             .map(|r| r.body.lines().count())
             .unwrap_or(0)
+    }
+
+    /// `/` with the response pane focused -- a no-op with no response to
+    /// search.
+    fn open_response_search(&mut self) {
+        if self.session.response.is_none() {
+            return;
+        }
+        self.response_search_origin = Some(self.response_scroll);
+        self.response_search = Some(TextInput::new(""));
+    }
+
+    /// Case-insensitive substring search over the response body's own
+    /// lines, wrapping around the end/start -- same shape as
+    /// `QueryEditorComponent::find`, just over a read-only `Vec<&str>`
+    /// instead of a mutable buffer. Moves `response_scroll` to the match
+    /// and returns whether one was found; a no-op (returns `false`) for an
+    /// empty pattern or no response at all.
+    fn find_in_response(&mut self, pattern: &str, backwards: bool) -> bool {
+        if pattern.is_empty() {
+            return false;
+        }
+        let Some(response) = &self.session.response else {
+            return false;
+        };
+        let lines: Vec<&str> = response.body.lines().collect();
+        let len = lines.len();
+        if len == 0 {
+            return false;
+        }
+        let needle = pattern.to_lowercase();
+        let order: Vec<usize> = if backwards {
+            (0..len)
+                .map(|offset| (self.response_scroll + len - 1 - offset) % len)
+                .collect()
+        } else {
+            (1..=len)
+                .map(|offset| (self.response_scroll + offset) % len)
+                .collect()
+        };
+        for index in order {
+            if lines[index].to_lowercase().contains(&needle) {
+                self.response_scroll = index;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `n`/`N`: repeats `last_response_search`. A no-op if nothing's been
+    /// searched yet.
+    fn repeat_response_search(&mut self, backwards: bool) {
+        let Some(pattern) = self.last_response_search.clone() else {
+            return;
+        };
+        self.find_in_response(&pattern, backwards);
     }
 
     fn open_save_prompt(&mut self) {
@@ -370,6 +442,40 @@ impl HttpScreen {
         None
     }
 
+    /// Same incremental shape as `QueryScreenComponent::buffer_search`'s own
+    /// key handling: every keystroke re-searches from `response_search_origin`
+    /// (not from wherever the previous partial match landed), `Esc` reverts
+    /// the scroll, `Enter` commits the pattern for `n`/`N`.
+    fn handle_response_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(search) = self.response_search.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.response_search = None;
+                if let Some(origin) = self.response_search_origin.take() {
+                    self.response_scroll = origin;
+                }
+            }
+            KeyCode::Enter => {
+                let pattern = search.text();
+                self.response_search = None;
+                self.response_search_origin = None;
+                if !pattern.is_empty() {
+                    self.last_response_search = Some(pattern);
+                }
+            }
+            _ => {
+                search.handle_key_event(code, modifiers);
+                let pattern = search.text();
+                if let Some(origin) = self.response_search_origin {
+                    self.response_scroll = origin;
+                }
+                self.find_in_response(&pattern, false);
+            }
+        }
+    }
+
     fn forward_to_field(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         match self.focus {
             Focus::Url => {
@@ -406,6 +512,13 @@ impl HttpScreen {
             Command::HttpSaveRequest => self.open_save_prompt(),
             Command::HttpOpenRequests => self.open_request_picker(),
             Command::Yank if self.focus == Focus::Response => self.yank_response(),
+            Command::SearchInBuffer if self.focus == Focus::Response => self.open_response_search(),
+            Command::SearchNext if self.focus == Focus::Response => {
+                self.repeat_response_search(false)
+            }
+            Command::SearchPrev if self.focus == Focus::Response => {
+                self.repeat_response_search(true)
+            }
             Command::ToggleSplitOrientation => self.split.toggle_orientation(),
             Command::ZoomIn => self.split.zoom_in(self.focus != Focus::Response),
             Command::ZoomOut => self.split.zoom_out(self.focus != Focus::Response),
@@ -477,19 +590,46 @@ impl HttpScreen {
         ) {
             (Some(error), _, _) => format!("Response — error: {error}"),
             (None, true, _) => "Response — sending…".to_string(),
-            (None, false, Some(response)) => format!(
-                "Response — {} {} · {} headers · {}ms",
-                response.status,
-                response.status_text,
-                response.headers.len(),
-                response.elapsed_ms
-            ),
+            (None, false, Some(response)) => {
+                let base = format!(
+                    "Response — {} {} · {} headers · {}ms",
+                    response.status,
+                    response.status_text,
+                    response.headers.len(),
+                    response.elapsed_ms
+                );
+                match &self.last_response_search {
+                    Some(pattern) if self.response_search.is_none() => {
+                        format!("{base} — search: {pattern}")
+                    }
+                    _ => base,
+                }
+            }
             (None, false, None) => "Response".to_string(),
+        };
+        let (area, search_bar_area) = if self.response_search.is_some() {
+            let (area, bar) = ui::split_bottom_bar(area, 1);
+            (area, Some(bar))
+        } else {
+            (area, None)
         };
         let block = ui::panel(&title, focused);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         self.response_visible_height = inner.height as usize;
+
+        // Styled in `theme().error` same as every other error surface in
+        // the app (results grid, Kafka/RabbitMQ sidebars, row-edit
+        // overlay, ...) -- `tick()` also clears a stale `response` on
+        // error, so this always replaces it rather than sitting next to
+        // (or under) the previous, unrelated, successful response's body.
+        if let Some(error) = &self.session.error {
+            let paragraph = Paragraph::new(error.as_str())
+                .style(Style::default().fg(theme().error))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, inner);
+            return;
+        }
 
         let Some(response) = &self.session.response else {
             let placeholder = Paragraph::new(if self.session.sending {
@@ -506,13 +646,24 @@ impl HttpScreen {
         let lines: Vec<&str> = response.body.lines().collect();
         let len = lines.len();
         self.response_scroll = self.response_scroll.min(len.saturating_sub(1));
-        let items: Vec<ListItem> = lines
-            .into_iter()
-            .skip(self.response_scroll)
-            .take(inner.height as usize)
-            .map(ListItem::new)
-            .collect();
-        frame.render_stateful_widget(List::new(items), inner, &mut ListState::default());
+        // Wrapped rather than the old line-per-`ListItem` rendering (which
+        // simply cut a long line off at the terminal's right edge, with no
+        // way to ever see the rest) -- `Paragraph` clips to `inner` on its
+        // own, so handing it everything from `response_scroll` onward
+        // (not just `inner.height` raw lines) is correct: a wrapped line
+        // near the top just means fewer *raw* lines fit on screen, not
+        // that anything is drawn outside `inner`.
+        let visible_text = lines[self.response_scroll..].join("\n");
+        frame.render_widget(
+            Paragraph::new(visible_text).wrap(Wrap { trim: false }),
+            inner,
+        );
+
+        if let (Some(bar_area), Some(input)) = (search_bar_area, &self.response_search) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme().accent))];
+            spans.extend(input.spans(true));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
     }
 
     fn draw_save_prompt(&self, frame: &mut Frame, area: Rect) {
@@ -599,6 +750,10 @@ impl Component for HttpScreen {
         }
         if self.name_prompt.is_some() {
             return self.handle_save_prompt_key(code, modifiers);
+        }
+        if self.response_search.is_some() {
+            self.handle_response_search_key(code, modifiers);
+            return None;
         }
 
         let contexts: &[Context] = match self.focus {
@@ -1051,6 +1206,145 @@ mod tests {
         terminal
             .draw(|frame| screen.draw(frame, frame.area()))
             .unwrap();
+    }
+
+    fn drawn_text(screen: &mut HttpScreen) -> String {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_resend_shows_the_error_not_the_previous_response_body() {
+        let mut screen = screen();
+        screen.session.response = Some(crate::HttpResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+            body: "previous-successful-body".to_string(),
+            elapsed_ms: 1,
+        });
+        screen.session.error = Some("connection refused".to_string());
+        // Mirrors what `HttpSession::tick()` itself does on a failed
+        // response -- the screen only renders whatever state it's given.
+        screen.session.response = None;
+
+        let text = drawn_text(&mut screen);
+
+        assert!(text.contains("connection refused"), "buffer was: {text}");
+        assert!(
+            !text.contains("previous-successful-body"),
+            "stale response body must not still be showing: {text}"
+        );
+    }
+
+    #[test]
+    fn a_long_response_line_wraps_instead_of_being_cut_off() {
+        let mut screen = screen();
+        let long_line = "x".repeat(300);
+        screen.session.response = Some(crate::HttpResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+            body: long_line.clone(),
+            elapsed_ms: 1,
+        });
+
+        let text = drawn_text(&mut screen);
+
+        // A 300-char line can't possibly fit on one row of an 80-col
+        // terminal (minus borders) -- if it's all still present in the
+        // rendered buffer, it was wrapped onto further rows rather than
+        // truncated at the right edge.
+        let x_count = text.chars().filter(|&c| c == 'x').count();
+        assert_eq!(
+            x_count, 300,
+            "the full line must still be on screen somewhere"
+        );
+    }
+
+    #[test]
+    fn slash_in_the_response_pane_opens_a_search_and_jumps_to_a_match() {
+        let mut screen = screen();
+        screen.focus = Focus::Response;
+        screen.session.response = Some(crate::HttpResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+            body: "alpha\nbeta\ngamma\nneedle-here\nomega".to_string(),
+            elapsed_ms: 1,
+        });
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(screen.response_search.is_some());
+        for c in "needle".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+
+        assert_eq!(screen.response_scroll, 3, "needle-here is line index 3");
+    }
+
+    #[test]
+    fn esc_in_the_response_search_reverts_the_scroll() {
+        let mut screen = screen();
+        screen.focus = Focus::Response;
+        screen.session.response = Some(crate::HttpResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+            body: "alpha\nbeta\ngamma\nneedle-here\nomega".to_string(),
+            elapsed_ms: 1,
+        });
+        screen.response_scroll = 1;
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "needle".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(screen.response_scroll, 3);
+
+        screen.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(screen.response_search.is_none());
+        assert_eq!(screen.response_scroll, 1, "must revert to where it was");
+    }
+
+    #[test]
+    fn n_repeats_the_last_response_search() {
+        let mut screen = screen();
+        screen.focus = Focus::Response;
+        screen.session.response = Some(crate::HttpResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+            body: "needle\nx\nneedle\ny\nneedle".to_string(),
+            elapsed_ms: 1,
+        });
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "needle".chars() {
+            screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        // Incremental search starting from origin (0) lands on the first
+        // match strictly after it going forward -- line 1 ("x") doesn't
+        // match, so line 2 is the first hit.
+        screen.handle_key_event(KeyCode::Enter, KeyModifiers::NONE); // commit, closes bar
+        assert_eq!(screen.response_scroll, 2);
+
+        screen.handle_key_event(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(screen.response_scroll, 4);
+
+        screen.handle_key_event(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(screen.response_scroll, 0, "wraps back around");
     }
 
     #[test]

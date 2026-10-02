@@ -163,6 +163,11 @@ impl Session for HttpSession {
                 HttpEvent::Response(Err(e)) => {
                     self.sending = false;
                     self.error = Some(e.to_string());
+                    // Otherwise a failed resend (edit the URL, send again,
+                    // this one times out) leaves the *previous* successful
+                    // response's body on screen under an "error" title,
+                    // with nothing to tell the two apart.
+                    self.response = None;
                 }
             }
         }
@@ -345,6 +350,40 @@ mod tests {
 
         assert!(!session.sending);
         assert_eq!(session.error.as_deref(), Some("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn tick_applying_a_failed_response_clears_a_previous_successful_one() {
+        // A resend that fails must not leave the *previous* successful
+        // response's body sitting there under an "error" title -- nothing
+        // would distinguish stale data from the (failed) current answer.
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let mut session = HttpSession {
+            client: reqwest::Client::new(),
+            base_url: String::new(),
+            event_tx: event_tx.clone(),
+            event_rx,
+            response: Some(HttpResponseData {
+                status: 200,
+                status_text: "OK".to_string(),
+                headers: vec![],
+                body: "{\"ok\":true}".to_string(),
+                elapsed_ms: 5,
+            }),
+            sending: true,
+            error: None,
+        };
+        event_tx
+            .send(HttpEvent::Response(Err(anyhow::anyhow!("timed out"))))
+            .unwrap();
+
+        session.tick();
+
+        assert_eq!(session.error.as_deref(), Some("timed out"));
+        assert!(
+            session.response.is_none(),
+            "the previous response must be cleared, not left stale"
+        );
     }
 
     mod docker {

@@ -96,6 +96,13 @@ pub enum Context {
     /// (`FilePromptComponent`, the connection form) where a letter must
     /// stay typable, never a command.
     Snippets,
+    /// The query-history overlay (also reused, via `HistoryPickerComponent`,
+    /// as the ERD's own table picker) -- just the `/` filter, same reason
+    /// `Snippets` isn't `Prompt`: a letter has to stay typable in every
+    /// *other* `Prompt`-sharing widget (the rename/connection-string/table-
+    /// name forms), so `/` can't be bound there without also becoming
+    /// untypable text in those.
+    History,
     /// The HTTP screen's own bindings (send, cycle method, save/open
     /// request) -- checked regardless of which field currently has focus.
     /// Deliberately holds **only** non-printable-key bindings (`tab`,
@@ -171,6 +178,7 @@ impl Context {
             Self::Prompt => "prompt",
             Self::Completion => "completion",
             Self::Snippets => "snippets",
+            Self::History => "history",
             Self::Http => "http",
             Self::HttpResponse => "http-response",
             Self::HttpRequests => "http-requests",
@@ -199,6 +207,7 @@ impl Context {
             "prompt" => Self::Prompt,
             "completion" => Self::Completion,
             "snippets" => Self::Snippets,
+            "history" => Self::History,
             "http" => Self::Http,
             "http-response" => Self::HttpResponse,
             "http-requests" => Self::HttpRequests,
@@ -213,7 +222,7 @@ impl Context {
     }
 
     /// Every context, in the order the help overlay lists them.
-    pub fn all() -> [Self; 23] {
+    pub fn all() -> [Self; 24] {
         [
             Self::Global,
             Self::Picker,
@@ -235,6 +244,7 @@ impl Context {
             Self::Prompt,
             Self::Completion,
             Self::Snippets,
+            Self::History,
             Self::ColumnPicker,
             Self::FilterConditions,
             Self::TableDesigner,
@@ -1327,7 +1337,12 @@ impl Default for Keymap {
         );
         bindings.insert(
             Context::HttpResponse,
-            parse_defaults(&[("y", Command::Yank)]),
+            parse_defaults(&[
+                ("y", Command::Yank),
+                ("/", Command::SearchInBuffer),
+                ("n", Command::SearchNext),
+                ("N", Command::SearchPrev),
+            ]),
         );
         bindings.insert(
             Context::HttpRequests,
@@ -1529,8 +1544,10 @@ impl Default for Keymap {
                 ("esc", Command::Cancel),
                 ("d", Command::DeleteSnippet),
                 ("r", Command::RenameSnippet),
+                ("/", Command::Search),
             ]),
         );
+        bindings.insert(Context::History, parse_defaults(&[("/", Command::Search)]));
         bindings.insert(
             Context::ColumnPicker,
             parse_defaults(&[

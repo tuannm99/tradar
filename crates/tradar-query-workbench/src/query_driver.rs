@@ -132,14 +132,21 @@ pub enum QueryResult {
         /// mistaken for the whole answer.
         truncated: bool,
     },
-    Documents(Vec<serde_json::Value>),
+    Documents {
+        items: Vec<serde_json::Value>,
+        /// Same meaning as `Table::truncated` -- the backend (Mongo's
+        /// `find`/`aggregate` cursor) had more documents than `MAX_ROWS`;
+        /// `items` is a prefix. Every other driver that returns `Documents`
+        /// (Elasticsearch, Redis, RabbitMQ) already caps itself upstream --
+        /// a single `_search`/`SCAN`/queue-peek call, bounded by its own
+        /// request size -- so they always pass `false`.
+        truncated: bool,
+    },
     /// A statement that changed data instead of returning it -- `INSERT`,
     /// `UPDATE`, `DELETE`, DDL. Without this, those came back as an empty
     /// `Table` and rendered as "0 rows", indistinguishable from a `SELECT`
     /// that matched nothing: no way to tell whether the statement ran.
-    Affected {
-        rows: u64,
-    },
+    Affected { rows: u64 },
 }
 
 /// One runnable statement inside a buffer that may hold several, plus

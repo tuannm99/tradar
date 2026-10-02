@@ -893,6 +893,7 @@ fn context_title(context: Context) -> &'static str {
         Context::Prompt => "Prompts and overlays",
         Context::Completion => "Autocomplete (while suggestions show)",
         Context::Snippets => "Snippet library (while open)",
+        Context::History => "Query-history overlay / ERD table picker (while open)",
         Context::ColumnPicker => "Navigator column picker (while open)",
         Context::FilterConditions => "Filter-conditions panel (while open)",
         Context::TableDesigner => "Table designer (while open)",

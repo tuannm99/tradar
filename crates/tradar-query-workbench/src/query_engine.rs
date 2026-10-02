@@ -476,7 +476,10 @@ mod tests {
     #[test]
     fn build_screen_applies_the_configured_vim_mode() {
         let engine = engine(Arc::new(FakeDriver {
-            result: QueryResult::Documents(Vec::new()),
+            result: QueryResult::Documents {
+                items: Vec::new(),
+                truncated: false,
+            },
         }));
         let (tx, _rx) = mpsc::unbounded_channel();
 

@@ -1547,7 +1547,7 @@ impl Component for QueryScreenComponent {
         }
 
         if let Some(migrations) = self.migrations.as_mut() {
-            if let Some(outcome) = migrations.handle_key_event(code) {
+            if let Some(outcome) = migrations.handle_key_event(code, modifiers) {
                 self.handle_migrations_panel_outcome(outcome);
             }
             return None;
@@ -2091,7 +2091,7 @@ impl Component for QueryScreenComponent {
             table_designer.draw(frame, popup);
         }
 
-        if let Some(migrations) = &self.migrations {
+        if let Some(migrations) = self.migrations.as_mut() {
             let popup = ui::centered_rect(70, 60, area);
             frame.render_widget(ratatui::widgets::Clear, popup);
             migrations.draw(frame, popup);
@@ -4286,7 +4286,7 @@ mod tests {
             screen.tick();
         }
 
-        let Some(migrations) = &screen.migrations else {
+        let Some(migrations) = screen.migrations.as_mut() else {
             panic!("expected the panel to open");
         };
         // Draw it -- the only externally observable way to read the panel's
@@ -4362,7 +4362,7 @@ mod tests {
             ],
             "each file's own statements ran inside its own transaction, in order"
         );
-        let Some(migrations) = &screen.migrations else {
+        let Some(migrations) = screen.migrations.as_mut() else {
             panic!("expected the panel still open, showing Done");
         };
         let backend = ratatui::backend::TestBackend::new(60, 20);
