@@ -490,6 +490,9 @@ enum ErdState {
         title: String,
         lines: Vec<String>,
         scroll: usize,
+        /// Set from the real area height in `draw()` -- `Ctrl-d`/`Ctrl-u`
+        /// need it to jump by half a *page*, not by 1 line every time.
+        visible_height: usize,
     },
 }
 
@@ -527,6 +530,7 @@ impl ErdComponent {
                                 title: n.focal.name.clone(),
                                 lines: render(&n),
                                 scroll: 0,
+                                visible_height: 0,
                             };
                             None
                         }
@@ -538,7 +542,12 @@ impl ErdComponent {
                     }
                 }
             },
-            ErdState::Viewing { lines, scroll, .. } => {
+            ErdState::Viewing {
+                lines,
+                scroll,
+                visible_height,
+                ..
+            } => {
                 let key = KeyPress::new(code, modifiers);
                 let mut pending = None;
                 let Resolution::Command(command) =
@@ -547,7 +556,7 @@ impl ErdComponent {
                     return None;
                 };
                 if let Some(mv) = command.as_vim_move() {
-                    tradar_core::vim_list::apply(mv, scroll, lines.len(), 1);
+                    tradar_core::vim_list::apply(mv, scroll, lines.len(), *visible_height);
                     return None;
                 }
                 match command {
@@ -568,17 +577,20 @@ impl ErdComponent {
                 title,
                 lines,
                 scroll,
+                visible_height,
             } => {
                 let theme = theme();
                 let cancel = keymap()
                     .binding_for(Context::Prompt, Command::Cancel)
                     .unwrap_or_default();
+                let block = ui::panel(&format!("ERD — {title} ({cancel} close)"), true);
+                let inner = block.inner(area);
+                *visible_height = inner.height as usize;
                 let visible = lines
                     .iter()
                     .skip(*scroll)
                     .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(theme.text))))
                     .collect::<Vec<Line>>();
-                let block = ui::panel(&format!("ERD — {title} ({cancel} close)"), true);
                 frame.render_widget(Paragraph::new(visible).block(block), area);
             }
         }
@@ -923,5 +935,46 @@ mod tests {
             panic!("expected Viewing");
         };
         assert_eq!(*scroll, 1);
+    }
+
+    #[test]
+    fn ctrl_d_jumps_by_half_the_real_visible_height_not_by_one_line() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut erd = ErdComponent::new(vec!["users".to_string()]);
+        let schema = schema_for_component();
+        erd.handle_key_event(KeyCode::Enter, KeyModifiers::NONE, &schema);
+        // Force `lines` long enough that a half-page jump has somewhere to
+        // land, then draw once so `visible_height` is set from a real area
+        // instead of staying at the placeholder 0 from state construction.
+        if let ErdState::Viewing { lines, .. } = &mut erd.state {
+            *lines = (0..40).map(|i| format!("line {i}")).collect();
+        }
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| erd.draw(frame, frame.area()))
+            .unwrap();
+
+        erd.handle_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL, &schema);
+
+        let ErdState::Viewing {
+            scroll,
+            visible_height,
+            ..
+        } = &erd.state
+        else {
+            panic!("expected Viewing");
+        };
+        assert!(
+            *visible_height > 1,
+            "draw() must have set a real visible_height, got {visible_height}"
+        );
+        assert_eq!(
+            *scroll,
+            (*visible_height / 2).max(1),
+            "ctrl-d must jump by half the real page, not by 1 line like j"
+        );
     }
 }

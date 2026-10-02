@@ -9,7 +9,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+};
 
 use tradar_connector_spi::Session as ConnectorSession;
 use tradar_core::action::{Action, Component};
@@ -24,6 +26,17 @@ use crate::RabbitSession;
 enum RabbitMode {
     Queues,
     Exchanges,
+}
+
+/// `Sidebar` (the default) routes `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` to the
+/// queue/exchange list, same as before this existed. `Detail` -- reached
+/// via `tab` (`Command::CycleFocus`) -- routes the same keys to the
+/// messages/bindings table's own `detail_selected` instead, since neither
+/// table previously had any way to scroll to a row past the first screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Sidebar,
+    Detail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +119,12 @@ pub struct RabbitScreen {
     filter: String,
     /// `Some` while the filter bar has the keys -- see `open_filter`.
     filter_input: Option<TextInput>,
+    focus: Focus,
+    /// Selected row in whichever detail table the current mode shows
+    /// (messages in Queues mode, bindings in Exchanges mode) --
+    /// `Focus::Detail`'s own cursor, separate from `sidebar_selected`.
+    detail_selected: usize,
+    detail_visible_height: usize,
 }
 
 impl RabbitScreen {
@@ -128,6 +147,9 @@ impl RabbitScreen {
             pending: None,
             filter: String::new(),
             filter_input: None,
+            focus: Focus::Sidebar,
+            detail_selected: 0,
+            detail_visible_height: 0,
         }
     }
 
@@ -159,6 +181,24 @@ impl RabbitScreen {
         }
     }
 
+    /// Row count of whichever detail table the current mode shows --
+    /// `Focus::Detail`'s own list length, mirroring `sidebar_len`.
+    fn detail_len(&self) -> usize {
+        match self.mode {
+            RabbitMode::Queues => self.session.messages.len(),
+            RabbitMode::Exchanges => self.session.bindings.len(),
+        }
+    }
+
+    /// `tab` (`Command::CycleFocus`): switches keyboard focus between the
+    /// sidebar and the detail table.
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Sidebar => Focus::Detail,
+            Focus::Detail => Focus::Sidebar,
+        };
+    }
+
     fn selected_name(&self) -> Option<String> {
         match self.mode {
             RabbitMode::Queues => self
@@ -180,11 +220,17 @@ impl RabbitScreen {
         self.sidebar_selected = 0;
         self.filter.clear();
         self.filter_input = None;
+        self.focus = Focus::Sidebar;
+        self.detail_selected = 0;
     }
 
     /// Opens the filter bar, prefilled with whatever's already applied.
+    /// Filtering only ever narrows the sidebar, so this also hands focus
+    /// back to it -- typing into the filter while `Focus::Detail` had the
+    /// detail table's own cursor moving would be confusing.
     fn open_filter(&mut self) {
         self.filter_input = Some(TextInput::new(&self.filter));
+        self.focus = Focus::Sidebar;
     }
 
     fn is_filtering(&self) -> bool {
@@ -244,6 +290,7 @@ impl RabbitScreen {
                 self.selected_exchange = Some(name);
             }
         }
+        self.detail_selected = 0;
     }
 
     fn open_compose(&mut self) {
@@ -359,7 +406,7 @@ impl RabbitScreen {
             format!("{} — filter: {}", self.mode_title(), self.filter)
         };
         let list = List::new(items)
-            .block(ui::panel(&title, true))
+            .block(ui::panel(&title, self.focus == Focus::Sidebar))
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, area, &mut self.list_state);
 
@@ -387,6 +434,8 @@ impl RabbitScreen {
                     frame.render_widget(placeholder, area);
                     return;
                 };
+                let len = self.session.messages.len();
+                self.detail_selected = self.detail_selected.min(len.saturating_sub(1));
                 let rows: Vec<Row> = self
                     .session
                     .messages
@@ -400,6 +449,8 @@ impl RabbitScreen {
                         ])
                     })
                     .collect();
+                let block = ui::panel(&format!("Messages — {queue}"), self.focus == Focus::Detail);
+                self.detail_visible_height = block.inner(area).height.saturating_sub(1) as usize;
                 let table = Table::new(
                     rows,
                     [
@@ -413,8 +464,13 @@ impl RabbitScreen {
                     Row::new(vec!["routing key", "exchange", "redelivered", "payload"])
                         .style(Style::default().fg(theme().text_dim)),
                 )
-                .block(ui::panel(&format!("Messages — {queue}"), false));
-                frame.render_widget(table, area);
+                .row_highlight_style(ui::selection_style())
+                .block(block);
+                let mut state = TableState::default();
+                if len > 0 {
+                    state.select(Some(self.detail_selected));
+                }
+                frame.render_stateful_widget(table, area, &mut state);
             }
             RabbitMode::Exchanges => {
                 let Some(exchange) = &self.selected_exchange else {
@@ -425,6 +481,8 @@ impl RabbitScreen {
                     frame.render_widget(placeholder, area);
                     return;
                 };
+                let len = self.session.bindings.len();
+                self.detail_selected = self.detail_selected.min(len.saturating_sub(1));
                 let rows: Vec<Row> = self
                     .session
                     .bindings
@@ -436,13 +494,23 @@ impl RabbitScreen {
                         ])
                     })
                     .collect();
+                let block = ui::panel(
+                    &format!("Bindings — {exchange}"),
+                    self.focus == Focus::Detail,
+                );
+                self.detail_visible_height = block.inner(area).height.saturating_sub(1) as usize;
                 let table = Table::new(rows, [Constraint::Length(24), Constraint::Min(16)])
                     .header(
                         Row::new(vec!["destination queue", "routing key"])
                             .style(Style::default().fg(theme().text_dim)),
                     )
-                    .block(ui::panel(&format!("Bindings — {exchange}"), false));
-                frame.render_widget(table, area);
+                    .row_highlight_style(ui::selection_style())
+                    .block(block);
+                let mut state = TableState::default();
+                if len > 0 {
+                    state.select(Some(self.detail_selected));
+                }
+                frame.render_stateful_widget(table, area, &mut state);
             }
         }
     }
@@ -525,14 +593,25 @@ impl Component for RabbitScreen {
             _ => return None,
         };
         if let Some(mv) = command.as_vim_move() {
-            let mut selected = self.sidebar_selected;
-            vim_list::apply(
-                mv,
-                &mut selected,
-                self.sidebar_len(),
-                self.sidebar_visible_height,
-            );
-            self.sidebar_selected = selected;
+            if self.focus == Focus::Detail {
+                let mut selected = self.detail_selected;
+                vim_list::apply(
+                    mv,
+                    &mut selected,
+                    self.detail_len(),
+                    self.detail_visible_height,
+                );
+                self.detail_selected = selected;
+            } else {
+                let mut selected = self.sidebar_selected;
+                vim_list::apply(
+                    mv,
+                    &mut selected,
+                    self.sidebar_len(),
+                    self.sidebar_visible_height,
+                );
+                self.sidebar_selected = selected;
+            }
             return None;
         }
         match command {
@@ -540,6 +619,7 @@ impl Component for RabbitScreen {
             Command::RabbitRefresh => self.refresh(),
             Command::RabbitOpen => self.open_selected(),
             Command::RabbitPublish => self.open_compose(),
+            Command::CycleFocus => self.toggle_focus(),
             Command::Search => self.open_filter(),
             Command::Help => return Some(Action::ShowHelp),
             Command::Back => return Some(Action::BackToPicker),
@@ -632,6 +712,7 @@ impl Component for RabbitScreen {
         hints.extend(ui::hint(Context::Rabbit, Command::ToggleRabbitMode, "mode"));
         hints.extend(ui::hint(Context::Rabbit, Command::RabbitOpen, "open"));
         hints.extend(ui::hint(Context::Rabbit, Command::RabbitPublish, "publish"));
+        hints.extend(ui::hint(Context::Rabbit, Command::CycleFocus, "focus"));
         hints.extend(ui::hint(Context::Rabbit, Command::Search, "filter"));
         hints.extend(ui::hint(Context::Rabbit, Command::Back, "back"));
         hints
@@ -690,6 +771,101 @@ mod tests {
 
         assert!(!screen.is_filtering());
         assert!(screen.filter.is_empty());
+    }
+
+    fn press(screen: &mut RabbitScreen, c: char) {
+        screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+    }
+
+    fn press_tab(screen: &mut RabbitScreen) {
+        screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+    }
+
+    fn message(routing_key: &str) -> crate::MessageInfo {
+        crate::MessageInfo {
+            exchange: String::new(),
+            routing_key: routing_key.to_string(),
+            redelivered: false,
+            payload: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn tab_switches_focus_between_sidebar_and_detail() {
+        let mut screen = screen();
+
+        press_tab(&mut screen);
+        assert_eq!(screen.focus, Focus::Detail);
+        press_tab(&mut screen);
+        assert_eq!(screen.focus, Focus::Sidebar);
+    }
+
+    #[tokio::test]
+    async fn j_in_detail_focus_scrolls_the_messages_table_not_the_sidebar() {
+        let mut screen = screen();
+        screen.session.queues = vec![queue("orders"), queue("payments")];
+        screen.open_selected();
+        screen.session.messages = vec![
+            message("a"),
+            message("b"),
+            message("c"),
+            message("d"),
+            message("e"),
+        ];
+        press_tab(&mut screen); // Sidebar -> Detail
+
+        press(&mut screen, 'j');
+
+        assert_eq!(screen.detail_selected, 1);
+        assert_eq!(
+            screen.sidebar_selected, 0,
+            "focus is on the messages table, the sidebar cursor must not move"
+        );
+    }
+
+    #[tokio::test]
+    async fn j_in_sidebar_focus_never_touches_detail_selected() {
+        let mut screen = screen();
+        screen.session.queues = vec![queue("orders"), queue("payments")];
+        screen.session.messages = vec![message("a"), message("b")];
+
+        press(&mut screen, 'j');
+
+        assert_eq!(screen.sidebar_selected, 1);
+        assert_eq!(screen.detail_selected, 0);
+    }
+
+    #[tokio::test]
+    async fn opening_a_new_queue_resets_the_detail_cursor() {
+        let mut screen = screen();
+        screen.session.queues = vec![queue("orders")];
+        screen.detail_selected = 3;
+
+        screen.open_selected();
+
+        assert_eq!(screen.detail_selected, 0);
+    }
+
+    #[tokio::test]
+    async fn switching_mode_resets_focus_and_detail_cursor() {
+        let mut screen = screen();
+        screen.focus = Focus::Detail;
+        screen.detail_selected = 2;
+
+        screen.toggle_mode();
+
+        assert_eq!(screen.focus, Focus::Sidebar);
+        assert_eq!(screen.detail_selected, 0);
+    }
+
+    #[tokio::test]
+    async fn opening_the_filter_sends_focus_back_to_the_sidebar() {
+        let mut screen = screen();
+        screen.focus = Focus::Detail;
+
+        press(&mut screen, '/');
+
+        assert_eq!(screen.focus, Focus::Sidebar);
     }
 
     #[tokio::test]

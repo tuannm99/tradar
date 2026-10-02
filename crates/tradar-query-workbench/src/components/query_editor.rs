@@ -47,11 +47,38 @@ use crate::sql_highlight;
 /// -- Mongo/Redis/ES statements are one line each, nothing to fold).
 const FOLD_GUTTER_WIDTH: u16 = 2;
 
+/// `>>`/`<<`'s step, in spaces -- this editor has no `[editor]` config
+/// for an indent width (no other feature here needed one yet), so a
+/// fixed width it is.
+const INDENT_WIDTH: usize = 4;
+
 /// What counts as part of a word for completion: identifier characters,
 /// plus `$` and `_` so Mongo's `$match` and `snake_case` names complete as
 /// one unit.
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// `w`/`b`/`e`'s own notion of a "word" -- vim's small-word semantics, not
+/// `W`'s whitespace-delimited one, which this editor doesn't have: a run
+/// of `is_word_char` characters, or a run of any other non-space
+/// character (punctuation), are each their own word; whitespace separates
+/// them but isn't itself a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Space,
+    Word,
+    Punct,
+}
+
+fn char_class(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Space
+    } else if is_word_char(c) {
+        CharClass::Word
+    } else {
+        CharClass::Punct
+    }
 }
 
 /// The closer an auto-closeable opener pairs with -- brackets pair with a
@@ -83,6 +110,60 @@ pub enum EditorMode {
     /// Linewise selection (`V`) -- same anchor, but the selection always
     /// covers whole lines regardless of either endpoint's column.
     VisualLine,
+}
+
+/// Normal mode's pending operator -- `d`/`c`/`y` (`Command::EditorOperator*`)
+/// set this and wait for the key that completes them, mirroring real
+/// vim's own `d`/`c`/`y` operators (minus counts and named registers,
+/// same scope limit as the rest of this editor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operator {
+    Delete,
+    Change,
+    Yank,
+}
+
+/// `i`/`a` after an operator -- real vim's text-object scope: `inner`
+/// (just the object itself) or `around` (the object plus its trailing,
+/// or lacking that, leading, whitespace). Reuses the existing `i`/`a`
+/// bindings (`EditorEnterInsert`/`EditorAppend`) as the signal rather
+/// than adding dedicated commands for it -- see `complete_operator`'s
+/// doc comment. Currently only completes with `w` (word) as the object
+/// (`QueryEditorComponent::word_text_object`) -- `i(`/`a"`-style
+/// bracket/quote objects aren't implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Inner,
+    Around,
+}
+
+/// What `.` (`Command::EditorRepeatLast`) replays -- deliberately scoped
+/// to Normal-mode commands that don't themselves involve typing text:
+/// anything that enters Insert mode (`i`/`a`/`o`/`O`, and `c`/`cc`/`ciw`-
+/// style changes) is excluded, since capturing and faithfully replaying
+/// an entire Insert session -- what real vim's own `.` does for those --
+/// is a separate, larger feature than this editor attempts. Set at the
+/// exact point each action actually runs (`QueryEditorComponent`'s own
+/// dispatch sites), not at the keystroke that triggered it, so `.`
+/// repeats the same edit at the *current* cursor position rather than
+/// literally replaying key codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatableAction {
+    DeleteChar,
+    DeleteCharBefore,
+    DeleteLine,
+    YankLine,
+    PasteAfter,
+    PasteBefore,
+    ToggleCase,
+    JoinLines,
+    IndentLine,
+    DedentLine,
+    /// `Delete`/`Yank` only -- a `Change` operator-motion isn't recorded
+    /// (it enters Insert, out of scope same as above).
+    OperatorMotion(Operator, Command),
+    /// `Delete`/`Yank` only, same reasoning.
+    TextObject(Operator, Scope, Command),
 }
 
 /// What `y`/`d`/`x`/`c` last cut or copied -- a single unnamed register,
@@ -142,13 +223,27 @@ pub struct QueryEditorComponent {
     lines: Vec<Vec<char>>,
     cursor_row: usize,
     cursor_col: usize,
-    /// The shared two-key-sequence slot (`dd`, `yy`, `za`, `gg`) threaded
-    /// through `keymap().resolve_in` -- see that method's own doc comment.
-    /// One field rather than a bool per combo (the old `pending_d`/
-    /// `pending_y`/`pending_z`/`pending_g`) because the keymap module
-    /// already tracks "which key started a sequence", not just "is one
-    /// pending".
+    /// The shared two-key-sequence slot (`za`, `gg`) threaded through
+    /// `keymap().resolve_in` -- see that method's own doc comment. One
+    /// field rather than a bool per combo (the old `pending_y`/
+    /// `pending_z`/`pending_g`) because the keymap module already tracks
+    /// "which key started a sequence", not just "is one pending".
     pending: Option<KeyPress>,
+    /// `Some` right after `d`/`c`/`y` (`Command::EditorOperator*`) until
+    /// the *next* resolved command completes it -- the keymap itself has
+    /// no notion of "operator pending", so this is tracked here instead;
+    /// see `operator_motion`'s doc comment for how the second key is
+    /// interpreted. Stays `Some` rather than being taken right away when
+    /// that second key is `i`/`a` (see `pending_scope`) -- a text object
+    /// still needs to know which operator it's completing.
+    pending_operator: Option<Operator>,
+    /// `Some` right after an operator's own `i`/`a`, until the *third* key
+    /// (the object itself) completes the text object -- see `Scope`'s own
+    /// doc comment.
+    pending_scope: Option<Scope>,
+    /// `.`'s own memory -- see `RepeatableAction`'s doc comment for what
+    /// updates it and what's deliberately excluded.
+    last_action: Option<RepeatableAction>,
     /// Where `v`/`V` was pressed -- `Some` only while `mode` is `Visual`/
     /// `VisualLine`, cleared the moment either exits (`Esc`, or `y`/`d`/
     /// `x`/`c` finishing the selection).
@@ -221,6 +316,9 @@ impl QueryEditorComponent {
             cursor_row: 0,
             cursor_col: 0,
             pending: None,
+            pending_operator: None,
+            pending_scope: None,
+            last_action: None,
             visual_anchor: None,
             register: None,
             scroll: 0,
@@ -422,6 +520,131 @@ impl QueryEditorComponent {
         self.folded.insert(start);
         self.cursor_row = start;
         self.clamp_col();
+    }
+
+    /// `x`: deletes the character under the cursor into `register`. A
+    /// no-op on an empty line.
+    fn delete_char_under_cursor(&mut self) {
+        if self.cursor_col < self.current_line_len() {
+            self.checkpoint();
+            let removed = self.lines[self.cursor_row].remove(self.cursor_col);
+            self.register = Some(Register::Charwise(vec![removed]));
+            self.clamp_col();
+        }
+    }
+
+    /// `X`: deletes the character before the cursor -- like `x` but one
+    /// column to the left, and -- same as `x` -- never crosses a line
+    /// boundary (no-op at column 0, doesn't join with the previous line).
+    fn delete_char_before_cursor(&mut self) {
+        if self.cursor_col > 0 {
+            self.checkpoint();
+            self.cursor_col -= 1;
+            let removed = self.lines[self.cursor_row].remove(self.cursor_col);
+            self.register = Some(Register::Charwise(vec![removed]));
+        }
+    }
+
+    /// `~`: toggles the case of the character under the cursor and moves
+    /// right, same as real vim. A no-op on an empty line, and a no-op
+    /// (other than moving right) on a character with no case at all.
+    fn toggle_case(&mut self) {
+        if self.cursor_col >= self.current_line_len() {
+            return;
+        }
+        self.checkpoint();
+        let c = self.lines[self.cursor_row][self.cursor_col];
+        let toggled = if c.is_uppercase() {
+            c.to_lowercase().next().unwrap_or(c)
+        } else if c.is_lowercase() {
+            c.to_uppercase().next().unwrap_or(c)
+        } else {
+            c
+        };
+        self.lines[self.cursor_row][self.cursor_col] = toggled;
+        let max = self.current_line_len().saturating_sub(1);
+        self.cursor_col = (self.cursor_col + 1).min(max);
+    }
+
+    /// `J`: joins the current line with the next one, trimming the next
+    /// line's leading whitespace and collapsing the join point down to a
+    /// single space (none at all if either side is empty -- an empty
+    /// line gains no leading space, and nothing trails an empty one
+    /// either). A no-op on the last line -- there's nothing below to
+    /// pull up, same as real vim.
+    fn join_lines(&mut self) {
+        if self.cursor_row + 1 >= self.lines.len() {
+            return;
+        }
+        self.checkpoint();
+        let next = self.lines.remove(self.cursor_row + 1);
+        let trimmed: Vec<char> = next.into_iter().skip_while(|c| c.is_whitespace()).collect();
+        let join_col = self.lines[self.cursor_row].len();
+        if join_col > 0 && !trimmed.is_empty() {
+            self.lines[self.cursor_row].push(' ');
+        }
+        self.lines[self.cursor_row].extend(trimmed);
+        // `join_col`, captured before either push above -- the inserted
+        // space (if any) lands exactly there, same as real vim's own `J`
+        // leaving the cursor on the join point itself.
+        self.cursor_col = join_col;
+        self.clamp_col();
+    }
+
+    /// `>>`: indents the current line by `INDENT_WIDTH` spaces, keeping
+    /// the cursor over the same character.
+    fn indent_line(&mut self) {
+        self.checkpoint();
+        self.lines[self.cursor_row].splice(0..0, std::iter::repeat_n(' ', INDENT_WIDTH));
+        self.cursor_col = (self.cursor_col + INDENT_WIDTH).min(self.current_line_len());
+        self.clamp_col();
+    }
+
+    /// `<<`: dedents the current line by up to `INDENT_WIDTH` leading
+    /// spaces -- fewer if there aren't that many, matching real vim's
+    /// own tolerant dedent rather than refusing or going negative. A
+    /// no-op if the line has no leading spaces at all.
+    fn dedent_line(&mut self) {
+        let removable = self.lines[self.cursor_row]
+            .iter()
+            .take(INDENT_WIDTH)
+            .take_while(|&&c| c == ' ')
+            .count();
+        if removable == 0 {
+            return;
+        }
+        self.checkpoint();
+        self.lines[self.cursor_row].drain(0..removable);
+        self.cursor_col = self.cursor_col.saturating_sub(removable);
+        self.clamp_col();
+    }
+
+    /// `.`: replays `last_action` at the *current* cursor position -- see
+    /// `RepeatableAction`'s doc comment for exactly what's covered and
+    /// why. A no-op if nothing repeatable has happened yet.
+    fn repeat_last(&mut self) {
+        let Some(action) = self.last_action else {
+            return;
+        };
+        match action {
+            RepeatableAction::DeleteChar => self.delete_char_under_cursor(),
+            RepeatableAction::DeleteCharBefore => self.delete_char_before_cursor(),
+            RepeatableAction::DeleteLine => {
+                self.checkpoint();
+                self.delete_current_line();
+            }
+            RepeatableAction::YankLine => self.yank_current_line(),
+            RepeatableAction::PasteAfter => self.paste(false),
+            RepeatableAction::PasteBefore => self.paste(true),
+            RepeatableAction::ToggleCase => self.toggle_case(),
+            RepeatableAction::JoinLines => self.join_lines(),
+            RepeatableAction::IndentLine => self.indent_line(),
+            RepeatableAction::DedentLine => self.dedent_line(),
+            RepeatableAction::OperatorMotion(op, motion) => self.operator_motion(op, motion),
+            RepeatableAction::TextObject(op, scope, command) => {
+                self.complete_text_object(op, scope, command)
+            }
+        }
     }
 
     /// `text()` truncated to the cursor -- what context-aware completion
@@ -842,11 +1065,165 @@ impl QueryEditorComponent {
         self.clamp_col();
     }
 
+    /// The position right after `(row, col)` in reading order, crossing a
+    /// line boundary onto `(row + 1, 0)` -- `None` at the very end of the
+    /// buffer. An empty line's only valid position is `(row, 0)` (same
+    /// invariant `clamp_col` maintains), so this never needs to special-
+    /// case one on the way in.
+    fn next_pos(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        if col + 1 < self.lines[row].len() {
+            Some((row, col + 1))
+        } else if row + 1 < self.lines.len() {
+            Some((row + 1, 0))
+        } else {
+            None
+        }
+    }
+
+    /// The mirror of `next_pos`, one position back.
+    fn prev_pos(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        if col > 0 {
+            Some((row, col - 1))
+        } else if row > 0 {
+            Some((row - 1, self.lines[row - 1].len().saturating_sub(1)))
+        } else {
+            None
+        }
+    }
+
+    /// Classifies the char at `(row, col)` for word-motion purposes.
+    /// `Space` for an empty line too -- there's no char to classify, and
+    /// treating it as whitespace (rather than giving blank lines their own
+    /// stop, like real vim does) keeps `w`/`b`/`e` simple, matching this
+    /// editor's already-stated "enough for editing a query, not a
+    /// general-purpose editor" scope (see the module doc comment).
+    fn class_at(&self, row: usize, col: usize) -> CharClass {
+        match self.lines[row].get(col) {
+            Some(&c) => char_class(c),
+            None => CharClass::Space,
+        }
+    }
+
+    /// Advances from `pos` while its class is still `class`, stopping at
+    /// the first position with a different class, at the end of the
+    /// buffer, or -- for a `Word`/`Punct` run, never `Space` -- right
+    /// after crossing onto a new line: a run never spans a line break
+    /// (vim treats the newline itself as a separator regardless of what
+    /// follows), but a run *of* whitespace is free to, the same way a
+    /// blank line is only ever treated as more of it (see `class_at`).
+    /// Correct for finding the position *after* a run, which is what a
+    /// forward skip wants; `run_start` below is `b`'s own equivalent for
+    /// a run's first position, since this same "keep moving while still
+    /// in class" shape overshoots by one in that direction.
+    fn advance_while(&self, mut pos: (usize, usize), class: CharClass) -> (usize, usize) {
+        while self.class_at(pos.0, pos.1) == class {
+            match self.next_pos(pos.0, pos.1) {
+                Some(next) => {
+                    let crossed_line = next.0 != pos.0;
+                    pos = next;
+                    if crossed_line && class != CharClass::Space {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        pos
+    }
+
+    /// The mirror of `advance_while`, skipping a `Space` run backward --
+    /// the only direction/class `move_word_backward` needs this shape
+    /// for; finding a `Word`/`Punct` run's own start needs `run_start`
+    /// instead (see `advance_while`'s doc comment for why).
+    fn retreat_while(&self, mut pos: (usize, usize), class: CharClass) -> (usize, usize) {
+        while self.class_at(pos.0, pos.1) == class {
+            match self.prev_pos(pos.0, pos.1) {
+                Some(prev) => pos = prev,
+                None => break,
+            }
+        }
+        pos
+    }
+
+    /// The first position of the `class` run `pos` sits inside -- peeks
+    /// at each candidate before stepping onto it (unlike `retreat_while`),
+    /// so it lands exactly on the run's first character rather than one
+    /// past it. Never crosses a line boundary, same reasoning as
+    /// `advance_while`'s Word/Punct case.
+    fn run_start(&self, mut pos: (usize, usize), class: CharClass) -> (usize, usize) {
+        while let Some(prev) = self.prev_pos(pos.0, pos.1) {
+            if prev.0 != pos.0 || self.class_at(prev.0, prev.1) != class {
+                break;
+            }
+            pos = prev;
+        }
+        pos
+    }
+
+    /// The mirror of `run_start`, forward: the last position of the
+    /// `class` run `pos` sits inside.
+    fn run_end(&self, mut pos: (usize, usize), class: CharClass) -> (usize, usize) {
+        while let Some(next) = self.next_pos(pos.0, pos.1) {
+            if next.0 != pos.0 || self.class_at(next.0, next.1) != class {
+                break;
+            }
+            pos = next;
+        }
+        pos
+    }
+
+    /// `w`: the start of the next word -- past the rest of the current
+    /// one (if on one), then past any whitespace.
+    fn move_word_forward(&mut self) {
+        let mut pos = (self.cursor_row, self.cursor_col);
+        let start_class = self.class_at(pos.0, pos.1);
+        if start_class != CharClass::Space {
+            pos = self.advance_while(pos, start_class);
+        }
+        pos = self.advance_while(pos, CharClass::Space);
+        (self.cursor_row, self.cursor_col) = pos;
+        self.clamp_col();
+    }
+
+    /// `b`: the start of the current word, or the previous one if already
+    /// at a word's start -- the mirror of `move_word_forward`.
+    fn move_word_backward(&mut self) {
+        let Some(mut pos) = self.prev_pos(self.cursor_row, self.cursor_col) else {
+            self.cursor_col = 0;
+            return;
+        };
+        pos = self.retreat_while(pos, CharClass::Space);
+        let class = self.class_at(pos.0, pos.1);
+        if class != CharClass::Space {
+            pos = self.run_start(pos, class);
+        }
+        (self.cursor_row, self.cursor_col) = pos;
+        self.clamp_col();
+    }
+
+    /// `e`: the end of the current/next word -- steps off the current
+    /// position first (so sitting on a word's last character still moves
+    /// to the *next* one, same as real vim), skips whitespace, then rides
+    /// the run it lands in to its last character.
+    fn move_word_end(&mut self) {
+        let mut pos = (self.cursor_row, self.cursor_col);
+        if let Some(next) = self.next_pos(pos.0, pos.1) {
+            pos = next;
+        }
+        pos = self.advance_while(pos, CharClass::Space);
+        let class = self.class_at(pos.0, pos.1);
+        if class != CharClass::Space {
+            pos = self.run_end(pos, class);
+        }
+        (self.cursor_row, self.cursor_col) = pos;
+        self.clamp_col();
+    }
+
     /// Movement-only commands, shared by Normal and Visual/VisualLine mode:
-    /// `h`/`l`/`0`/`$` here, plus `j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u` via
-    /// `Command::as_vim_move`/`vim_list`. Returns whether `command` was one
-    /// of them, so a caller can fall through to its own mode-specific
-    /// commands otherwise.
+    /// `h`/`l`/`0`/`$`/`w`/`b`/`e` here, plus `j`/`k`/`gg`/`G`/`Ctrl-d`/
+    /// `Ctrl-u` via `Command::as_vim_move`/`vim_list`. Returns whether
+    /// `command` was one of them, so a caller can fall through to its own
+    /// mode-specific commands otherwise.
     fn apply_motion_command(&mut self, command: Command) -> bool {
         if let Some(mv) = command.as_vim_move() {
             let mut row = self.cursor_row;
@@ -866,9 +1243,210 @@ impl QueryEditorComponent {
             Command::EditorLineEnd => {
                 self.cursor_col = self.current_line_len().saturating_sub(1);
             }
+            Command::EditorWordForward => self.move_word_forward(),
+            Command::EditorWordBack => self.move_word_backward(),
+            Command::EditorWordEnd => self.move_word_end(),
             _ => return false,
         }
         true
+    }
+
+    /// Whether `command` (one of `apply_motion_command`'s own charwise
+    /// motions) excludes its landing character from an operator's range
+    /// -- real vim's exclusive/inclusive motion split. `w`/`b`/`0` are
+    /// exclusive; `e`/`$` are inclusive. `operator_motion` only ever
+    /// calls this for those five, so nothing else needs a case here.
+    fn motion_is_exclusive(command: Command) -> bool {
+        matches!(
+            command,
+            Command::EditorWordForward | Command::EditorWordBack | Command::EditorLineStart
+        )
+    }
+
+    /// The only motions `operator_motion` accepts as a second key -- see
+    /// its own doc comment for why `h`/`l` and every linewise motion
+    /// (`j`/`k`/`gg`/`G`/`Ctrl-d`/`Ctrl-u`, all handled by
+    /// `Command::as_vim_move` rather than appearing here) are excluded.
+    fn is_operator_motion(command: Command) -> bool {
+        matches!(
+            command,
+            Command::EditorWordForward
+                | Command::EditorWordBack
+                | Command::EditorWordEnd
+                | Command::EditorLineStart
+                | Command::EditorLineEnd
+        )
+    }
+
+    /// `d`/`c`/`y` followed by a motion (`dw`, `cb`, `y$`, ...) -- also
+    /// `D`/`C`/`Y`'s own direct dispatch, straight to `EditorLineEnd`.
+    /// Scoped to the five motions with unambiguous meaning without a
+    /// count: `w`/`b`/`e`/`0`/`$`. `h`/`l` are deliberately left out --
+    /// without count support (this editor has none, see the module doc
+    /// comment) `dh`/`dl` would always cover exactly one character,
+    /// already exactly what `X`/`x` do. Linewise ranges (`dj`, `dG`, ...)
+    /// are out of scope too -- `dd`/`cc`/`yy` (the doubled operator)
+    /// already cover "the current line", and a multi-line range is a
+    /// separate feature with its own edge cases (the last line, an empty
+    /// buffer, ...) not attempted here.
+    ///
+    /// Computes the range the same way real vim does: run the motion,
+    /// see where the cursor lands, then put it back before actually
+    /// cutting anything. An unrecognized second key (anything
+    /// `apply_motion_command` doesn't handle) leaves the cursor
+    /// untouched and does nothing else -- silently canceling the
+    /// operator, same as vim.
+    fn operator_motion(&mut self, op: Operator, motion: Command) {
+        if !Self::is_operator_motion(motion) {
+            return;
+        }
+        let start = (self.cursor_row, self.cursor_col);
+        if !self.apply_motion_command(motion) {
+            return;
+        }
+        let end = (self.cursor_row, self.cursor_col);
+        let (lo, mut hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        if lo == hi {
+            (self.cursor_row, self.cursor_col) = start;
+            return;
+        }
+        if Self::motion_is_exclusive(motion) {
+            hi = self.prev_pos(hi.0, hi.1).unwrap_or(lo);
+        }
+        // Borrows `delete_selection`/`yank_selection` -- real Visual mode
+        // selection built from the computed `(lo, hi)` range instead of
+        // an actual `v`/`V` session; both already handle their own
+        // checkpointing and cursor placement, and both are inclusive of
+        // both ends, matching how `hi` was just adjusted for an exclusive
+        // motion above.
+        self.visual_anchor = Some(lo);
+        (self.cursor_row, self.cursor_col) = hi;
+        match op {
+            Operator::Delete => {
+                self.delete_selection(false);
+                self.last_action = Some(RepeatableAction::OperatorMotion(op, motion));
+            }
+            Operator::Change => self.delete_selection(true),
+            Operator::Yank => {
+                self.yank_selection();
+                self.last_action = Some(RepeatableAction::OperatorMotion(op, motion));
+            }
+        }
+    }
+
+    /// `cc`: clears the current line's content (unlike `dd`, never
+    /// removes the line itself -- there's always something left to type
+    /// into) and enters Insert right there, the same "cut, then let the
+    /// replacement be typed immediately" idea as `delete_selection(true)`.
+    fn change_current_line(&mut self) {
+        self.register = Some(Register::Linewise(vec![std::mem::take(
+            &mut self.lines[self.cursor_row],
+        )]));
+        self.cursor_col = 0;
+        self.mode = EditorMode::Insert;
+    }
+
+    /// `iw`/`aw`'s own range -- `inner` is just the run of whatever class
+    /// (`Word`/`Punct`/`Space`) the cursor is currently sitting in;
+    /// `around` extends it through trailing whitespace, or leading
+    /// whitespace if there's no trailing run to take (matching real
+    /// vim's own `aw` fallback, e.g. a word at the very end of a line).
+    fn word_text_object(&self, scope: Scope) -> ((usize, usize), (usize, usize)) {
+        let pos = (self.cursor_row, self.cursor_col);
+        let class = self.class_at(pos.0, pos.1);
+        let lo = self.run_start(pos, class);
+        let hi = self.run_end(pos, class);
+        if scope == Scope::Inner {
+            return (lo, hi);
+        }
+        if let Some(after) = self.next_pos(hi.0, hi.1)
+            && self.class_at(after.0, after.1) == CharClass::Space
+        {
+            return (lo, self.run_end(after, CharClass::Space));
+        }
+        if let Some(before) = self.prev_pos(lo.0, lo.1)
+            && self.class_at(before.0, before.1) == CharClass::Space
+        {
+            return (self.run_start(before, CharClass::Space), hi);
+        }
+        (lo, hi)
+    }
+
+    /// The key right after an operator's `i`/`a`: only `w` (word)
+    /// completes a text object here (see `Scope`'s doc comment on why
+    /// bracket/quote objects aren't implemented) -- anything else
+    /// cancels silently, same as every other unrecognized key in
+    /// operator-pending state.
+    fn complete_text_object(&mut self, op: Operator, scope: Scope, command: Command) {
+        if command != Command::EditorWordForward {
+            return;
+        }
+        let (lo, hi) = self.word_text_object(scope);
+        self.visual_anchor = Some(lo);
+        (self.cursor_row, self.cursor_col) = hi;
+        match op {
+            Operator::Delete => {
+                self.delete_selection(false);
+                self.last_action = Some(RepeatableAction::TextObject(op, scope, command));
+            }
+            Operator::Change => self.delete_selection(true),
+            Operator::Yank => {
+                self.yank_selection();
+                self.last_action = Some(RepeatableAction::TextObject(op, scope, command));
+            }
+        }
+    }
+
+    /// The key right after `d`/`c`/`y`: repeating the same operator means
+    /// "the whole current line" (`dd`/`cc`/`yy`); `i`/`a` -- arriving
+    /// here as whichever command those keys are actually bound to
+    /// (`EditorEnterInsert`/`EditorAppend`), reused rather than adding
+    /// dedicated commands just for this -- starts a text object instead,
+    /// leaving `pending_operator` set for `complete_text_object` to read
+    /// once the object's own key arrives. Anything else is handed to
+    /// `operator_motion` to interpret as a motion -- including an
+    /// unrelated operator key (`dy`, `cd`, ...), which isn't a motion
+    /// either and so cancels the same way any other unrecognized second
+    /// key does.
+    fn complete_operator(&mut self, op: Operator, command: Command) {
+        if command == Command::EditorEnterInsert {
+            self.pending_scope = Some(Scope::Inner);
+            return;
+        }
+        if command == Command::EditorAppend {
+            self.pending_scope = Some(Scope::Around);
+            return;
+        }
+        self.pending_operator = None;
+        let repeated = matches!(
+            (op, command),
+            (Operator::Delete, Command::EditorOperatorDelete)
+                | (Operator::Change, Command::EditorOperatorChange)
+                | (Operator::Yank, Command::EditorOperatorYank)
+        );
+        if !repeated {
+            self.operator_motion(op, command);
+            return;
+        }
+        match op {
+            Operator::Delete => {
+                self.checkpoint();
+                self.delete_current_line();
+                self.last_action = Some(RepeatableAction::DeleteLine);
+            }
+            Operator::Change => {
+                self.checkpoint();
+                self.change_current_line();
+            }
+            Operator::Yank => {
+                self.yank_current_line();
+                self.last_action = Some(RepeatableAction::YankLine);
+            }
+        }
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
@@ -879,10 +1457,37 @@ impl QueryEditorComponent {
             key,
         ) {
             Resolution::Command(command) => command,
-            // Mid-sequence (the first key of `dd`/`yy`/`za`/`gg`), or not
-            // bound at all -- either way there's nothing to do yet.
-            Resolution::Pending | Resolution::None => return,
+            // Mid-sequence (the first key of `za`/`gg`), or not bound at
+            // all -- either way there's nothing to do yet, and an
+            // operator (or text-object scope) left pending from a
+            // previous key is abandoned here too (vim's own behavior:
+            // anything that doesn't resolve to a valid next key just
+            // cancels it silently).
+            Resolution::Pending | Resolution::None => {
+                self.pending_operator = None;
+                self.pending_scope = None;
+                return;
+            }
         };
+
+        if let Some(scope) = self.pending_scope.take() {
+            // `expect`: `pending_scope` is only ever set alongside
+            // `pending_operator` in `complete_operator`, and nothing
+            // clears one without the other.
+            let op = self.pending_operator.take().expect(
+                "pending_scope is only ever set alongside pending_operator by complete_operator",
+            );
+            self.complete_text_object(op, scope, command);
+            return;
+        }
+
+        if let Some(op) = self.pending_operator {
+            // Not `.take()`: `complete_operator` itself decides whether
+            // this resolves/cancels (clearing it) or starts a text
+            // object instead (leaving it set for `complete_text_object`).
+            self.complete_operator(op, command);
+            return;
+        }
 
         if self.apply_motion_command(command) {
             return;
@@ -932,24 +1537,59 @@ impl QueryEditorComponent {
                 self.mode = EditorMode::VisualLine;
             }
             Command::EditorDeleteChar => {
-                if self.cursor_col < self.current_line_len() {
-                    self.checkpoint();
-                    let removed = self.lines[self.cursor_row].remove(self.cursor_col);
-                    self.register = Some(Register::Charwise(vec![removed]));
-                    self.clamp_col();
-                }
+                self.delete_char_under_cursor();
+                self.last_action = Some(RepeatableAction::DeleteChar);
             }
-            Command::EditorPasteAfter => self.paste(false),
-            Command::EditorPasteBefore => self.paste(true),
-            // `dd`/`yy`/`za` arrive as already-completed two-key sequences
-            // (`Context::VimNormal`'s own bindings) -- no separate pending
-            // flags needed, `keymap().resolve_in` above did that.
-            Command::EditorDeleteLine => {
-                self.checkpoint();
-                self.delete_current_line();
+            Command::EditorDeleteCharBefore => {
+                self.delete_char_before_cursor();
+                self.last_action = Some(RepeatableAction::DeleteCharBefore);
             }
-            Command::EditorYankLine => self.yank_current_line(),
+            Command::EditorPasteAfter => {
+                self.paste(false);
+                self.last_action = Some(RepeatableAction::PasteAfter);
+            }
+            Command::EditorPasteBefore => {
+                self.paste(true);
+                self.last_action = Some(RepeatableAction::PasteBefore);
+            }
+            // Sets `pending_operator` and waits for the next key --
+            // `complete_operator`/`operator_motion` take it from there.
+            // `za`'s own two-key sequence, unlike these, is still handled
+            // entirely by `keymap().resolve_in` above, since it's always
+            // exactly the one combination.
+            Command::EditorOperatorDelete => self.pending_operator = Some(Operator::Delete),
+            Command::EditorOperatorChange => self.pending_operator = Some(Operator::Change),
+            Command::EditorOperatorYank => self.pending_operator = Some(Operator::Yank),
+            // `D`/`C`/`Y`: direct shorthands for `d$`/`c$`/`y$`, reusing
+            // `operator_motion` itself rather than routing back through
+            // `pending_operator` for a combo that's always exactly `$`.
+            Command::EditorDeleteToLineEnd => {
+                self.operator_motion(Operator::Delete, Command::EditorLineEnd)
+            }
+            Command::EditorChangeToLineEnd => {
+                self.operator_motion(Operator::Change, Command::EditorLineEnd)
+            }
+            Command::EditorYankToLineEnd => {
+                self.operator_motion(Operator::Yank, Command::EditorLineEnd)
+            }
             Command::EditorToggleFold => self.toggle_fold(),
+            Command::EditorJoinLines => {
+                self.join_lines();
+                self.last_action = Some(RepeatableAction::JoinLines);
+            }
+            Command::EditorToggleCase => {
+                self.toggle_case();
+                self.last_action = Some(RepeatableAction::ToggleCase);
+            }
+            Command::EditorIndentLine => {
+                self.indent_line();
+                self.last_action = Some(RepeatableAction::IndentLine);
+            }
+            Command::EditorDedentLine => {
+                self.dedent_line();
+                self.last_action = Some(RepeatableAction::DedentLine);
+            }
+            Command::EditorRepeatLast => self.repeat_last(),
             // Real vim's redo key, `ctrl-r`, is already query-screen's
             // "open history" and is intercepted before it ever reaches
             // this editor (see `Context::QueryScreen` in
@@ -1866,6 +2506,170 @@ mod tests {
     }
 
     #[test]
+    fn shift_x_deletes_the_character_before_the_cursor() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+        editor.forward_key(key(KeyCode::Char('l')));
+        editor.forward_key(key(KeyCode::Char('l')));
+
+        editor.forward_key(key(KeyCode::Char('X')));
+
+        assert_eq!(editor.text(), "ac");
+    }
+
+    #[test]
+    fn shift_x_at_column_zero_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('X')));
+
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn w_jumps_to_the_start_of_the_next_word() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.cursor(), (0, 7), "lands on 'i' of 'id'");
+    }
+
+    #[test]
+    fn w_treats_a_punctuation_run_as_its_own_word() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a == b");
+
+        editor.forward_key(key(KeyCode::Char('w')));
+        assert_eq!(editor.cursor(), (0, 2), "lands on the '==' run");
+
+        editor.forward_key(key(KeyCode::Char('w')));
+        assert_eq!(editor.cursor(), (0, 5), "lands on 'b'");
+    }
+
+    #[test]
+    fn w_crosses_a_line_boundary() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id\nfrom users");
+        editor.set_cursor(0, 7); // on "id"
+
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.cursor(), (1, 0), "lands on 'from' on the next line");
+    }
+
+    #[test]
+    fn w_at_the_last_word_of_the_buffer_stays_put() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a b");
+        editor.set_cursor(0, 2); // on "b", the last char
+
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.cursor(), (0, 2), "nowhere further to go");
+    }
+
+    #[test]
+    fn b_jumps_back_to_the_start_of_the_previous_word() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 7); // on "id"
+
+        editor.forward_key(key(KeyCode::Char('b')));
+
+        assert_eq!(editor.cursor(), (0, 0), "back to 'select'");
+    }
+
+    #[test]
+    fn b_from_the_middle_of_a_word_goes_to_its_own_start() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 3); // "l" of "select"
+
+        editor.forward_key(key(KeyCode::Char('b')));
+
+        assert_eq!(editor.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn b_crosses_a_line_boundary() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id\nfrom users");
+        editor.set_cursor(1, 0); // start of "from"
+
+        editor.forward_key(key(KeyCode::Char('b')));
+
+        assert_eq!(editor.cursor(), (0, 7), "back to 'id' on the previous line");
+    }
+
+    #[test]
+    fn b_at_the_start_of_the_buffer_stays_put() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('b')));
+
+        assert_eq!(editor.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn e_jumps_to_the_end_of_the_current_word() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('e')));
+
+        assert_eq!(editor.cursor(), (0, 5), "the 't' of 'select'");
+    }
+
+    #[test]
+    fn e_from_a_words_own_end_goes_to_the_next_words_end() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 5); // already on the 't' of 'select'
+
+        editor.forward_key(key(KeyCode::Char('e')));
+
+        assert_eq!(editor.cursor(), (0, 8), "the 'd' of 'id'");
+    }
+
+    #[test]
+    fn e_crosses_a_line_boundary() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id\nfrom users");
+        editor.set_cursor(0, 8); // the 'd' of 'id'
+
+        editor.forward_key(key(KeyCode::Char('e')));
+
+        assert_eq!(editor.cursor(), (1, 3), "the 'm' of 'from'");
+    }
+
+    #[test]
+    fn word_motions_also_work_in_visual_mode() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.forward_key(key(KeyCode::Char('v')));
+
+        editor.forward_key(key(KeyCode::Char('w')));
+        editor.forward_key(key(KeyCode::Char('y')));
+
+        assert_eq!(
+            editor.text(),
+            "select id",
+            "yank must not mutate the buffer"
+        );
+        // Selection runs from col 0 through the landing spot of `w` (col
+        // 7, inclusive) -- same inclusive-of-cursor convention every
+        // other Visual yank in this file already uses.
+        assert_eq!(
+            editor.register,
+            Some(Register::Charwise("select i".chars().collect()))
+        );
+    }
+
+    #[test]
     fn dd_deletes_the_current_line() {
         let mut editor = QueryEditorComponent::new();
         editor.set_text("a\nb\nc");
@@ -1889,7 +2693,442 @@ mod tests {
     }
 
     #[test]
-    fn a_non_d_key_cancels_a_pending_d() {
+    fn dw_deletes_up_to_but_not_including_the_next_word() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "id");
+        assert_eq!(editor.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn cw_deletes_the_word_and_enters_insert() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('c')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "id");
+        assert_eq!(editor.mode, EditorMode::Insert);
+    }
+
+    #[test]
+    fn yw_copies_the_word_without_deleting_it() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "select id", "yank must not mutate");
+        assert_eq!(editor.cursor(), (0, 0), "yw leaves the cursor at the start");
+        assert_eq!(
+            editor.register,
+            Some(Register::Charwise("select ".chars().collect()))
+        );
+    }
+
+    #[test]
+    fn db_deletes_back_to_the_start_of_the_previous_word() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 7); // "id"
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('b')));
+
+        assert_eq!(editor.text(), "id");
+        assert_eq!(editor.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn de_deletes_through_the_end_of_the_word_inclusive() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('e')));
+
+        assert_eq!(editor.text(), " id");
+    }
+
+    #[test]
+    fn d0_deletes_back_to_the_start_of_the_line_exclusive_of_the_cursor() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 7); // "id"
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('0')));
+
+        assert_eq!(editor.text(), "id");
+        assert_eq!(editor.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn d_dollar_deletes_through_the_end_of_the_line_inclusive() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 7); // "id"
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('$')));
+
+        assert_eq!(editor.text(), "select ");
+    }
+
+    #[test]
+    fn shift_d_is_a_shorthand_for_d_dollar() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 7);
+
+        editor.forward_key(key(KeyCode::Char('D')));
+
+        assert_eq!(editor.text(), "select ");
+    }
+
+    #[test]
+    fn shift_c_is_a_shorthand_for_c_dollar_and_enters_insert() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 7);
+
+        editor.forward_key(key(KeyCode::Char('C')));
+
+        assert_eq!(editor.text(), "select ");
+        assert_eq!(editor.mode, EditorMode::Insert);
+    }
+
+    #[test]
+    fn shift_y_is_a_shorthand_for_y_dollar() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 7);
+
+        editor.forward_key(key(KeyCode::Char('Y')));
+
+        assert_eq!(editor.text(), "select id", "yank must not mutate");
+        assert_eq!(
+            editor.register,
+            Some(Register::Charwise("id".chars().collect()))
+        );
+    }
+
+    #[test]
+    fn cc_clears_the_line_without_removing_it_and_enters_insert() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nb\nc");
+        editor.forward_key(key(KeyCode::Char('j')));
+
+        editor.forward_key(key(KeyCode::Char('c')));
+        editor.forward_key(key(KeyCode::Char('c')));
+
+        assert_eq!(editor.text(), "a\n\nc", "the line stays, just emptied");
+        assert_eq!(editor.mode, EditorMode::Insert);
+    }
+
+    #[test]
+    fn an_operator_followed_by_a_different_operator_cancels_silently() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('y'))); // not a motion, not `d` again
+
+        assert_eq!(editor.text(), "select id");
+        assert_eq!(editor.mode, EditorMode::Normal);
+    }
+
+    #[test]
+    fn diw_deletes_just_the_word_under_the_cursor() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id from users");
+        editor.set_cursor(0, 7); // "i" of "id"
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "select  from users", "only id is gone");
+    }
+
+    #[test]
+    fn diw_on_whitespace_deletes_just_that_whitespace_run() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a   b");
+        editor.set_cursor(0, 2); // middle of the run of spaces
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "ab");
+    }
+
+    #[test]
+    fn daw_also_takes_the_trailing_whitespace() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id from users");
+        editor.set_cursor(0, 7); // "id"
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('a')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "select from users");
+    }
+
+    #[test]
+    fn daw_falls_back_to_leading_whitespace_with_no_trailing_run() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+        editor.set_cursor(0, 8); // "d", the last char, nothing trails it
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('a')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "select");
+    }
+
+    #[test]
+    fn ciw_deletes_the_word_and_enters_insert() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id from users");
+        editor.set_cursor(0, 7);
+
+        editor.forward_key(key(KeyCode::Char('c')));
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(editor.text(), "select  from users");
+        assert_eq!(editor.mode, EditorMode::Insert);
+    }
+
+    #[test]
+    fn yiw_copies_the_word_without_deleting_it() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id from users");
+        editor.set_cursor(0, 7);
+
+        editor.forward_key(key(KeyCode::Char('y')));
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('w')));
+
+        assert_eq!(
+            editor.text(),
+            "select id from users",
+            "yank must not mutate"
+        );
+        assert_eq!(
+            editor.register,
+            Some(Register::Charwise("id".chars().collect()))
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_object_after_i_cancels_silently() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select id");
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('(')));
+
+        assert_eq!(editor.text(), "select id");
+        assert_eq!(editor.mode, EditorMode::Normal);
+    }
+
+    #[test]
+    fn shift_j_joins_the_current_line_with_the_next_one() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select 1\n  from users");
+
+        editor.forward_key(key(KeyCode::Char('J')));
+
+        assert_eq!(editor.text(), "select 1 from users");
+        assert_eq!(editor.cursor(), (0, 8), "lands on the join point");
+    }
+
+    #[test]
+    fn shift_j_on_the_last_line_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select 1");
+
+        editor.forward_key(key(KeyCode::Char('J')));
+
+        assert_eq!(editor.text(), "select 1");
+    }
+
+    #[test]
+    fn shift_j_joining_with_an_empty_line_adds_no_extra_space() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\n\nb");
+
+        // The next line is empty -- nothing to separate "a" from, so no
+        // space is added (unlike joining two non-empty lines, which
+        // the second `J` below still does).
+        editor.forward_key(key(KeyCode::Char('J')));
+        assert_eq!(editor.text(), "a\nb", "joining with an empty line first");
+
+        editor.forward_key(key(KeyCode::Char('J')));
+        assert_eq!(editor.text(), "a b", "two non-empty lines still get one");
+    }
+
+    #[test]
+    fn tilde_toggles_case_and_moves_right() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("aB3");
+
+        editor.forward_key(key(KeyCode::Char('~')));
+        assert_eq!(editor.text(), "AB3");
+        assert_eq!(editor.cursor(), (0, 1));
+
+        editor.forward_key(key(KeyCode::Char('~')));
+        assert_eq!(editor.text(), "Ab3");
+        assert_eq!(editor.cursor(), (0, 2));
+
+        editor.forward_key(key(KeyCode::Char('~')));
+        assert_eq!(editor.text(), "Ab3", "a digit has no case to toggle");
+    }
+
+    #[test]
+    fn double_greater_than_indents_the_line_by_four_spaces() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("select 1");
+
+        editor.forward_key(key(KeyCode::Char('>')));
+        editor.forward_key(key(KeyCode::Char('>')));
+
+        assert_eq!(editor.text(), "    select 1");
+    }
+
+    #[test]
+    fn double_less_than_dedents_the_line_by_up_to_four_spaces() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("      select 1");
+
+        editor.forward_key(key(KeyCode::Char('<')));
+        editor.forward_key(key(KeyCode::Char('<')));
+
+        assert_eq!(editor.text(), "  select 1");
+    }
+
+    #[test]
+    fn double_less_than_never_removes_more_than_the_leading_spaces_there_are() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("  select 1");
+
+        editor.forward_key(key(KeyCode::Char('<')));
+        editor.forward_key(key(KeyCode::Char('<')));
+
+        assert_eq!(editor.text(), "select 1");
+    }
+
+    #[test]
+    fn dot_repeats_x_at_the_new_cursor_position() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('x')));
+        editor.forward_key(key(KeyCode::Char('.')));
+
+        assert_eq!(editor.text(), "c");
+    }
+
+    #[test]
+    fn dot_repeats_dd_on_whatever_line_the_cursor_is_on_now() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("a\nb\nc\nd");
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('.')));
+
+        assert_eq!(editor.text(), "c\nd");
+    }
+
+    #[test]
+    fn dot_repeats_dw_at_the_new_cursor_position() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("one two three");
+
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('w')));
+        editor.forward_key(key(KeyCode::Char('.')));
+
+        assert_eq!(editor.text(), "three");
+    }
+
+    #[test]
+    fn dot_repeats_diw_at_the_new_cursor_position() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("one two three");
+
+        // diw: "one" gone, leaving " two three"; cursor lands on the
+        // leftover leading space.
+        editor.forward_key(key(KeyCode::Char('d')));
+        editor.forward_key(key(KeyCode::Char('i')));
+        editor.forward_key(key(KeyCode::Char('w')));
+        assert_eq!(editor.text(), " two three");
+
+        // `w` onto "two"'s own "t", then `.` repeats diw there --
+        // removing "two" this time, not "one" again.
+        editor.forward_key(key(KeyCode::Char('w')));
+        editor.forward_key(key(KeyCode::Char('.')));
+
+        assert_eq!(editor.text(), "  three");
+    }
+
+    #[test]
+    fn dot_does_not_repeat_cw_since_change_is_out_of_scope() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("one two");
+        // `x` first ("one two" -> "ne two"), so there's a *different*,
+        // repeatable action on record -- confirms `cw` neither repeats
+        // itself nor overwrites what `.` would otherwise replay.
+        editor.forward_key(key(KeyCode::Char('x')));
+
+        // "ne two" -- cw deletes "ne " (up to, not including, "two"),
+        // leaving "two" and entering Insert right there.
+        editor.forward_key(key(KeyCode::Char('c')));
+        editor.forward_key(key(KeyCode::Char('w')));
+        editor.forward_key(key(KeyCode::Esc));
+        assert_eq!(editor.text(), "two");
+
+        // `.` must still be the *original* x, replayed at the cursor's
+        // current position (col 0, on "two"'s own "t") -- not a no-op,
+        // and not somehow re-running cw.
+        editor.forward_key(key(KeyCode::Char('.')));
+
+        assert_eq!(
+            editor.text(),
+            "wo",
+            "dot replayed the earlier x; cw left nothing repeatable of its own"
+        );
+    }
+
+    #[test]
+    fn dot_with_nothing_recorded_yet_is_a_no_op() {
+        let mut editor = QueryEditorComponent::new();
+        editor.set_text("abc");
+
+        editor.forward_key(key(KeyCode::Char('.')));
+
+        assert_eq!(editor.text(), "abc");
+    }
+
+    #[test]
+    fn a_linewise_motion_after_d_cancels_silently_not_dj() {
+        // `j`/`k`/`gg`/`G` are deliberately out of `operator_motion`'s own
+        // scope (see its doc comment) -- unlike real vim, `dj` isn't a
+        // thing here, and cancels exactly like any other unrecognized
+        // second key, not moving the cursor via `j` either.
         let mut editor = QueryEditorComponent::new();
         editor.set_text("a\nb\nc");
 
@@ -1897,27 +3136,28 @@ mod tests {
         editor.forward_key(key(KeyCode::Char('j')));
 
         assert_eq!(editor.text(), "a\nb\nc", "the line must not be deleted");
+        assert_eq!(editor.cursor(), (0, 0), "j must not have moved it either");
     }
 
     #[test]
-    fn a_pending_d_followed_by_a_bound_key_falls_through_and_runs_it() {
-        // `keymap().resolve_in`'s shared pending-sequence mechanism (also
-        // used for `gg` elsewhere) tries the second key on its own once it
-        // doesn't complete `dd` -- so `d` then `i` cancels the pending `d`
-        // and enters Insert, rather than swallowing `i` silently the way
-        // the old hand-rolled `pending_d` flag did.
+    fn a_pending_d_followed_by_an_unrelated_key_cancels_without_running_it() {
+        // Unlike the old `"dd"` two-key *keymap* binding (whose unmatched
+        // second key fell through to its own ordinary single-key lookup),
+        // `pending_operator` is tracked by the editor itself, so an
+        // invalid second key cancels outright -- real vim's own `di`
+        // doesn't enter Insert mode either, it just does nothing.
         let mut editor = QueryEditorComponent::new();
         editor.set_text("ab");
 
         editor.forward_key(key(KeyCode::Char('d')));
         editor.forward_key(key(KeyCode::Char('i')));
 
-        assert_eq!(editor.mode, EditorMode::Insert);
+        assert_eq!(editor.mode, EditorMode::Normal, "i must not have run");
         assert_eq!(editor.text(), "ab", "d itself deleted nothing");
     }
 
     #[test]
-    fn dd_yy_and_za_still_work_as_two_key_sequences_through_the_keymap() {
+    fn dd_yy_and_za_still_work() {
         let mut editor = QueryEditorComponent::new();
         editor.set_text("select 1;\nselect 2;\nselect 3;");
 

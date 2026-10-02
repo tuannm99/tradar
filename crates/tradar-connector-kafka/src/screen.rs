@@ -12,7 +12,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+};
 
 use tradar_connector_spi::Session as ConnectorSession;
 use tradar_core::action::{Action, Component};
@@ -27,6 +29,17 @@ use crate::KafkaSession;
 enum KafkaMode {
     Topics,
     Groups,
+}
+
+/// `Sidebar` (the default) routes `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` to the
+/// topic/group list, same as before this existed. `Detail` -- reached via
+/// `tab` (`Command::CycleFocus`), Groups mode only -- routes the same keys
+/// to the lag table's own `lag_selected` instead, since that table
+/// previously had no way to scroll to a row past the first screen at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Sidebar,
+    Detail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +116,11 @@ pub struct KafkaScreen {
     filter: String,
     /// `Some` while the filter bar has the keys -- see `open_filter`.
     filter_input: Option<TextInput>,
+    focus: Focus,
+    /// Selected row in Groups mode's lag table -- `Focus::Detail`'s own
+    /// cursor, separate from `sidebar_selected`.
+    lag_selected: usize,
+    lag_visible_height: usize,
 }
 
 impl KafkaScreen {
@@ -125,6 +143,9 @@ impl KafkaScreen {
             pending: None,
             filter: String::new(),
             filter_input: None,
+            focus: Focus::Sidebar,
+            lag_selected: 0,
+            lag_visible_height: 0,
         }
     }
 
@@ -189,6 +210,21 @@ impl KafkaScreen {
         self.sidebar_selected = 0;
         self.filter.clear();
         self.filter_input = None;
+        self.focus = Focus::Sidebar;
+    }
+
+    /// `tab` (`Command::CycleFocus`): switches keyboard focus between the
+    /// sidebar and the lag table. A no-op outside Groups mode -- Topics
+    /// mode's message table has its own pause/follow model instead and
+    /// isn't reachable this way.
+    fn toggle_focus(&mut self) {
+        if self.mode != KafkaMode::Groups {
+            return;
+        }
+        self.focus = match self.focus {
+            Focus::Sidebar => Focus::Detail,
+            Focus::Detail => Focus::Sidebar,
+        };
     }
 
     /// Re-fetches the current mode's sidebar list, and the open group's lag
@@ -220,11 +256,16 @@ impl KafkaScreen {
         };
         self.session.fetch_group_lag(&name);
         self.selected_group = Some(name);
+        self.lag_selected = 0;
     }
 
     /// Opens the filter bar, prefilled with whatever's already applied.
+    /// Filtering only ever narrows the sidebar, so this also hands focus
+    /// back to it -- typing into the filter while `Focus::Detail` had the
+    /// lag table's own cursor moving would be confusing.
     fn open_filter(&mut self) {
         self.filter_input = Some(TextInput::new(&self.filter));
+        self.focus = Focus::Sidebar;
     }
 
     fn is_filtering(&self) -> bool {
@@ -409,7 +450,7 @@ impl KafkaScreen {
             format!("{label} — filter: {}", self.filter)
         };
         let list = List::new(items)
-            .block(ui::panel(&title, true))
+            .block(ui::panel(&title, self.focus == Focus::Sidebar))
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, area, &mut self.list_state);
 
@@ -487,6 +528,9 @@ impl KafkaScreen {
             return;
         };
 
+        let len = self.session.group_lag.len();
+        self.lag_selected = self.lag_selected.min(len.saturating_sub(1));
+
         let rows: Vec<Row> = self
             .session
             .group_lag
@@ -501,6 +545,10 @@ impl KafkaScreen {
                 ])
             })
             .collect();
+        let block = ui::panel(&format!("Lag — {group}"), self.focus == Focus::Detail);
+        // Header row takes 1 of the block's inner rows, same accounting
+        // `sidebar_visible_height` does for the sidebar's own border.
+        self.lag_visible_height = block.inner(area).height.saturating_sub(1) as usize;
         let table = Table::new(
             rows,
             [
@@ -521,8 +569,13 @@ impl KafkaScreen {
             ])
             .style(Style::default().fg(theme().text_dim)),
         )
-        .block(ui::panel(&format!("Lag — {group}"), false));
-        frame.render_widget(table, area);
+        .row_highlight_style(ui::selection_style())
+        .block(block);
+        let mut state = TableState::default();
+        if len > 0 {
+            state.select(Some(self.lag_selected));
+        }
+        frame.render_stateful_widget(table, area, &mut state);
     }
 
     fn draw_compose(&mut self, frame: &mut Frame, area: Rect) {
@@ -593,14 +646,25 @@ impl Component for KafkaScreen {
             _ => return None,
         };
         if let Some(mv) = command.as_vim_move() {
-            let mut selected = self.sidebar_selected;
-            vim_list::apply(
-                mv,
-                &mut selected,
-                self.sidebar_len(),
-                self.sidebar_visible_height,
-            );
-            self.sidebar_selected = selected;
+            if self.focus == Focus::Detail && self.mode == KafkaMode::Groups {
+                let mut selected = self.lag_selected;
+                vim_list::apply(
+                    mv,
+                    &mut selected,
+                    self.session.group_lag.len(),
+                    self.lag_visible_height,
+                );
+                self.lag_selected = selected;
+            } else {
+                let mut selected = self.sidebar_selected;
+                vim_list::apply(
+                    mv,
+                    &mut selected,
+                    self.sidebar_len(),
+                    self.sidebar_visible_height,
+                );
+                self.sidebar_selected = selected;
+            }
             return None;
         }
         match command {
@@ -612,6 +676,7 @@ impl Component for KafkaScreen {
             }
             Command::KafkaPauseFollow if self.mode == KafkaMode::Topics => self.toggle_pause(),
             Command::KafkaPublish if self.mode == KafkaMode::Topics => self.open_compose(),
+            Command::CycleFocus => self.toggle_focus(),
             Command::Search => self.open_filter(),
             Command::Help => return Some(Action::ShowHelp),
             Command::Back => return Some(Action::BackToPicker),
@@ -716,6 +781,7 @@ impl Component for KafkaScreen {
             }
             KafkaMode::Groups => {
                 hints.extend(ui::hint(Context::Kafka, Command::KafkaOpen, "lag"));
+                hints.extend(ui::hint(Context::Kafka, Command::CycleFocus, "focus"));
             }
         }
         hints.extend(ui::hint(Context::Kafka, Command::Search, "filter"));
@@ -850,6 +916,118 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(screen.sidebar_selected, 0);
+    }
+
+    fn press(screen: &mut KafkaScreen, c: char) {
+        screen.handle_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+    }
+
+    fn press_tab(screen: &mut KafkaScreen) {
+        screen.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+    }
+
+    fn lag_rows(n: usize) -> Vec<crate::GroupLagRow> {
+        (0..n)
+            .map(|i| crate::GroupLagRow {
+                topic: format!("topic-{i}"),
+                partition: i as i32,
+                committed: 0,
+                high_watermark: 10,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn tab_only_switches_focus_in_groups_mode() {
+        let mut screen = screen();
+        assert_eq!(screen.mode, KafkaMode::Topics);
+
+        press_tab(&mut screen);
+        assert_eq!(
+            screen.focus,
+            Focus::Sidebar,
+            "tab must be a no-op in Topics mode"
+        );
+
+        screen.toggle_mode();
+        press_tab(&mut screen);
+        assert_eq!(screen.focus, Focus::Detail);
+        press_tab(&mut screen);
+        assert_eq!(screen.focus, Focus::Sidebar);
+    }
+
+    #[tokio::test]
+    async fn j_in_detail_focus_scrolls_the_lag_table_not_the_sidebar() {
+        let mut screen = screen();
+        screen.toggle_mode();
+        screen.session.groups = vec![crate::ConsumerGroupInfo {
+            name: "g1".to_string(),
+            state: "Stable".to_string(),
+            members: 1,
+        }];
+        screen.show_lag_selected();
+        screen.session.group_lag = lag_rows(5);
+        draw_once(&mut screen);
+        press_tab(&mut screen); // Sidebar -> Detail
+
+        press(&mut screen, 'j');
+
+        assert_eq!(screen.lag_selected, 1);
+        assert_eq!(
+            screen.sidebar_selected, 0,
+            "focus is on the lag table, the sidebar cursor must not move"
+        );
+    }
+
+    #[tokio::test]
+    async fn j_in_sidebar_focus_never_touches_lag_selected() {
+        let mut screen = screen();
+        screen.toggle_mode();
+        screen.session.groups = vec![
+            crate::ConsumerGroupInfo {
+                name: "g1".to_string(),
+                state: "Stable".to_string(),
+                members: 1,
+            },
+            crate::ConsumerGroupInfo {
+                name: "g2".to_string(),
+                state: "Stable".to_string(),
+                members: 1,
+            },
+        ];
+        screen.session.group_lag = lag_rows(5);
+
+        press(&mut screen, 'j');
+
+        assert_eq!(screen.sidebar_selected, 1);
+        assert_eq!(screen.lag_selected, 0);
+    }
+
+    #[tokio::test]
+    async fn opening_the_filter_sends_focus_back_to_the_sidebar() {
+        let mut screen = screen();
+        screen.toggle_mode();
+        screen.focus = Focus::Detail;
+
+        press(&mut screen, '/');
+
+        assert_eq!(screen.focus, Focus::Sidebar);
+    }
+
+    #[tokio::test]
+    async fn selecting_a_new_group_resets_the_lag_cursor() {
+        let mut screen = screen();
+        screen.toggle_mode();
+        screen.session.groups = vec![crate::ConsumerGroupInfo {
+            name: "g1".to_string(),
+            state: "Stable".to_string(),
+            members: 1,
+        }];
+        screen.lag_selected = 3;
+
+        screen.show_lag_selected();
+
+        assert_eq!(screen.lag_selected, 0);
     }
 
     #[tokio::test]
