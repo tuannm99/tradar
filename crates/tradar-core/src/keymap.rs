@@ -484,6 +484,13 @@ pub enum Command {
     EditorLineStart,
     /// `$` in the query editor: jump to the end of the line.
     EditorLineEnd,
+    /// `w` in the query editor: jump to the start of the next word.
+    EditorWordForward,
+    /// `b` in the query editor: jump back to the start of the current/
+    /// previous word.
+    EditorWordBack,
+    /// `e` in the query editor: jump to the end of the current/next word.
+    EditorWordEnd,
     /// `i`: enter Insert mode at the cursor.
     EditorEnterInsert,
     /// `a`: enter Insert mode one column after the cursor.
@@ -502,16 +509,51 @@ pub enum Command {
     EditorEnterVisualLine,
     /// `x`: delete the character under the cursor.
     EditorDeleteChar,
+    /// `X`: delete the character before the cursor.
+    EditorDeleteCharBefore,
     /// `p`: paste the last yank/delete after the cursor.
     EditorPasteAfter,
     /// `P`: paste the last yank/delete before the cursor.
     EditorPasteBefore,
-    /// `dd`: delete the current line.
-    EditorDeleteLine,
-    /// `yy`: copy the current line.
-    EditorYankLine,
+    /// `d` in Normal mode: starts a delete -- `dd` (repeated) deletes the
+    /// current line, `d` plus a motion (`dw`/`db`/`de`/`d0`/`d$`) deletes
+    /// the range the motion covers, and anything else cancels silently,
+    /// same as real vim. See `QueryEditorComponent::operator_motion`.
+    EditorOperatorDelete,
+    /// `c` in Normal mode: like `EditorOperatorDelete`, but the deleted
+    /// text is replaced by entering Insert mode right at the cut, and a
+    /// doubled `cc` clears the current line's content rather than
+    /// removing it outright.
+    EditorOperatorChange,
+    /// `y` in Normal mode: like `EditorOperatorDelete`, but copies rather
+    /// than deletes.
+    EditorOperatorYank,
+    /// `D`: delete from the cursor through the end of the line -- a
+    /// direct shorthand for `d$`.
+    EditorDeleteToLineEnd,
+    /// `C`: like `EditorDeleteToLineEnd`, then enters Insert -- a direct
+    /// shorthand for `c$`.
+    EditorChangeToLineEnd,
+    /// `Y`: copies from the cursor through the end of the line -- a
+    /// direct shorthand for `y$`.
+    EditorYankToLineEnd,
     /// `za`: open/close the fold under the cursor.
     EditorToggleFold,
+    /// `J`: joins the current line with the next one, collapsing the
+    /// join point down to a single space.
+    EditorJoinLines,
+    /// `~`: toggles the case of the character under the cursor and moves
+    /// right.
+    EditorToggleCase,
+    /// `>>`: indents the current line.
+    EditorIndentLine,
+    /// `<<`: dedents the current line.
+    EditorDedentLine,
+    /// `.`: repeats the last buffer-mutating Normal-mode command --
+    /// scoped to the ones that don't themselves involve typing text (see
+    /// `QueryEditorComponent::RepeatableAction`'s own doc comment for
+    /// exactly which).
+    EditorRepeatLast,
     /// `y` in Visual/VisualLine mode: copy the selection.
     EditorYankSelection,
     /// `d`/`x` in Visual/VisualLine mode: delete the selection.
@@ -649,6 +691,9 @@ impl Command {
             Self::EditorMoveRight => "editor-move-right",
             Self::EditorLineStart => "editor-line-start",
             Self::EditorLineEnd => "editor-line-end",
+            Self::EditorWordForward => "editor-word-forward",
+            Self::EditorWordBack => "editor-word-back",
+            Self::EditorWordEnd => "editor-word-end",
             Self::EditorEnterInsert => "editor-enter-insert",
             Self::EditorAppend => "editor-append",
             Self::EditorInsertLineStart => "editor-insert-line-start",
@@ -658,11 +703,21 @@ impl Command {
             Self::EditorEnterVisual => "editor-enter-visual",
             Self::EditorEnterVisualLine => "editor-enter-visual-line",
             Self::EditorDeleteChar => "editor-delete-char",
+            Self::EditorDeleteCharBefore => "editor-delete-char-before",
             Self::EditorPasteAfter => "editor-paste-after",
             Self::EditorPasteBefore => "editor-paste-before",
-            Self::EditorDeleteLine => "editor-delete-line",
-            Self::EditorYankLine => "editor-yank-line",
+            Self::EditorOperatorDelete => "editor-operator-delete",
+            Self::EditorOperatorChange => "editor-operator-change",
+            Self::EditorOperatorYank => "editor-operator-yank",
+            Self::EditorDeleteToLineEnd => "editor-delete-to-line-end",
+            Self::EditorChangeToLineEnd => "editor-change-to-line-end",
+            Self::EditorYankToLineEnd => "editor-yank-to-line-end",
             Self::EditorToggleFold => "editor-toggle-fold",
+            Self::EditorJoinLines => "editor-join-lines",
+            Self::EditorToggleCase => "editor-toggle-case",
+            Self::EditorIndentLine => "editor-indent-line",
+            Self::EditorDedentLine => "editor-dedent-line",
+            Self::EditorRepeatLast => "editor-repeat-last",
             Self::EditorYankSelection => "editor-yank-selection",
             Self::EditorDeleteSelection => "editor-delete-selection",
             Self::EditorChangeSelection => "editor-change-selection",
@@ -688,7 +743,7 @@ impl Command {
         Self::ALL.iter().copied().find(|c| c.name() == name)
     }
 
-    const ALL: [Self; 135] = [
+    const ALL: [Self; 148] = [
         Self::Quit,
         Self::NewTab,
         Self::CloseTab,
@@ -792,6 +847,9 @@ impl Command {
         Self::EditorMoveRight,
         Self::EditorLineStart,
         Self::EditorLineEnd,
+        Self::EditorWordForward,
+        Self::EditorWordBack,
+        Self::EditorWordEnd,
         Self::EditorEnterInsert,
         Self::EditorAppend,
         Self::EditorInsertLineStart,
@@ -801,11 +859,21 @@ impl Command {
         Self::EditorEnterVisual,
         Self::EditorEnterVisualLine,
         Self::EditorDeleteChar,
+        Self::EditorDeleteCharBefore,
         Self::EditorPasteAfter,
         Self::EditorPasteBefore,
-        Self::EditorDeleteLine,
-        Self::EditorYankLine,
+        Self::EditorOperatorDelete,
+        Self::EditorOperatorChange,
+        Self::EditorOperatorYank,
+        Self::EditorDeleteToLineEnd,
+        Self::EditorChangeToLineEnd,
+        Self::EditorYankToLineEnd,
         Self::EditorToggleFold,
+        Self::EditorJoinLines,
+        Self::EditorToggleCase,
+        Self::EditorIndentLine,
+        Self::EditorDedentLine,
+        Self::EditorRepeatLast,
         Self::EditorYankSelection,
         Self::EditorDeleteSelection,
         Self::EditorChangeSelection,
@@ -932,6 +1000,9 @@ impl Command {
             Self::EditorMoveRight => "Move right",
             Self::EditorLineStart => "Jump to the start of the line",
             Self::EditorLineEnd => "Jump to the end of the line",
+            Self::EditorWordForward => "Jump to the start of the next word",
+            Self::EditorWordBack => "Jump back to the start of a word",
+            Self::EditorWordEnd => "Jump to the end of a word",
             Self::EditorEnterInsert => "Insert at the cursor",
             Self::EditorAppend => "Insert after the cursor",
             Self::EditorInsertLineStart => "Insert at the start of the line",
@@ -941,11 +1012,21 @@ impl Command {
             Self::EditorEnterVisual => "Enter Visual mode",
             Self::EditorEnterVisualLine => "Enter Visual Line mode",
             Self::EditorDeleteChar => "Delete the character under the cursor",
+            Self::EditorDeleteCharBefore => "Delete the character before the cursor",
             Self::EditorPasteAfter => "Paste after the cursor",
             Self::EditorPasteBefore => "Paste before the cursor",
-            Self::EditorDeleteLine => "Delete the current line",
-            Self::EditorYankLine => "Copy the current line",
+            Self::EditorOperatorDelete => "Delete (operator: dd for the line, or a motion)",
+            Self::EditorOperatorChange => "Change (operator: cc for the line, or a motion)",
+            Self::EditorOperatorYank => "Yank (operator: yy for the line, or a motion)",
+            Self::EditorDeleteToLineEnd => "Delete to the end of the line",
+            Self::EditorChangeToLineEnd => "Change to the end of the line",
+            Self::EditorYankToLineEnd => "Yank to the end of the line",
             Self::EditorToggleFold => "Open/close the fold under the cursor",
+            Self::EditorJoinLines => "Join with the next line",
+            Self::EditorToggleCase => "Toggle the case of the character under the cursor",
+            Self::EditorIndentLine => "Indent the current line",
+            Self::EditorDedentLine => "Dedent the current line",
+            Self::EditorRepeatLast => "Repeat the last change",
             Self::EditorYankSelection => "Copy the selection",
             Self::EditorDeleteSelection => "Delete the selection",
             Self::EditorChangeSelection => "Delete the selection and insert",
@@ -1164,6 +1245,13 @@ impl Default for Keymap {
                 ("r", Command::RabbitRefresh),
                 ("enter", Command::RabbitOpen),
                 ("p", Command::RabbitPublish),
+                // Switches keyboard focus between the sidebar and the
+                // messages/bindings table -- same command/key as
+                // `Context::QueryScreen`'s editor<->results toggle, so
+                // `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` can reach a detail
+                // table longer than one page, which previously had no way
+                // to scroll to a row past the first screen at all.
+                ("tab", Command::CycleFocus),
                 ("/", Command::Search),
                 ("esc", Command::Back),
                 ("?", Command::Help),
@@ -1178,6 +1266,12 @@ impl Default for Keymap {
                 ("b", Command::KafkaTailEarliest),
                 ("space", Command::KafkaPauseFollow),
                 ("p", Command::KafkaPublish),
+                // Same reasoning as `Context::Rabbit`'s own binding --
+                // reaches Groups mode's lag table, which previously had no
+                // scrolling at all. Topics mode's message table keeps its
+                // own pause/follow model instead (`space`) and doesn't use
+                // this.
+                ("tab", Command::CycleFocus),
                 ("/", Command::Search),
                 ("esc", Command::Back),
                 ("?", Command::Help),
@@ -1325,11 +1419,31 @@ impl Default for Keymap {
                 ("v", Command::EditorEnterVisual),
                 ("V", Command::EditorEnterVisualLine),
                 ("x", Command::EditorDeleteChar),
+                ("X", Command::EditorDeleteCharBefore),
                 ("p", Command::EditorPasteAfter),
                 ("P", Command::EditorPasteBefore),
-                ("dd", Command::EditorDeleteLine),
-                ("yy", Command::EditorYankLine),
+                // Single keys, not `"dd"`/`"yy"` two-key bindings -- a
+                // second press of the same one (linewise, the whole
+                // current line) and a motion in between (charwise, the
+                // range it covers) are both decided by
+                // `QueryEditorComponent` itself, comparing the `Command`
+                // its own second `resolve_in` call returns against the
+                // pending operator -- the keymap has no "operator
+                // pending" concept of its own, and a fixed two-key
+                // binding per operator+motion combination would mean one
+                // entry per pairing instead of one per operator.
+                ("d", Command::EditorOperatorDelete),
+                ("c", Command::EditorOperatorChange),
+                ("y", Command::EditorOperatorYank),
+                ("D", Command::EditorDeleteToLineEnd),
+                ("C", Command::EditorChangeToLineEnd),
+                ("Y", Command::EditorYankToLineEnd),
                 ("za", Command::EditorToggleFold),
+                ("J", Command::EditorJoinLines),
+                ("~", Command::EditorToggleCase),
+                (">>", Command::EditorIndentLine),
+                ("<<", Command::EditorDedentLine),
+                (".", Command::EditorRepeatLast),
                 // Real vim's redo key, `ctrl-r`, is already query-screen's
                 // "open history" and is intercepted before it ever reaches
                 // the editor -- `U` is the substitute here, same as before
@@ -1367,6 +1481,9 @@ impl Default for Keymap {
                 ("ctrl-u", Command::HalfPageUp),
                 ("0", Command::EditorLineStart),
                 ("$", Command::EditorLineEnd),
+                ("w", Command::EditorWordForward),
+                ("b", Command::EditorWordBack),
+                ("e", Command::EditorWordEnd),
             ]),
         );
         bindings.insert(
@@ -1948,10 +2065,10 @@ mod tests {
     }
 
     #[test]
-    fn the_dd_yy_za_two_key_editor_combos_are_rebindable_to_a_different_pair() {
+    fn the_za_two_key_editor_combo_is_rebindable_to_a_different_pair() {
         let mut keymap = Keymap::default();
         keymap
-            .apply_overrides(&overrides("vim-normal", "editor-delete-line", &["qq"]))
+            .apply_overrides(&overrides("vim-normal", "editor-toggle-fold", &["qq"]))
             .unwrap();
 
         let mut pending = None;
@@ -1961,14 +2078,33 @@ mod tests {
         );
         assert_eq!(
             keymap.resolve(Context::VimNormal, &mut pending, press(KeyCode::Char('q'))),
-            Resolution::Command(Command::EditorDeleteLine)
+            Resolution::Command(Command::EditorToggleFold)
         );
 
         pending = None;
         assert_eq!(
+            keymap.resolve(Context::VimNormal, &mut pending, press(KeyCode::Char('z'))),
+            Resolution::None,
+            "the old za binding is gone once overridden"
+        );
+    }
+
+    #[test]
+    fn the_operator_keys_are_rebindable_like_any_other_single_key() {
+        let mut keymap = Keymap::default();
+        keymap
+            .apply_overrides(&overrides("vim-normal", "editor-operator-delete", &["q"]))
+            .unwrap();
+
+        let mut pending = None;
+        assert_eq!(
+            keymap.resolve(Context::VimNormal, &mut pending, press(KeyCode::Char('q'))),
+            Resolution::Command(Command::EditorOperatorDelete)
+        );
+        assert_eq!(
             keymap.resolve(Context::VimNormal, &mut pending, press(KeyCode::Char('d'))),
             Resolution::None,
-            "the old dd binding is gone once overridden"
+            "the old single-key d binding is gone once overridden"
         );
     }
 

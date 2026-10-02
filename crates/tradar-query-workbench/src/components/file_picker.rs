@@ -200,9 +200,18 @@ impl FilePickerComponent {
                 _ => {}
             }
         }
+        // `Ctrl-d`/`Ctrl-u` are control chords, never typed into a filename,
+        // so (unlike `j`/`k`/`gg`/`G`, which stay plain typing here) they're
+        // safe to take as half-page jumps the same as every other list.
         let movement = match code {
             KeyCode::Down => Some(vim_list::VimMove::Down),
             KeyCode::Up => Some(vim_list::VimMove::Up),
+            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(vim_list::VimMove::HalfPageDown)
+            }
+            KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(vim_list::VimMove::HalfPageUp)
+            }
             _ => None,
         };
         if let Some(mv) = movement {
@@ -571,6 +580,25 @@ mod tests {
         assert_eq!(
             picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE),
             Some(PickerOutcome::Chosen(dir.path().join("orders.sql")))
+        );
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_jump_by_half_the_visible_height() {
+        let names: Vec<String> = (0..10).map(|i| format!("q{i}.sql")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let dir = dir_with(&refs);
+        let mut picker = picker_at_root(&[], dir.path());
+        draw_text(&mut picker); // sets visible_height from the real area
+
+        picker.handle_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(picker.selected > 0, "ctrl-d must move the selection down");
+
+        let after_down = picker.selected;
+        picker.handle_key_event(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(
+            picker.selected < after_down,
+            "ctrl-u must move the selection back up"
         );
     }
 
