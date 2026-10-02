@@ -389,13 +389,14 @@ impl QueryScreenComponent {
         let outline = flatten_outline(engine.schema());
 
         let mut query_editor = QueryEditorComponent::new();
-        // Postgres/MySQL/SQLite/ClickHouse speak real SQL close enough to
-        // the `tree-sitter-sequel` grammar to highlight -- Mongo/
-        // Elasticsearch/Redis use their own hand-rolled query shapes with no
-        // grammar to match, so they stay plain text.
+        // Postgres/MySQL/SQLite/ClickHouse/Cassandra speak real SQL (CQL
+        // for Cassandra) close enough to the `tree-sitter-sequel` grammar
+        // to highlight -- Mongo/Elasticsearch/Redis use their own
+        // hand-rolled query shapes with no grammar to match, so they stay
+        // plain text.
         if matches!(
             engine.connection().driver.as_str(),
-            "postgres" | "mysql" | "sqlite" | "clickhouse"
+            "postgres" | "mysql" | "sqlite" | "clickhouse" | "cassandra"
         ) {
             query_editor.set_dialect(Dialect::Sql);
         }
@@ -515,7 +516,13 @@ impl QueryScreenComponent {
             Command::DeleteRow => self.begin_delete_row(),
             Command::SortColumn => self.results.sort_by_column(self.results.selected_col),
             Command::Search => {
-                self.search = Some(ui::TextInput::new(self.results.filter()));
+                if self.focus == Focus::Browse {
+                    if let Some(browse) = self.browse.as_mut() {
+                        browse.open_filter();
+                    }
+                } else {
+                    self.search = Some(ui::TextInput::new(self.results.filter()));
+                }
             }
             Command::ToggleFilterConditions => self.open_filter_conditions(),
             Command::RetryQuery => self.retry_failed_query(),
@@ -1434,6 +1441,21 @@ impl Component for QueryScreenComponent {
                 Some(PromptOutcome::Cancelled) => self.prompt = None,
                 Some(PromptOutcome::Confirmed(path)) => self.handle_prompt_confirmed(path),
                 None => {}
+            }
+            return None;
+        }
+
+        // Browse mode's own `/` filter (narrows the key sidebar, not the
+        // results grid `self.search` below filters) -- checked first since
+        // it's a separate `TextInput` owned by `BrowseSidebarComponent`
+        // itself, same reasoning as every other modal input block here.
+        if self
+            .browse
+            .as_ref()
+            .is_some_and(BrowseSidebarComponent::is_filtering)
+        {
+            if let Some(browse) = self.browse.as_mut() {
+                browse.filter_key_event(code, modifiers);
             }
             return None;
         }
@@ -4559,6 +4581,22 @@ mod tests {
         screen.handle_key_event(KeyCode::F(2), KeyModifiers::NONE);
         assert_eq!(screen.mode, ScreenMode::Browse);
         assert_eq!(screen.focus, Focus::Browse);
+    }
+
+    #[test]
+    fn slash_while_the_browse_sidebar_is_focused_opens_its_own_filter_not_the_results_search() {
+        let (mut screen, _rx) = redis_screen_with(empty_result(), Ok(redis_schema()));
+        assert_eq!(screen.focus, Focus::Browse);
+
+        screen.handle_key_event(KeyCode::Char('/'), KeyModifiers::NONE);
+
+        assert!(screen.search.is_none());
+        assert!(
+            screen
+                .browse
+                .as_ref()
+                .is_some_and(BrowseSidebarComponent::is_filtering)
+        );
     }
 
     #[tokio::test]

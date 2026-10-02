@@ -5,7 +5,7 @@
 //! Socket" in docs/architecture.md and
 //! `docs/backlog/socket-connector-2026-09-29.md`.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction as LayoutDirection, Layout, Rect};
 use ratatui::style::Style;
@@ -205,6 +205,22 @@ impl Component for SocketScreen {
         None
     }
 
+    /// Only the scroll wheel does anything here -- there's no sidebar to
+    /// click into (the whole point of this screen's layout, per the
+    /// module doc comment) and the input line is always focused already,
+    /// so a click has nothing to change. Same `scroll()` the `Up`/`Down`
+    /// keys already call, which is why the sign looks flipped from
+    /// `ScrollUp`/`ScrollDown`'s own names -- see `scroll_offset`'s doc
+    /// comment for why it counts back from the newest entry.
+    fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        match event.kind {
+            MouseEventKind::ScrollUp => self.scroll(1),
+            MouseEventKind::ScrollDown => self.scroll(-1),
+            _ => {}
+        }
+        None
+    }
+
     fn update(&mut self, _action: Action) -> Option<Action> {
         None
     }
@@ -344,6 +360,33 @@ mod tests {
         screen.handle_key_event(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(screen.scroll_offset, 1);
         assert_eq!(screen.input.text(), "");
+    }
+
+    #[tokio::test]
+    async fn scroll_wheel_scrolls_the_same_way_as_up_and_down() {
+        let mut screen = screen().await;
+        for i in 0..5 {
+            screen
+                .session
+                .push_entry(Direction::Received, vec![b'0' + i]);
+        }
+        screen.visible_height = 2;
+
+        screen.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(screen.scroll_offset, 1);
+
+        screen.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(screen.scroll_offset, 0);
     }
 
     #[test]

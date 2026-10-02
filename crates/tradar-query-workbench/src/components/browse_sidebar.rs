@@ -4,6 +4,7 @@
 //! calls these plain methods, the same way it drives `ResultsComponent`.
 //! See "Redis: key browser" in `docs/backlog/mockup-ui-2026-08-15.md`.
 
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -12,7 +13,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use tradar_core::keymap::{Command, Context, keymap};
 use tradar_core::theme::theme;
-use tradar_core::ui::{self, DoubleClickTracker};
+use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
 
 use crate::query_driver::SchemaInfo;
@@ -44,6 +45,13 @@ pub struct BrowseSidebarComponent {
     list_state: ListState,
     list_area: Rect,
     double_click: DoubleClickTracker,
+    /// A case-insensitive substring narrowing the key list -- same idiom
+    /// as `NavigatorComponent::filter`/`KafkaScreen::filter`. Kept even
+    /// while `filter_input` is closed so the title can still say what's
+    /// applied and a fresh `/` prefills it rather than starting over.
+    filter: String,
+    /// `Some` while the filter bar has the keys -- see `open_filter`.
+    filter_input: Option<TextInput>,
 }
 
 impl BrowseSidebarComponent {
@@ -60,20 +68,64 @@ impl BrowseSidebarComponent {
             list_state: ListState::default(),
             list_area: Rect::ZERO,
             double_click: DoubleClickTracker::new(),
+            filter: String::new(),
+            filter_input: None,
         }
     }
 
+    /// `entries` narrowed by `filter`, when one's applied -- same idiom as
+    /// `NavigatorComponent::visible_rows`.
+    fn visible_entries(&self) -> Vec<&SchemaInfo> {
+        if self.filter.is_empty() {
+            return self.entries.iter().collect();
+        }
+        let needle = self.filter.to_lowercase();
+        self.entries
+            .iter()
+            .filter(|e| e.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
     pub fn selected_entry(&self) -> Option<&SchemaInfo> {
-        self.entries.get(self.selected)
+        self.visible_entries().get(self.selected).copied()
     }
 
     pub fn apply_move(&mut self, mv: VimMove) {
-        vim_list::apply(
-            mv,
-            &mut self.selected,
-            self.entries.len(),
-            self.visible_height,
-        );
+        let len = self.visible_entries().len();
+        vim_list::apply(mv, &mut self.selected, len, self.visible_height);
+    }
+
+    /// Opens the filter bar, prefilled with whatever's already applied --
+    /// same idiom as `KafkaScreen::open_filter`.
+    pub fn open_filter(&mut self) {
+        self.filter_input = Some(TextInput::new(&self.filter));
+    }
+
+    pub fn is_filtering(&self) -> bool {
+        self.filter_input.is_some()
+    }
+
+    /// One key while the filter bar has the keys. `Esc` cancels -- clears
+    /// the bar *and* whatever was applied. `Enter` keeps the filter and
+    /// closes the bar. Anything else is text editing, applied live. Same
+    /// shape as `KafkaScreen::filter_key_event`.
+    pub fn filter_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(input) = self.filter_input.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.filter_input = None;
+                self.filter.clear();
+                self.selected = 0;
+            }
+            KeyCode::Enter => self.filter_input = None,
+            _ => {
+                input.handle_key_event(code, modifiers);
+                self.filter = input.text();
+                self.selected = 0;
+            }
+        }
     }
 
     /// See `BrowseClick`. A no-op (`Missed`) while `error` is showing --
@@ -88,8 +140,8 @@ impl BrowseSidebarComponent {
             width: self.list_area.width.saturating_sub(2),
             height: self.list_area.height.saturating_sub(2),
         };
-        let Some(index) = ui::index_at(inner, self.list_state.offset(), row, self.entries.len())
-        else {
+        let len = self.visible_entries().len();
+        let Some(index) = ui::index_at(inner, self.list_state.offset(), row, len) else {
             return BrowseClick::Selected;
         };
         self.selected = index;
@@ -102,6 +154,12 @@ impl BrowseSidebarComponent {
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let theme = theme();
+        let (area, filter_bar_area) = if self.filter_input.is_some() {
+            let (list_area, bar) = ui::split_bottom_bar(area, 1);
+            (list_area, Some(bar))
+        } else {
+            (area, None)
+        };
         self.visible_height = area.height.saturating_sub(2) as usize;
         self.list_area = area;
 
@@ -114,8 +172,8 @@ impl BrowseSidebarComponent {
             return;
         }
 
-        let items: Vec<ListItem> = self
-            .entries
+        let visible = self.visible_entries();
+        let items: Vec<ListItem> = visible
             .iter()
             .map(|entry| {
                 let kind = entry.kind.as_deref().unwrap_or("?");
@@ -133,18 +191,30 @@ impl BrowseSidebarComponent {
             })
             .collect();
 
-        if !self.entries.is_empty() {
+        let visible_len = visible.len();
+        drop(visible);
+        if visible_len > 0 {
             self.list_state.select(Some(self.selected));
         }
 
-        let open = keymap()
-            .binding_for(Context::Browse, Command::BrowseOpen)
-            .unwrap_or_default();
-        let title = format!("Keys ({}) — {open} open", self.entries.len());
+        let title = if self.filter.is_empty() {
+            let open = keymap()
+                .binding_for(Context::Browse, Command::BrowseOpen)
+                .unwrap_or_default();
+            format!("Keys ({visible_len}) — {open} open")
+        } else {
+            format!("Keys ({visible_len}) — filter: {}", self.filter)
+        };
         let list = List::new(items)
             .block(ui::panel(&title, focused))
             .highlight_style(ui::selection_style());
         frame.render_stateful_widget(list, area, &mut self.list_state);
+
+        if let (Some(bar_area), Some(input)) = (filter_bar_area, &self.filter_input) {
+            let mut spans = vec![Span::styled("/", Style::default().fg(theme.accent))];
+            spans.extend(input.spans(true));
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        }
     }
 }
 
@@ -208,6 +278,72 @@ mod tests {
 
         assert_eq!(sidebar.selected_entry(), None);
         assert_eq!(sidebar.error.as_deref(), Some("scan failed"));
+    }
+
+    #[test]
+    fn filter_narrows_visible_entries_case_insensitively() {
+        let mut sidebar = BrowseSidebarComponent::new(&Ok(vec![
+            entry("user:1", "hash"),
+            entry("payment:1", "string"),
+            entry("USER:2", "hash"),
+        ]));
+
+        sidebar.filter = "user".to_string();
+        let names: Vec<&str> = sidebar
+            .visible_entries()
+            .into_iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["user:1", "USER:2"]);
+    }
+
+    #[test]
+    fn esc_clears_the_filter_and_resets_the_cursor() {
+        let mut sidebar = sidebar();
+
+        sidebar.open_filter();
+        assert!(sidebar.is_filtering());
+        for c in "greet".chars() {
+            sidebar.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(sidebar.filter, "greet");
+        assert_eq!(sidebar.visible_entries().len(), 1);
+        sidebar.selected = 5;
+
+        sidebar.filter_key_event(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert!(!sidebar.is_filtering());
+        assert!(sidebar.filter.is_empty());
+        assert_eq!(sidebar.visible_entries().len(), 2);
+        assert_eq!(sidebar.selected, 0);
+    }
+
+    #[test]
+    fn enter_keeps_the_filter_applied_and_closes_the_bar() {
+        let mut sidebar = sidebar();
+
+        sidebar.open_filter();
+        for c in "greet".chars() {
+            sidebar.filter_key_event(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        sidebar.filter_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(!sidebar.is_filtering());
+        assert_eq!(sidebar.filter, "greet");
+        assert_eq!(sidebar.selected_entry(), Some(&entry("greeting", "string")));
+    }
+
+    #[test]
+    fn open_filter_prefills_whatever_was_already_applied() {
+        let mut sidebar = sidebar();
+        sidebar.filter = "greet".to_string();
+
+        sidebar.open_filter();
+
+        assert_eq!(
+            sidebar.filter_input.as_ref().map(|input| input.text()),
+            Some("greet".to_string())
+        );
     }
 
     #[test]

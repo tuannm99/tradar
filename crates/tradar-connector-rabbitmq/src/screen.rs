@@ -4,7 +4,7 @@
 //! overlay for publishing. See "Thiết kế UI: Kafka và RabbitMQ" in
 //! docs/architecture.md for the design this implements.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -15,8 +15,8 @@ use tradar_connector_spi::Session as ConnectorSession;
 use tradar_core::action::{Action, Component};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::theme::theme;
-use tradar_core::ui::{self, TextInput};
-use tradar_core::vim_list;
+use tradar_core::ui::{self, DoubleClickTracker, TextInput};
+use tradar_core::vim_list::{self, VimMove};
 
 use crate::RabbitSession;
 
@@ -82,6 +82,16 @@ pub struct RabbitScreen {
     mode: RabbitMode,
     sidebar_selected: usize,
     sidebar_visible_height: usize,
+    /// Where the sidebar was last drawn (after the filter bar, if any,
+    /// shrank it) -- a click is hit-tested against these exact bounds,
+    /// same role as `BrowseSidebarComponent::list_area`.
+    sidebar_area: Rect,
+    /// Persisted across frames (not rebuilt fresh in `draw_sidebar`) so
+    /// `.offset()` reflects whatever scroll position the last render
+    /// actually used -- a click's row has to be mapped through that same
+    /// offset, same reasoning as `ConnectionPickerComponent::list_state`.
+    list_state: ListState,
+    double_click: DoubleClickTracker,
     selected_queue: Option<String>,
     selected_exchange: Option<String>,
     compose: Option<ComposeState>,
@@ -109,6 +119,9 @@ impl RabbitScreen {
             mode: RabbitMode::Queues,
             sidebar_selected: 0,
             sidebar_visible_height: 0,
+            sidebar_area: Rect::ZERO,
+            list_state: ListState::default(),
+            double_click: DoubleClickTracker::new(),
             selected_queue: None,
             selected_exchange: None,
             compose: None,
@@ -292,6 +305,7 @@ impl RabbitScreen {
         };
 
         self.sidebar_visible_height = area.height.saturating_sub(2) as usize;
+        self.sidebar_area = area;
         let len = self.sidebar_len();
         self.sidebar_selected = self.sidebar_selected.min(len.saturating_sub(1));
 
@@ -336,9 +350,8 @@ impl RabbitScreen {
                 .collect(),
         };
 
-        let mut state = ListState::default();
         if len > 0 {
-            state.select(Some(self.sidebar_selected));
+            self.list_state.select(Some(self.sidebar_selected));
         }
         let title = if self.filter.is_empty() {
             self.mode_title().to_string()
@@ -348,7 +361,7 @@ impl RabbitScreen {
         let list = List::new(items)
             .block(ui::panel(&title, true))
             .highlight_style(ui::selection_style());
-        frame.render_stateful_widget(list, area, &mut state);
+        frame.render_stateful_widget(list, area, &mut self.list_state);
 
         if let (Some(bar_area), Some(input)) = (filter_bar_area, &self.filter_input) {
             let mut spans = vec![Span::styled("/", Style::default().fg(theme().accent))];
@@ -535,6 +548,61 @@ impl Component for RabbitScreen {
         None
     }
 
+    /// Click-to-select/double-click-to-open on the sidebar, plus
+    /// scroll-wheel to move the selection -- same pattern
+    /// `ConnectionPickerComponent`/`BrowseSidebarComponent` already use.
+    /// A no-op while the compose panel or filter bar has the keys, same
+    /// reasoning `handle_key_event` applies to them.
+    fn handle_mouse_event(&mut self, event: MouseEvent) -> Option<Action> {
+        if self.compose.is_some() || self.is_filtering() {
+            return None;
+        }
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !ui::contains(self.sidebar_area, event.column, event.row) {
+                    return None;
+                }
+                let inner = Rect {
+                    x: self.sidebar_area.x.saturating_add(1),
+                    y: self.sidebar_area.y.saturating_add(1),
+                    width: self.sidebar_area.width.saturating_sub(2),
+                    height: self.sidebar_area.height.saturating_sub(2),
+                };
+                let len = self.sidebar_len();
+                if let Some(index) = ui::index_at(inner, self.list_state.offset(), event.row, len) {
+                    self.sidebar_selected = index;
+                    if self.double_click.click(index) {
+                        self.open_selected();
+                    }
+                }
+                None
+            }
+            MouseEventKind::ScrollDown => {
+                let mut selected = self.sidebar_selected;
+                vim_list::apply(
+                    VimMove::Down,
+                    &mut selected,
+                    self.sidebar_len(),
+                    self.sidebar_visible_height,
+                );
+                self.sidebar_selected = selected;
+                None
+            }
+            MouseEventKind::ScrollUp => {
+                let mut selected = self.sidebar_selected;
+                vim_list::apply(
+                    VimMove::Up,
+                    &mut selected,
+                    self.sidebar_len(),
+                    self.sidebar_visible_height,
+                );
+                self.sidebar_selected = selected;
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn update(&mut self, _action: Action) -> Option<Action> {
         None
     }
@@ -655,6 +723,91 @@ mod tests {
             .map(|q| q.name.as_str())
             .collect();
         assert_eq!(names, vec!["orders", "ORDER_DLQ"]);
+    }
+
+    fn draw_once(screen: &mut RabbitScreen) {
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.draw(frame, frame.area()))
+            .unwrap();
+    }
+
+    fn left_click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn queue(name: &str) -> crate::QueueInfo {
+        crate::QueueInfo {
+            name: name.to_string(),
+            messages_ready: 0,
+            messages_unacknowledged: 0,
+            consumers: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn clicking_a_queue_in_the_sidebar_selects_it() {
+        let mut screen = screen();
+        screen.session.queues = vec![queue("orders"), queue("payments")];
+        draw_once(&mut screen);
+
+        // Row 0 is the sidebar's top border, row 2 is the second queue.
+        screen.handle_mouse_event(left_click(2, 2));
+
+        assert_eq!(screen.sidebar_selected, 1);
+    }
+
+    #[tokio::test]
+    async fn double_clicking_a_queue_peeks_its_messages_and_remembers_it() {
+        let mut screen = screen();
+        screen.session.queues = vec![queue("orders")];
+        draw_once(&mut screen);
+
+        screen.handle_mouse_event(left_click(2, 1));
+        screen.handle_mouse_event(left_click(2, 1));
+
+        assert_eq!(screen.selected_queue.as_deref(), Some("orders"));
+    }
+
+    #[tokio::test]
+    async fn a_click_outside_the_sidebar_does_nothing() {
+        let mut screen = screen();
+        screen.session.queues = vec![queue("orders")];
+        draw_once(&mut screen);
+
+        screen.handle_mouse_event(left_click(50, 5));
+
+        assert_eq!(screen.sidebar_selected, 0);
+        assert_eq!(screen.selected_queue, None);
+    }
+
+    #[tokio::test]
+    async fn scrolling_moves_the_sidebar_selection() {
+        let mut screen = screen();
+        screen.session.queues = vec![queue("orders"), queue("payments")];
+        draw_once(&mut screen);
+
+        screen.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(screen.sidebar_selected, 1);
+
+        screen.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(screen.sidebar_selected, 0);
     }
 
     #[tokio::test]

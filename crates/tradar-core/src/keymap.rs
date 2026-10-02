@@ -1155,7 +1155,7 @@ impl Default for Keymap {
         );
         bindings.insert(
             Context::Browse,
-            parse_defaults(&[("enter", Command::BrowseOpen)]),
+            parse_defaults(&[("enter", Command::BrowseOpen), ("/", Command::Search)]),
         );
         bindings.insert(
             Context::Rabbit,
@@ -1241,6 +1241,7 @@ impl Default for Keymap {
                 ("enter", Command::Confirm),
                 ("esc", Command::Cancel),
                 ("d", Command::HttpDeleteRequest),
+                ("/", Command::Search),
             ]),
         );
         bindings.insert(
