@@ -11,7 +11,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use tradar_core::action::{Action, Component};
 use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
-use tradar_core::storage::{ConnectionStore, SavedConnection};
+use tradar_core::storage::{ConnectionStore, SavedConnection, rename_migrations_dir};
 use tradar_core::theme::theme;
 use tradar_core::ui::{self, DoubleClickTracker, TextInput};
 use tradar_core::vim_list::{self, VimMove};
@@ -214,6 +214,30 @@ impl ConnectionPickerComponent {
         match outcome {
             FormOutcome::Cancelled => self.form = None,
             FormOutcome::Saved { connection, mode } => {
+                // Two connections sharing a name would also share a
+                // migrations directory (keyed by name, see
+                // `default_migrations_dir`) -- files meant for one
+                // database would show up as pending/get run against the
+                // other. Caught here, same role as the empty-name/-target
+                // checks `ConnectionFormComponent::confirm` already does,
+                // just one level up since it alone doesn't see the other
+                // saved connections.
+                let other_has_same_name = self.connections.iter().enumerate().any(|(i, c)| {
+                    c.name == connection.name
+                        && match mode {
+                            FormMode::Add => true,
+                            FormMode::Edit(index) => i != index,
+                        }
+                });
+                if other_has_same_name {
+                    if let Some(form) = self.form.as_mut() {
+                        form.error = Some(format!(
+                            "a connection named {:?} already exists",
+                            connection.name
+                        ));
+                    }
+                    return;
+                }
                 match mode {
                     FormMode::Add => {
                         self.connections.push(connection);
@@ -225,7 +249,11 @@ impl ConnectionPickerComponent {
                     }
                     FormMode::Edit(index) => {
                         if let Some(slot) = self.connections.get_mut(index) {
+                            let old_name = slot.name.clone();
                             *slot = connection;
+                            if slot.name != old_name {
+                                let _ = rename_migrations_dir(&old_name, &slot.name);
+                            }
                         }
                     }
                 }
@@ -916,6 +944,73 @@ mod tests {
         );
         let saved = ConnectionStore::at(path).load().unwrap();
         assert_eq!(saved, picker.connections);
+    }
+
+    #[test]
+    fn adding_a_connection_with_a_duplicate_name_is_rejected() {
+        let (mut picker, _dir, path) = editable_picker();
+
+        picker.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+        type_str(&mut picker, "local-sqlite"); // already taken
+        picker.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Tab, KeyModifiers::NONE); // target
+        type_str(&mut picker, "another.db");
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(picker.connections.len(), 2, "nothing new must be saved");
+        assert!(
+            picker.form.is_some(),
+            "the form must stay open so the user can pick a different name"
+        );
+        assert!(
+            picker
+                .form
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("already exists")
+        );
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    #[test]
+    fn editing_a_connection_to_an_already_used_name_is_rejected() {
+        let (mut picker, _dir, _path) = editable_picker();
+        picker.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE); // -> local-postgres
+
+        picker.handle_key_event(KeyCode::Char('e'), KeyModifiers::NONE);
+        for _ in 0.."local-postgres".len() {
+            picker.handle_key_event(KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        type_str(&mut picker, "local-sqlite"); // the OTHER connection's name
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(
+            picker.connections[1].name, "local-postgres",
+            "the rejected rename must not take effect"
+        );
+        assert!(picker.form.is_some());
+    }
+
+    #[test]
+    fn editing_a_connection_without_changing_its_name_is_not_a_duplicate_of_itself() {
+        let (mut picker, _dir, _path) = editable_picker();
+        picker.handle_key_event(KeyCode::Char('j'), KeyModifiers::NONE); // -> local-postgres
+
+        picker.handle_key_event(KeyCode::Char('e'), KeyModifiers::NONE);
+        picker.handle_key_event(KeyCode::Tab, KeyModifiers::NONE); // driver
+        picker.handle_key_event(KeyCode::Tab, KeyModifiers::NONE); // target
+        type_str(&mut picker, "-updated");
+        picker.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert_eq!(picker.connections[1].name, "local-postgres");
+        assert_eq!(
+            picker.connections[1].target,
+            "postgres://localhost/test-updated"
+        );
+        assert!(picker.form.is_none(), "an unrelated edit must go through");
     }
 
     #[test]

@@ -98,6 +98,35 @@ pub fn default_migrations_dir(connection_name: &str) -> anyhow::Result<PathBuf> 
     Ok(dirs.config_dir().join("migrations").join(sanitized))
 }
 
+/// Moves a connection's migrations directory after its name changes, so
+/// editing a connection (the normal "fix a typo" path) doesn't silently
+/// orphan the whole directory -- the panel would otherwise start reading
+/// an empty/different path and report "up to date" with nothing pending,
+/// while the real files sit untouched at the old, now-unreachable name.
+/// Best-effort and silent either way: nothing to move if the old
+/// directory never existed (no migrations run yet), and the old directory
+/// is left in place rather than overwritten or merged if something is
+/// already at the new path (e.g. left over from an unrelated, since-
+/// deleted connection that once had the same name) -- losing migration
+/// history to a rename would be worse than requiring a manual cleanup
+/// here.
+pub fn rename_migrations_dir(
+    old_connection_name: &str,
+    new_connection_name: &str,
+) -> anyhow::Result<()> {
+    let old = default_migrations_dir(old_connection_name)?;
+    let new = default_migrations_dir(new_connection_name)?;
+    move_dir_if_safe(&old, &new);
+    Ok(())
+}
+
+fn move_dir_if_safe(old: &std::path::Path, new: &std::path::Path) {
+    if old == new || !old.exists() || new.exists() {
+        return;
+    }
+    let _ = std::fs::rename(old, new);
+}
+
 /// Turns what the user typed in a save/open prompt into a path. A bare
 /// name, or a relative path with subfolders (e.g. `reports/first`), lands
 /// inside the queries directory and gains a `.sql` extension if it doesn't
@@ -616,6 +645,53 @@ mod tests {
         let path = default_migrations_dir("a/../../etc").unwrap();
 
         assert_eq!(path.file_name().unwrap(), "a_.._.._etc");
+    }
+
+    #[test]
+    fn move_dir_if_safe_moves_an_existing_directory_to_a_free_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("0001_init.sql"), "SELECT 1;").unwrap();
+
+        move_dir_if_safe(&old, &new);
+
+        assert!(!old.exists(), "the old directory must be gone");
+        assert!(
+            new.join("0001_init.sql").exists(),
+            "its contents must have moved"
+        );
+    }
+
+    #[test]
+    fn move_dir_if_safe_is_a_no_op_when_the_old_directory_never_existed() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old"); // never created -- no migrations run yet
+        let new = root.path().join("new");
+
+        move_dir_if_safe(&old, &new);
+
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn move_dir_if_safe_leaves_the_old_directory_in_place_when_the_new_one_is_taken() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("0001_init.sql"), "SELECT 1;").unwrap();
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(new.join("unrelated.sql"), "SELECT 2;").unwrap();
+
+        move_dir_if_safe(&old, &new);
+
+        assert!(
+            old.join("0001_init.sql").exists(),
+            "nothing already at the destination must be overwritten or merged"
+        );
+        assert!(new.join("unrelated.sql").exists());
     }
 
     #[test]

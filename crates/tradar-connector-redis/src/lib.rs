@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{QueryDriver, QueryResult, SchemaInfo, Statement};
+use tradar_query_workbench::query_driver::{
+    MAX_ROWS, QueryDriver, QueryResult, SchemaInfo, Statement,
+};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 struct RedisDriver {
@@ -121,13 +123,20 @@ impl QueryDriver for RedisDriver {
     }
 
     /// Every key, each with its Redis type and TTL -- what the browse
-    /// sidebar lists. SCAN is paginated 100 keys at a time and looped to
-    /// completion, then every key gets one `TYPE`+`TTL` round trip
-    /// (pipelined together, since both target the same key): N+1 round
-    /// trips for N keys, the same trade-off already accepted for MongoDB's
-    /// per-collection `find_one` in `list_schema`. Fine for a keyspace of
-    /// ordinary size; worth pipelining across keys too if a very large one
-    /// ever makes this slow in practice.
+    /// sidebar lists. SCAN is paginated 100 keys at a time and looped,
+    /// stopping once `MAX_ROWS` keys have been collected rather than
+    /// looping to completion -- a production keyspace can hold millions of
+    /// keys, and without this cap the whole thing loads into memory before
+    /// the browse sidebar ever appears (unlike every other connector's
+    /// `list_schema`, which only reads small, inherently-bounded metadata --
+    /// table/column lists, index mappings -- never data at this scale).
+    /// Deliberately silent about the cut (no `truncated` flag reaches the
+    /// sidebar): that would mean widening `SchemaInfo`/`list_schema`'s
+    /// return type for all twelve connectors just for this one driver's
+    /// case, a cost this fix doesn't carry; the remaining per-key `TYPE`+
+    /// `TTL` round trip (pipelined together, since both target the same
+    /// key) is the same N+1 trade-off already accepted for MongoDB's
+    /// per-collection `find_one`, now bounded by the same cap.
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let mut connection = self
             .connection
@@ -144,11 +153,12 @@ impl QueryDriver for RedisDriver {
                 .query_async(&mut connection)
                 .await?;
             keys.extend(batch);
-            if next_cursor == 0 {
+            if keys.len() >= MAX_ROWS || next_cursor == 0 {
                 break;
             }
             cursor = next_cursor;
         }
+        keys.truncate(MAX_ROWS);
 
         let mut schema = Vec::with_capacity(keys.len());
         for name in keys {
@@ -690,6 +700,31 @@ mod tests {
             schema.len(),
             250,
             "a single 100-key SCAN batch must not be the whole answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_schema_stops_scanning_at_max_rows() {
+        let container = Redis::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+        let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+        driver.connect().await.unwrap();
+        // One pipelined MSET rather than MAX_ROWS+1 round trips through
+        // `execute()` -- same reasoning as `list_schema`'s own SCAN/pipeline
+        // use, just applied to seeding the test data quickly.
+        let mut connection = driver.connection.clone().unwrap();
+        let mut mset = redis::cmd("MSET");
+        for i in 0..=MAX_ROWS {
+            mset.arg(format!("key:{i}")).arg("v");
+        }
+        let _: () = mset.query_async(&mut connection).await.unwrap();
+
+        let schema = driver.list_schema().await.unwrap();
+
+        assert_eq!(
+            schema.len(),
+            MAX_ROWS,
+            "an unbounded keyspace must not load past MAX_ROWS keys"
         );
     }
 
