@@ -141,7 +141,11 @@ impl ConnectionFormComponent {
             self.field = Field::Name;
             return None;
         }
-        if self.target.is_empty() {
+        // HTTP's target is a base URL, and its own `connect()` explicitly
+        // supports leaving it unset (every request typed in full instead) --
+        // `target_hint("http")` already advertises this as "optional", so
+        // this check must not contradict it for that one driver.
+        if self.target.is_empty() && self.driver_id() != "http" {
             self.error = Some("target must not be empty".to_string());
             self.field = Field::Target;
             return None;
@@ -454,6 +458,23 @@ mod tests {
         assert_eq!(outcome, None);
         assert_eq!(form.field, Field::Target);
         assert!(form.error.as_deref().unwrap().contains("target"));
+    }
+
+    #[test]
+    fn an_empty_target_is_accepted_for_http() {
+        // HTTP's own target_hint says "optional" -- the validation must not
+        // contradict that for this one driver.
+        let mut form = ConnectionFormComponent::new(FormMode::Add, vec!["http".to_string()], None);
+        type_str(&mut form, "no target needed");
+
+        let outcome = form.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        match outcome {
+            Some(FormOutcome::Saved { connection, .. }) => {
+                assert_eq!(connection.target, "");
+            }
+            other => panic!("expected Saved with an empty target, got {other:?}"),
+        }
     }
 
     #[test]

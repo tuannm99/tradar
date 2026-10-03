@@ -34,7 +34,7 @@ pub fn to_json(result: &QueryResult) -> Result<String, String> {
                     let fields: serde_json::Map<String, serde_json::Value> = columns
                         .iter()
                         .cloned()
-                        .zip(row.iter().cloned().map(serde_json::Value::String))
+                        .zip(row.iter().map(|cell| cell_to_json(cell)))
                         .collect();
                     serde_json::Value::Object(fields)
                 })
@@ -45,6 +45,27 @@ pub fn to_json(result: &QueryResult) -> Result<String, String> {
             serde_json::to_string_pretty(items).map_err(|e| e.to_string())
         }
         QueryResult::Affected { .. } => Err("nothing to export".to_string()),
+    }
+}
+
+/// Every SQL-ish driver (`stringify_row`/`format_value` in Postgres, MySQL,
+/// SQLite, Cassandra, ClickHouse) renders a real null as the literal string
+/// `"NULL"` -- that's a cell *value*, not column type information, so a
+/// genuine number/boolean column still round-trips as a quoted JSON string
+/// here (`"id": "1"`, not `"id": 1`); fixing that needs `QueryResult::Table`
+/// to carry per-column types, which none of those drivers compute today.
+/// This one case is safe to fix without that: `"NULL"` is already the
+/// app-wide sentinel for null everywhere a cell is rendered, not a guess at
+/// what a string might mean, and `QueryResult::Table`'s own doc comment
+/// already accepts a real text value that happens to equal "NULL" reading
+/// the same as an actual null on screen -- exporting the same string the
+/// grid already shows is exactly as accurate as the grid itself, not a
+/// regression on top of it.
+fn cell_to_json(cell: &str) -> serde_json::Value {
+    if cell == "NULL" {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(cell.to_string())
     }
 }
 
@@ -131,6 +152,24 @@ mod tests {
                 {"id": "2", "name": "O'Brien, Sam"}
             ])
         );
+    }
+
+    #[test]
+    fn json_from_a_table_turns_the_null_sentinel_into_a_real_json_null() {
+        // Every SQL-ish driver renders a real null as the literal string
+        // "NULL" -- exporting that string verbatim would be indistinguishable
+        // from a text value that happens to say "NULL", a type a JSON
+        // consumer can't tell apart from the real thing.
+        let result = QueryResult::Table {
+            columns: vec!["id".to_string(), "nickname".to_string()],
+            rows: vec![vec!["1".to_string(), "NULL".to_string()]],
+            truncated: false,
+        };
+
+        let json = to_json(&result).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, serde_json::json!([{"id": "1", "nickname": null}]));
     }
 
     #[test]

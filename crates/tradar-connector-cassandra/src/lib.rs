@@ -6,10 +6,9 @@
 //! something the rest of the app can reach into.
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
-use scylla::errors::ExecutionError;
-use scylla::response::query_result::IntoRowsResultError;
 use scylla::value::{CqlValue, Row};
 
 use tradar_connector_spi::{Connector, ConnectorDescriptor, Session as ConnectorSession};
@@ -57,7 +56,10 @@ impl CassandraDriver {
 /// match that shape (a missing keyspace/table, a timeout, a dropped
 /// connection) falls straight through to `ExecutionError`'s own `Display`
 /// unchanged -- there's no token to search for.
-fn format_cassandra_error(error: ExecutionError, query: &str) -> anyhow::Error {
+fn format_cassandra_error<E>(error: E, query: &str) -> anyhow::Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     let message = error.to_string();
     let Some(marker) = cassandra_error_marker(&message, query) else {
         return error.into();
@@ -265,40 +267,63 @@ impl QueryDriver for CassandraDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
-        let result = self
+        // Non-SELECT statements (INSERT/UPDATE/DELETE/DDL) have no row
+        // shape to stream -- same `returns_rows` heuristic Postgres/MySQL/
+        // SQLite already use to pick between a streamed, capped read and a
+        // plain affected-rows execute, rather than this driver's own
+        // after-the-fact `IntoRowsResultError::ResultNotRows` check it used
+        // to make on an already-fetched response (see below for why that
+        // response can no longer be fetched unpaged in the first place).
+        if !query_driver::returns_rows(query) {
+            self.session()
+                .query_unpaged(query, &[])
+                .await
+                .map_err(|e| format_cassandra_error(e, query))?;
+            // CQL's wire protocol has no equivalent of SQL's affected-row
+            // count for these (a `Void` result carries nothing else), so
+            // this is always 0 -- not a shortcut, an actual protocol
+            // limitation.
+            return Ok(QueryResult::Affected { rows: 0 });
+        }
+
+        // Streamed and capped via `query_iter` rather than `query_unpaged`,
+        // which fetches the *entire* result from the cluster in one
+        // unpaged response before any truncation could happen -- the same
+        // "pulls an unbounded result set into memory" failure mode the
+        // `fetch`-based SQL drivers already avoid, just reachable here by
+        // an ordinary forgotten-`LIMIT` `SELECT` rather than connect-time
+        // schema browsing. Column specs have to be read before
+        // `rows_stream` consumes the pager by value.
+        let pager = self
             .session()
-            .query_unpaged(query, &[])
+            .query_iter(query, &[])
             .await
             .map_err(|e| format_cassandra_error(e, query))?;
-        match result.into_rows_result() {
-            Ok(rows_result) => {
-                let columns: Vec<String> = rows_result
-                    .column_specs()
-                    .iter()
-                    .map(|spec| spec.name().to_string())
-                    .collect();
-                let mut out_rows = Vec::new();
-                let mut truncated = false;
-                for row in rows_result.rows::<Row>()? {
-                    if out_rows.len() == query_driver::MAX_ROWS {
-                        truncated = true;
-                        break;
-                    }
-                    out_rows.push(stringify_row(&row?));
-                }
-                Ok(QueryResult::Table {
-                    columns,
-                    rows: out_rows,
-                    truncated,
-                })
+        let columns: Vec<String> = pager
+            .column_specs()
+            .as_slice()
+            .iter()
+            .map(|spec| spec.name().to_string())
+            .collect();
+        let mut rows_stream = pager
+            .rows_stream::<Row>()
+            .map_err(|e| format_cassandra_error(e, query))?;
+        let mut out_rows = Vec::new();
+        let mut truncated = false;
+        while let Some(row) = rows_stream.next().await {
+            if out_rows.len() == query_driver::MAX_ROWS {
+                truncated = true;
+                break;
             }
-            // Not a Rows response -- a write or DDL statement. CQL's wire
-            // protocol has no equivalent of SQL's affected-row count for
-            // these (a `Void` result carries nothing else), so this is
-            // always 0 -- not a shortcut, an actual protocol limitation.
-            Err(IntoRowsResultError::ResultNotRows(_)) => Ok(QueryResult::Affected { rows: 0 }),
-            Err(e) => Err(e.into()),
+            out_rows.push(stringify_row(
+                &row.map_err(|e| format_cassandra_error(e, query))?,
+            ));
         }
+        Ok(QueryResult::Table {
+            columns,
+            rows: out_rows,
+            truncated,
+        })
     }
 }
 

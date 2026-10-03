@@ -196,6 +196,14 @@ impl NewColumnForm {
     }
 }
 
+/// A second `primary_key: true` column would build a `CREATE TABLE` the
+/// server rejects outright ("multiple primary keys ... are not allowed") --
+/// catching it here, same role as the name/type check just above, means the
+/// user sees it before confirming rather than after running the statement.
+fn columns_have_a_primary_key(columns: &[NewColumn]) -> bool {
+    columns.iter().any(|c| c.primary_key)
+}
+
 enum Stage {
     AddColumn {
         table: String,
@@ -403,6 +411,14 @@ impl TableDesignerComponent {
                         }
                         Command::TableDesignerCommitColumn => {
                             match form.to_column() {
+                                Some(column)
+                                    if column.primary_key
+                                        && columns_have_a_primary_key(columns) =>
+                                {
+                                    *error = Some(
+                                        "a table can only have one primary key column".to_string(),
+                                    );
+                                }
                                 Some(column) => {
                                     columns.push(column);
                                     *form = NewColumnForm::new();
@@ -416,6 +432,12 @@ impl TableDesignerComponent {
                         }
                         Command::Confirm => {
                             if let Some(column) = form.to_column() {
+                                if column.primary_key && columns_have_a_primary_key(columns) {
+                                    *error = Some(
+                                        "a table can only have one primary key column".to_string(),
+                                    );
+                                    return None;
+                                }
                                 columns.push(column);
                                 *form = NewColumnForm::new();
                             }
@@ -854,6 +876,68 @@ mod tests {
         assert_eq!(columns[0].name, "id");
         assert_eq!(columns[0].type_name, "INTEGER");
         assert!(form.name.is_empty(), "the form resets for the next column");
+    }
+
+    #[test]
+    fn committing_a_second_primary_key_column_is_rejected() {
+        let mut component = TableDesignerComponent::create_table();
+        type_str(&mut component, "accounts");
+        component.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        type_str(&mut component, "id");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut component, "INTEGER");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE); // -> Nullable
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE); // -> PrimaryKey
+        component.handle_key_event(KeyCode::Right, KeyModifiers::NONE); // toggle on
+        component.handle_key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+        type_str(&mut component, "email");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut component, "TEXT");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        component.handle_key_event(KeyCode::Right, KeyModifiers::NONE); // toggle on
+
+        let outcome = component.handle_key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+        assert!(outcome.is_none());
+        let Stage::CreateTableColumns { columns, error, .. } = &component.stage else {
+            panic!("expected CreateTableColumns");
+        };
+        assert_eq!(columns.len(), 1, "the second column must not be committed");
+        assert!(error.as_deref().unwrap().contains("primary key"));
+    }
+
+    #[test]
+    fn confirming_with_a_second_primary_key_still_in_the_form_is_rejected() {
+        let mut component = TableDesignerComponent::create_table();
+        type_str(&mut component, "accounts");
+        component.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+        type_str(&mut component, "id");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut component, "INTEGER");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        component.handle_key_event(KeyCode::Right, KeyModifiers::NONE);
+        component.handle_key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
+
+        type_str(&mut component, "email");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut component, "TEXT");
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        component.handle_key_event(KeyCode::Tab, KeyModifiers::NONE);
+        component.handle_key_event(KeyCode::Right, KeyModifiers::NONE);
+
+        // Confirm (`Enter`) auto-commits whatever's left in the form -- the
+        // same check must apply there, not just on an explicit Ctrl-a.
+        let outcome = component.handle_key_event(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(outcome.is_none());
+        let Stage::CreateTableColumns { columns, error, .. } = &component.stage else {
+            panic!("expected CreateTableColumns");
+        };
+        assert_eq!(columns.len(), 1, "the second column must not be committed");
+        assert!(error.as_deref().unwrap().contains("primary key"));
     }
 
     #[test]
