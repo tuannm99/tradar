@@ -39,6 +39,10 @@ Thuần phía plugin (`guard.lua`, `init.lua`); server không đổi.
 - **Bug tìm ra nhờ test (đã sửa):** `K` trên `o.user_id` coi `o` là tên bảng nên không tìm thấy gì — alias phải được phân giải từ `FROM`/`JOIN`; test ban đầu không phân biệt được (chỉ một bảng có cột đó), nên thêm ca `u.id` (cả `users` và `orders` đều có `id`) để chứng minh alias được phân giải thật.
 - **Test:** `guard` 23 ca (comment/chuỗi/identifier giả `WHERE`, CTE giấu `DELETE`, ...); smoke headless 10 ca bảo vệ (Cancel không đụng dữ liệu, "Run anyway", connection prod, lô hỏi một lần, `confirm=false`) + 11 ca điều hướng; chạy lại smoke giai đoạn A và cấu hình thật của user, kể cả việc `K`/`gd` giành lại phím sau `on_attach` của LSP.
 
+## Bước 5 (cùng ngày): sửa/xoá dòng trong buffer kết quả
+
+Thuần phía plugin (`edit_cell`/`delete_row`/`confirm_and_run` trong `init.lua`); dùng lại `edit.source`/`edit.sql` đã có từ giai đoạn 1 — server không đổi. Quyết định: lời nhắc "Run this?" hiện nguyên câu lệnh và thay luôn lời nhắc của guard (chạy với `confirmed`), vì nếu không, connection `protected` sẽ hỏi hai lần cho cùng một thao tác; sau khi chạy, truy vấn gốc được chạy lại để lưới phản ánh thay đổi (`run_text` có thêm hook `after`), con trỏ giữ nguyên dòng. Test: 11 ca (sửa → câu `UPDATE` đúng → lưới đổi + con trỏ giữ dòng, Cancel, giá trị không đổi, `NULL` không bị quote, xoá dòng, bảng không PK, thiếu cột khoá, `SELECT` không bảng, connection prod hỏi đúng một lần); smoke các giai đoạn trước chạy lại không hồi quy.
+
 ## Quyết định thiết kế và lý do
 
 - **JSON-RPC theo dòng, không msgpack-rpc.** Plugin chỉ cần `vim.json` + một pipe, người dùng gõ tay được bằng `socat`.

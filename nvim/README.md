@@ -37,7 +37,7 @@ hoặc file `.tradar` (một dòng, tên connection) ở thư mục cha, hoặc 
 | `K` | thông tin bảng/cột dưới con trỏ (kiểu, PK, FK, index; hiểu alias `o.user_id`); không biết thì rơi về hover của LSP |
 | `gd` | trên tên bảng: mở bảng (`SELECT ... LIMIT 100`); chỗ khác: `definition` của LSP |
 
-Trong buffer kết quả: `gd` trên ô của cột khoá ngoại chạy `SELECT` dòng được tham chiếu (kết quả của truy vấn một bảng), `gyc` ô, `gyr` dòng, `gyC` cột, `gyj`/`gyv`/`gym` cả kết quả (JSON/CSV/Markdown), `:TradarExport csv|json|md|tsv [file]`, `q` đóng. Cuộn tới cuối tự tải trang kế.
+Trong buffer kết quả: `i` sửa ô (nhập giá trị — gõ `NULL` để đặt NULL — rồi hiện câu `UPDATE` để bạn xác nhận), `dd` xoá dòng (hiện câu `DELETE` rồi xác nhận); sau khi chạy, kết quả tự làm mới và con trỏ ở nguyên dòng. Chỉ sửa được kết quả của truy vấn một bảng có khoá chính và có chọn cột khoá, nếu không sẽ báo lý do. `gd` trên ô của cột khoá ngoại chạy `SELECT` dòng được tham chiếu (kết quả của truy vấn một bảng), `gyc` ô, `gyr` dòng, `gyC` cột, `gyj`/`gyv`/`gym` cả kết quả (JSON/CSV/Markdown), `:TradarExport csv|json|md|tsv [file]`, `q` đóng. Cuộn tới cuối tự tải trang kế.
 
 Statusline: `require('tradar').status()` (chuỗi rỗng ngoài buffer SQL).
 Completion: nguồn `blink.cmp` `tradar.blink` (hoặc `omnifunc`).

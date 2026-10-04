@@ -40,7 +40,8 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [ ] Navigator dạng cây (`connection → schema → bảng → cột`) trong Neovim, hiện chỉ có panel phẳng + picker telescope
 - [ ] `gd` theo FK cho kết quả nhiều bảng (JOIN) — cần biết cột đến từ bảng nào, `QueryResult` chưa mang thông tin đó
 - [x] Chặn `UPDATE`/`DELETE` thiếu `WHERE`/`DROP`/`TRUNCATE` + connection "protected" hỏi mọi lệnh ghi + `⚠` trên statusline — xong (2026-10-04)
-- [ ] Giai đoạn C còn lại: sửa ô ngay trong kết quả (`edit.sql` → xem → xác nhận), filetype riêng cho Mongo/Elasticsearch/Redis (guard hiện chỉ hiểu SQL)
+- [x] Sửa ô / xoá dòng ngay trong kết quả (`i`/`dd`, hiện câu lệnh → xác nhận → làm mới) — xong (2026-10-04)
+- [ ] Filetype riêng cho Mongo/Elasticsearch/Redis trong Neovim (guard và `K`/`gd` hiện chỉ hiểu SQL; `edit.sql` phía server đã hỗ trợ Mongo/ES)
 - [ ] Huỷ thật sự phía database (Postgres `pg_cancel_request`, SQLite interrupt) — hiện chỉ bỏ phần chờ
 - [ ] Row-edit trong buffer results (`edit.sql` đã có, chưa có UI Lua)
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response

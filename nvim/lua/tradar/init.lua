@@ -418,6 +418,8 @@ attach_results = function(buf)
   map('n', 'gyv', function() M.yank_all('csv') end, 'yank all as CSV')
   map('n', 'gym', function() M.yank_all('md') end, 'yank all as Markdown table')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
+  map('n', 'i', function() M.edit_cell() end, 'edit this cell (shows the UPDATE first)')
+  map('n', 'dd', function() M.delete_row() end, 'delete this row (shows the DELETE first)')
   map('n', 'q', function()
     local win = vim.fn.bufwinid(buf)
     if win ~= -1 then vim.api.nvim_win_close(win, true) end
@@ -515,6 +517,7 @@ local function run_text(buf, text, base_row, base_col, flags)
       if vim.api.nvim_buf_is_valid(buf) then vim.diagnostic.reset(ns, buf) end
       if guard.changes_schema(text) then state.schema_cache[conn] = nil end
       show_result(r, { conn = conn, query = text })
+      if flags.after then flags.after() end
     end, function(err, data)
       finish()
       if err == 'query cancelled' then
@@ -877,6 +880,110 @@ function M.follow_fk()
       end)
     end)
   end, function(err) notify(err, vim.log.levels.ERROR) end)
+end
+
+-- ── editing rows from the results buffer ─────────────────────────────────
+
+--- Works out what the cursor's row *is*: the table it came from and the
+--- primary-key values that name exactly that row. Read-only (with a reason)
+--- when it can't be done -- the same rule as the TUI's row edit: a statement
+--- that might hit several rows is not one to write on the user's behalf.
+local function edit_target(cb)
+  local r = state.result
+  local row, col = cell_at()
+  if not (r and r.conn and row) then
+    return notify('put the cursor on a cell of a table result', vim.log.levels.WARN)
+  end
+  call('edit.source', { connection = r.conn, query = r.query }, function(src)
+    if not src.table then
+      return notify('read-only: cannot tell which table these rows come from (single-table SELECTs only)', vim.log.levels.WARN)
+    end
+    local function with_keys(keys)
+      if not keys or #keys == 0 then
+        return notify(('read-only: `%s` has no primary key, so a row cannot be addressed'):format(src.table), vim.log.levels.WARN)
+      end
+      local key = {}
+      for _, k in ipairs(keys) do
+        local idx
+        for i, c in ipairs(r.columns) do
+          if c:lower() == k:lower() then idx = i break end
+        end
+        if not idx then
+          return notify(('the key column `%s` is not in this result — select it too'):format(k), vim.log.levels.WARN)
+        end
+        local v = r.rows[row][idx]
+        if v == nil or v == 'NULL' then
+          return notify(('cannot address the row: key `%s` is NULL'):format(k), vim.log.levels.WARN)
+        end
+        key[k] = v
+      end
+      cb(r, row, col, src, key)
+    end
+    if src.key_columns and #src.key_columns > 0 then return with_keys(src.key_columns) end
+    get_schema(r.conn, function(entries)
+      local tbl = find_table(entries, src.table)
+      local keys = {}
+      for _, c in ipairs(tbl and tbl.columns or {}) do
+        if c.primary_key then keys[#keys + 1] = c.name end
+      end
+      with_keys(keys)
+    end)
+  end, function(err) notify(err, vim.log.levels.ERROR) end)
+end
+
+--- Shows the generated statement and runs it only on an explicit "Run";
+--- then re-runs the original query so the grid shows the change, with the
+--- cursor where it was.
+local function confirm_and_run(r, sql)
+  if not sql then return notify('this connector cannot edit rows (read-only)', vim.log.levels.WARN) end
+  local win = vim.fn.bufwinid(state.results_buf)
+  local pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
+  local buf = state.sql_buf
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then buf = vim.api.nvim_get_current_buf() end
+  vim.ui.select({ 'Cancel', 'Run' }, {
+    prompt = ('tradar [%s] run this?\n  %s'):format(r.conn, sql),
+  }, function(choice)
+    if choice ~= 'Run' then return end
+    run_text(buf, sql, 0, 0, {
+      confirmed = true, -- this prompt *is* the confirmation
+      after = function()
+        run_text(buf, r.query, 0, 0, {
+          confirmed = true,
+          after = function()
+            local w = vim.fn.bufwinid(state.results_buf)
+            if w ~= -1 and pos then
+              local lines = vim.api.nvim_buf_line_count(state.results_buf)
+              pcall(vim.api.nvim_win_set_cursor, w, { math.min(pos[1], lines), pos[2] })
+            end
+          end,
+        })
+      end,
+    })
+  end)
+end
+
+--- `i` on a cell: type the new value (the literal `NULL` sets NULL, as the
+--- grid shows it), see the `UPDATE`, confirm.
+function M.edit_cell()
+  edit_target(function(r, row, col, src, key)
+    local column, current = r.columns[col], r.rows[row][col]
+    vim.ui.input({ prompt = ('%s.%s = '):format(src.table, column), default = current }, function(value)
+      if value == nil then return end
+      if value == current then return notify('unchanged') end
+      call('edit.sql', {
+        connection = r.conn, table = src.table, key = key,
+        change = { set = { column = column, value = value } },
+      }, function(res) confirm_and_run(r, res.sql) end)
+    end)
+  end)
+end
+
+--- `dd` on a row: the `DELETE` for exactly that row, shown, confirmed.
+function M.delete_row()
+  edit_target(function(r, _, _, src, key)
+    call('edit.sql', { connection = r.conn, table = src.table, key = key, change = 'delete' },
+      function(res) confirm_and_run(r, res.sql) end)
+  end)
 end
 
 --- Plans the statement under the cursor (`EXPLAIN`, or SQLite's
