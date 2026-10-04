@@ -32,9 +32,13 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 
 - [x] Giai đoạn 1: `tradar-server` (JSON-RPC/unix socket, cursor phía server) + plugin `nvim/` cho các connector có `QueryDriver` — xong (2026-10-04)
 - [x] `completion_context` qua protocol (method `complete`: alias `.`, gợi ý JOIN theo FK, Mongo shape) — xong (2026-10-04)
-- [ ] Tự làm mới completion sau DDL (hiện phải gọi `schema`/`:TradarSchema`)
-- [ ] Diagnostics: đưa vị trí lỗi (`LINE N: ^`) vào `vim.diagnostic`
-- [ ] Huỷ query đang chạy + ping nền (`QueryEngine::tick` không chạy ở server)
+- [x] Tự làm mới completion sau DDL — xong (2026-10-04)
+- [x] Diagnostics: vị trí lỗi vào `vim.diagnostic` — xong (2026-10-04)
+- [x] Huỷ query đang chạy + ping nền (ở plugin) — xong (2026-10-04)
+- [x] Giai đoạn A của plugin (gắn connection theo file, async, kết quả yank/export, statusline, blink source, picker telescope, history, `:checkhealth`) — xong (2026-10-04)
+- [ ] Giai đoạn B: `K` hover (kiểu/PK/FK/index), `gd` trên tên bảng (DDL/cột), `gd` trên ô FK trong kết quả = chạy `SELECT` dòng được tham chiếu, `EXPLAIN` một phím, navigator dạng cây
+- [ ] Giai đoạn C: sửa ô ngay trong kết quả (`edit.sql` → xem → xác nhận), chặn `UPDATE`/`DELETE` thiếu `WHERE`, nhãn `prod` tô viền cảnh báo, filetype riêng cho Mongo/Elasticsearch/Redis
+- [ ] Huỷ thật sự phía database (Postgres `pg_cancel_request`, SQLite interrupt) — hiện chỉ bỏ phần chờ
 - [ ] Row-edit trong buffer results (`edit.sql` đã có, chưa có UI Lua)
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response
 - [ ] Quyết định số phận TUI (giữ / đóng băng / bỏ) sau khi plugin dùng ổn

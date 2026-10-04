@@ -479,7 +479,7 @@ nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar
 
 **Ranh giới crate.** `tradar-server` phụ thuộc `tradar-core`, `tradar-connector-spi`, `tradar-query-workbench` và các connector crate qua feature (cùng tên feature như `tradar-app`, chỉ gồm connector có `QueryDriver`). Nó **không** dùng `QueryEngine` theo kiểu tick-driven của TUI mà lấy thẳng `Arc<dyn QueryDriver>`: `Session::as_any()` (mặc định `None`) cho phép server downcast về `QueryEngine`, rồi `QueryEngine::driver()` trả driver. `tradar-connector-spi` vì thế không phải biết kiểu `QueryEngine`.
 
-**Transport.** Mỗi dòng là một JSON-RPC 2.0 request/response (không batch, không notification), thứ tự trả lời theo thứ tự gửi trên một kết nối. Socket mặc định `$XDG_RUNTIME_DIR/tradar/server.sock` (hoặc đối số dòng lệnh), thư mục `0700`, socket `0600`. Dòng dài quá 1 MiB bị từ chối.
+**Transport.** Mỗi dòng là một JSON-RPC 2.0 request/response (không batch, không notification). Các request trên cùng một kết nối chạy **đồng thời** (mỗi cái một task, gom trong `JoinSet` nên client ngắt kết nối thì query đang chạy của nó bị bỏ theo) — nhờ vậy `cancel` không bị kẹt sau một `execute` chậm — nên reply có thể đến **không theo thứ tự gửi**, client ghép theo `id`. Socket mặc định `$XDG_RUNTIME_DIR/tradar/server.sock` (hoặc đối số dòng lệnh), thư mục `0700`, socket `0600`. Dòng dài quá 1 MiB bị từ chối.
 
 **Method.**
 
@@ -490,7 +490,9 @@ nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar
 | `connect` / `disconnect` | `connection` | trạng thái |
 | `status` | `connection` | `alive` (ping theo yêu cầu), `in_transaction` |
 | `schema` | `connection` | các entry (`name`, `schema`, `object_kind`, `columns[]` với `primary_key`/`indexed`/`foreign_key`) |
-| `execute` | `connection`, `query`, `page_size?` | `kind` = `table`/`documents` (kèm `cursor`, `columns`, `total`, `truncated`, trang đầu `rows`) hoặc `affected` (kèm `rows`, không có cursor) |
+| `execute` | `connection`, `query`, `page_size?`, `query_id?` (client tự đặt, để `cancel` tìm được) | `kind` = `table`/`documents` (kèm `cursor`, `columns`, `total`, `truncated`, trang đầu `rows`) hoặc `affected` (kèm `rows`, không có cursor) |
+| `cancel` | `query_id` | `cancelled` (false nếu không có query nào mang id đó) — bỏ future đang chờ, giống `cancel()` của TUI: database có thể vẫn chạy nốt câu lệnh phía nó |
+| `snippet` | `connection`, `name`, `schema?`, `op?` (`read`/`create`/`update`/`delete`), `columns?` | `text`: câu lệnh khung theo ngôn ngữ riêng của driver (`SELECT ... LIMIT` / `find()` / `_search`) qua `QueryDriver::crud_snippet` |
 | `fetch` | `cursor`, `offset?`, `limit?` | `rows`, `total`; vượt cuối = trang rỗng, không phải lỗi |
 | `cursor.close` | `cursor` | — |
 | `split` | `connection`, `text` | các statement theo luật của chính driver (`start`/`end` là byte offset) |
@@ -498,15 +500,24 @@ nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar
 | `complete` | `connection`, `text` (từ đầu buffer tới con trỏ) | `prefix` (từ đang gõ, tính phía server cùng ký tự từ như editor TUI) + `items[]` (`text`, `kind` = `keyword`/`table`/`column`), qua đúng `completion_context` + `CompletionSource::matches_in_context` mà TUI dùng |
 | `edit.source` / `edit.sql` | `query` / `table`, `key`, `change` | bảng nguồn + cột khoá / câu lệnh sửa dòng (chỉ **sinh**, không chạy) |
 
-Lỗi: `-32601` method lạ, `-32602` params sai, `-32000` lỗi driver/server (message giống hệt chữ TUI sẽ hiện), `-32700` JSON hỏng.
+Lỗi: `-32601` method lạ, `-32602` params sai, `-32000` lỗi driver/server (message giống hệt chữ TUI sẽ hiện; nếu message mang marker `LINE N: ...` / `^` thì `error.data = {line, column}` — `line` 1-based trong câu lệnh đã gửi, `column` 0-based theo ký tự — để editor gạch chân đúng chỗ), `-32700` JSON hỏng.
 
-**Completion.** `CompletionSource` (keywords + schema) dựng một lần lúc `connect` và dựng lại mỗi lần gọi `schema` — cùng vòng đời với bản của TUI, không dựng lại mỗi phím. Vì vậy sau khi chạy DDL, client phải gọi `schema` (plugin làm khi `:TradarSchema`) để completion thấy bảng mới.
+**Completion.** `CompletionSource` (keywords + schema) dựng một lần lúc `connect`, dựng lại mỗi lần gọi `schema`, và **tự dựng lại sau một `execute` DDL** (`create`/`alter`/`drop`/`rename`, hoặc `.createCollection(`/`.drop(` của Mongo; nhận ra kể cả khi câu lệnh có comment `--`/`/* */` đứng trước) — không dựng lại mỗi phím.
 
 **Cursor phía server.** `execute` giữ nguyên kết quả (tối đa `MAX_ROWS` dòng) trong server và chỉ trả `page_size` dòng đầu; client kéo thêm bằng `fetch`. Giữ tối đa 16 cursor, cái cũ nhất bị loại trước.
 
-**Plugin (`nvim/`).** `:TradarConnect [tên]`, `:TradarRun` (visual, hoặc statement dưới con trỏ — ranh giới statement lấy từ `split`, không phải regex ở Lua), `:TradarRunAll`, `:TradarMore`, `:TradarSchema` (`<CR>` chèn tên vào buffer SQL), `omnifunc` (gắn tự động cho buffer `sql`; gọi `complete` đồng bộ, tối đa 500ms). `require('tradar').setup{ socket=, server_cmd=, autostart=, page_size= }`; nếu không kết nối được và `autostart ~= false`, plugin tự spawn `tradar-server` một lần.
+**Plugin (`nvim/`).** Cài qua `lazy.nvim` (`dir = ".../tradar/nvim"`, `ft = "sql"`), build server một lần bằng `cargo build --release -p tradar-server` (plugin tự tìm `tradar-server` trong PATH rồi `<repo>/target/{release,debug}`; không thấy thì `:checkhealth tradar` chỉ cách).
 
-**Chưa làm** (theo dõi ở `docs/roadmap.md`): Kafka/RabbitMQ/HTTP/Socket, diagnostics từ vị trí lỗi, huỷ query, ping nền, Windows, và quyết định số phận TUI.
+- **Gắn connection theo file:** dòng `-- tradar: <tên>` trong 10 dòng đầu, hoặc file `.tradar` (một dòng, tên connection) ở thư mục cha, hoặc `:TradarConnect` (gắn riêng buffer đó). Mở file là plugin connect nền, không cần gõ lệnh.
+- **Chạy:** `<leader>rr` statement dưới con trỏ (ranh giới do `split` của driver), visual `<leader>rr` phần chọn, `<leader>ra` cả file theo thứ tự (dừng ở lỗi đầu tiên), `<leader>rx` huỷ. Async hoàn toàn: spinner + thời gian trên statusline, Neovim không đơ.
+- **Kết quả:** buffer thường (`j/k/gg/G`, `/`...); cuộn tới cuối tự tải trang kế (hoặc `<leader>rm`). `gyc` ô, `gyr` dòng (visual: nhiều dòng), `gyC` cột, `gyj`/`gyv`/`gym` cả kết quả dạng JSON/CSV/Markdown (tải nốt các dòng còn thiếu trước khi copy), `:TradarExport csv|json|md|tsv [file]`.
+- **Lỗi:** gạch chân đúng vị trí trong `vim.diagnostic` (xoá ở lần sửa kế tiếp, để không treo vạch cũ); nội dung lỗi mở trong buffer kết quả.
+- **Completion:** nguồn `blink.cmp` (`tradar.blink`, async, `.` là ký tự kích hoạt) hoặc `omnifunc` dự phòng. Cấu hình của người dùng nên bỏ nguồn `lsp` cho `sql` nếu cài `sqlls`.
+- **Điều hướng:** `<leader>rt` (`:TradarTables`, telescope: preview cột/PK/FK, `<CR>` chèn tên, `<C-o>` mở bảng bằng `snippet`), `<leader>rh` (`:TradarHistory`, lưu ở `stdpath('state')/tradar_history.json`, `<CR>` dán, `<C-r>` chạy), `<leader>rs` (panel schema), `<leader>rc` chọn connection.
+- **Statusline:** `require('tradar').status()` → `db demo · 120/5000 rows · 83ms`, spinner khi đang chạy, `✗` khi ping nền (15s) thấy connection rớt, `tx` khi trong transaction; rỗng ngoài buffer SQL/tradar nên gắn vào lualine không tốn gì ở file khác.
+- `:checkhealth tradar` kiểm tra binary, server, số connection, các plugin tuỳ chọn.
+
+**Chưa làm** (theo dõi ở `docs/roadmap.md`): Kafka/RabbitMQ/HTTP/Socket, sửa dòng trong buffer kết quả, `gd`/`K`/nhảy theo FK, Windows, và quyết định số phận TUI.
 
 ## Non-goals của kiến trúc mục tiêu
 

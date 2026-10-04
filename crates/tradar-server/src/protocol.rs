@@ -17,6 +17,9 @@ pub const APP_ERROR: i64 = -32000;
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    /// Structured detail a client can use without parsing `message`
+    /// (currently `{line, column}` for a located SQL error).
+    pub data: Option<Value>,
 }
 
 impl RpcError {
@@ -24,6 +27,7 @@ impl RpcError {
         Self {
             code: INVALID_PARAMS,
             message: message.into(),
+            data: None,
         }
     }
 
@@ -31,8 +35,49 @@ impl RpcError {
         Self {
             code: APP_ERROR,
             message: message.into(),
+            data: None,
         }
     }
+
+    /// A driver failure. When its text carries the `LINE N: ...` / `^`
+    /// marker the drivers already render (see `line_and_caret`), the
+    /// position is lifted into `data` so an editor can underline the exact
+    /// spot instead of showing the marker as prose.
+    pub fn from_query_error(message: String) -> Self {
+        let data =
+            error_position(&message).map(|(line, column)| json!({"line": line, "column": column}));
+        Self {
+            code: APP_ERROR,
+            message,
+            data,
+        }
+    }
+}
+
+/// `(line, column)` of the caret in a `LINE N: <text>` / `   ^` marker:
+/// `line` is 1-based within the statement that was sent, `column` is a
+/// 0-based **character** offset within that line. `None` when the message
+/// has no such marker. Reads the rendered text rather than asking each
+/// connector for a structured position -- the marker is the one shape all
+/// five located drivers already agree on.
+pub fn error_position(message: &str) -> Option<(usize, usize)> {
+    let mut lines = message.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("LINE ") else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let Some(after) = rest[digits.len()..].strip_prefix(": ") else {
+            continue;
+        };
+        let line_number: usize = digits.parse().ok()?;
+        let _ = after;
+        let prefix_len = "LINE ".len() + digits.len() + ": ".len();
+        let caret_line = lines.peek()?;
+        let caret_at = caret_line.chars().position(|c| c == '^')?;
+        return Some((line_number, caret_at.checked_sub(prefix_len)?));
+    }
+    None
 }
 
 impl From<anyhow::Error> for RpcError {
@@ -201,4 +246,21 @@ pub fn parse_row_edit(params: &Value) -> Result<RowEdit, RpcError> {
         }
     };
     Ok(RowEdit { table, key, change })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_caret_in_a_rendered_marker() {
+        let message = "error: syntax error at or near \"FRO\"\nLINE 2:   FRO users\n          ^";
+        assert_eq!(error_position(message), Some((2, 2)));
+    }
+
+    #[test]
+    fn a_message_without_a_marker_has_no_position() {
+        assert_eq!(error_position("connection refused"), None);
+        assert_eq!(error_position("LINE x: nope\n  ^"), None);
+    }
 }

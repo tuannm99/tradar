@@ -9,6 +9,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::server::Server;
 
@@ -57,24 +59,47 @@ pub async fn serve(listener: UnixListener, server: Arc<Server>) {
     }
 }
 
+/// Requests on one connection run concurrently, so a slow `execute` never
+/// stands in front of the `cancel` meant for it -- which also means replies
+/// can arrive out of order; clients match them by `id`. The tasks live in a
+/// `JoinSet`, so a client that disconnects takes its in-flight queries with
+/// it instead of leaving them running for nobody.
 async fn serve_connection(stream: UnixStream, server: Arc<Server>) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
+    let (replies, mut outbox) = mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        while let Some(line) = outbox.recv().await {
+            if write.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut in_flight = JoinSet::new();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
-        let response = if line.len() > MAX_LINE {
-            error_response(-32600, "request too large")
-        } else if line.trim().is_empty() {
+        if line.trim().is_empty() {
             continue;
-        } else {
-            match serde_json::from_str::<Value>(&line) {
-                Ok(request) => server.handle(request).await,
-                Err(e) => error_response(-32700, &format!("parse error: {e}")),
-            }
-        };
-        let mut out = response.to_string();
-        out.push('\n');
-        write.write_all(out.as_bytes()).await?;
+        }
+        let replies = replies.clone();
+        let server = Arc::clone(&server);
+        in_flight.spawn(async move {
+            let response = if line.len() > MAX_LINE {
+                error_response(-32600, "request too large")
+            } else {
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(request) => server.handle(request).await,
+                    Err(e) => error_response(-32700, &format!("parse error: {e}")),
+                }
+            };
+            let _ = replies.send(format!("{response}\n"));
+        });
+        // Reap finished tasks so a long-lived connection doesn't grow the set.
+        while in_flight.try_join_next().is_some() {}
     }
+    drop(in_flight);
+    drop(replies);
+    let _ = writer.await;
     Ok(())
 }
 

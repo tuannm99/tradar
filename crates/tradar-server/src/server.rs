@@ -6,9 +6,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
+
 use serde_json::{Value, json};
 
 use tradar_connector_spi::Connector;
+use tradar_core::action::CrudOp;
 use tradar_core::storage::{ConnectionStore, SavedConnection};
 use tradar_query_workbench::components::completion::{CandidateKind, CompletionSource};
 use tradar_query_workbench::query_driver::{QueryDriver, completion_context};
@@ -37,6 +40,9 @@ struct State {
     cursors: HashMap<u64, StoredResult>,
     cursor_order: VecDeque<u64>,
     next_cursor: u64,
+    /// In-flight `execute`s that a client named with `query_id`, so a
+    /// `cancel` from the same (or another) connection can reach them.
+    running: HashMap<String, Arc<Notify>>,
 }
 
 pub struct Server {
@@ -73,7 +79,7 @@ impl Server {
             Err(error) => json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "error": {"code": error.code, "message": error.message},
+                "error": {"code": error.code, "message": error.message, "data": error.data},
             }),
         }
     }
@@ -87,16 +93,19 @@ impl Server {
             "status" => self.status(params).await,
             "schema" => self.schema(params).await,
             "execute" => self.execute(params).await,
+            "cancel" => self.cancel(params),
             "fetch" => self.fetch(params),
             "cursor.close" => self.close_cursor(params),
             "split" => self.split(params),
             "keywords" => self.keywords(params),
+            "snippet" => self.snippet(params).await,
             "complete" => self.complete(params),
             "edit.source" => self.edit_source(params),
             "edit.sql" => self.edit_sql(params),
             _ => Err(RpcError {
                 code: METHOD_NOT_FOUND,
                 message: format!("unknown method `{method}`"),
+                data: None,
             }),
         }
     }
@@ -209,8 +218,33 @@ impl Server {
         let page_size = usize_param(params, "page_size")?.unwrap_or(DEFAULT_PAGE);
 
         // The lock is not held across this await: a slow query on one
-        // connection must not block another client's `fetch`.
-        let result = driver.execute(query).await?;
+        // connection must not block another client's `fetch`. A `cancel`
+        // for this `query_id` drops the in-flight future -- the same thing
+        // the TUI's `cancel()` does by aborting its task, with the same
+        // limit: the database may still finish the statement on its side.
+        let query_id = params.get("query_id").and_then(Value::as_str);
+        let cancel = Arc::new(Notify::new());
+        if let Some(id) = query_id {
+            self.state
+                .lock()
+                .unwrap()
+                .running
+                .insert(id.to_string(), Arc::clone(&cancel));
+        }
+        let outcome = tokio::select! {
+            result = driver.execute(query) => Some(result),
+            () = cancel.notified() => None,
+        };
+        if let Some(id) = query_id {
+            self.state.lock().unwrap().running.remove(id);
+        }
+        let result = match outcome {
+            Some(result) => result.map_err(|e| RpcError::from_query_error(e.to_string()))?,
+            None => return Err(RpcError::app("query cancelled")),
+        };
+        if is_ddl(query) {
+            self.refresh_completions(params, &driver).await;
+        }
         let stored = match StoredResult::from_query(result) {
             Ok(stored) => stored,
             Err(rows) => return Ok(json!({"kind": "affected", "rows": rows})),
@@ -237,6 +271,63 @@ impl Server {
         let mut response = response;
         response["cursor"] = json!(cursor);
         Ok(response)
+    }
+
+    /// A skeleton statement in the driver's *own* language for a table --
+    /// `SELECT ... LIMIT` for SQL, `find()` for Mongo, a `_search` for
+    /// Elasticsearch -- so "open this table" never has to know which it is.
+    /// `schema` disambiguates same-named tables (Postgres schemas).
+    async fn snippet(&self, params: &Value) -> Result<Value, RpcError> {
+        let driver = self.driver(params)?;
+        let name = str_param(params, "name")?;
+        let op = match params.get("op").and_then(Value::as_str).unwrap_or("read") {
+            "create" => CrudOp::Create,
+            "read" => CrudOp::Read,
+            "update" => CrudOp::Update,
+            "delete" => CrudOp::Delete,
+            other => return Err(RpcError::invalid(format!("unknown op `{other}`"))),
+        };
+        let schema = params.get("schema").and_then(Value::as_str);
+        let columns: Vec<String> = params
+            .get("columns")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let entries = driver.list_schema().await?;
+        let entry = entries
+            .iter()
+            .find(|e| e.name == name && (schema.is_none() || e.schema.as_deref() == schema))
+            .ok_or_else(|| RpcError::app(format!("no table `{name}` in the schema")))?;
+        Ok(json!({"text": driver.crud_snippet(entry, op, &columns)}))
+    }
+
+    fn cancel(&self, params: &Value) -> Result<Value, RpcError> {
+        let id = str_param(params, "query_id")?;
+        let target = self.state.lock().unwrap().running.get(id).cloned();
+        if let Some(notify) = &target {
+            notify.notify_one();
+        }
+        Ok(json!({"cancelled": target.is_some()}))
+    }
+
+    /// Rebuilds a connection's completion source from the live schema. A
+    /// failed schema read keeps the old source rather than blanking it.
+    async fn refresh_completions(&self, params: &Value, driver: &Arc<dyn QueryDriver>) {
+        let Ok(name) = str_param(params, "connection") else {
+            return;
+        };
+        if let Ok(schema) = driver.list_schema().await {
+            let source = Arc::new(CompletionSource::new(driver.keywords(), &schema));
+            self.state
+                .lock()
+                .unwrap()
+                .completions
+                .insert(name.to_string(), source);
+        }
     }
 
     fn fetch(&self, params: &Value) -> Result<Value, RpcError> {
@@ -330,6 +421,40 @@ impl Server {
     }
 }
 
+/// `query` without the `--` line comments and `/* */` blocks that precede
+/// its first real token -- a statement is usually sent with the comment
+/// above it attached, and a leading-keyword check must not be fooled by one.
+fn skip_leading_comments(query: &str) -> &str {
+    let mut rest = query.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after
+                .split_once('\n')
+                .map_or("", |(_, tail)| tail)
+                .trim_start();
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after
+                .split_once("*/")
+                .map_or("", |(_, tail)| tail)
+                .trim_start();
+        } else {
+            return rest;
+        }
+    }
+}
+
+/// Whether `query` changes the schema, so completion has to be rebuilt:
+/// SQL's leading DDL verbs, plus the Mongo shell calls that add or drop a
+/// collection. A leading-keyword heuristic like `returns_rows`, not a
+/// parser -- a miss only means the next `schema` call picks the change up.
+fn is_ddl(query: &str) -> bool {
+    let lower = skip_leading_comments(query).to_ascii_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+    matches!(first, "create" | "alter" | "drop" | "rename")
+        || lower.contains(".createcollection(")
+        || lower.contains(".drop(")
+}
+
 fn str_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
     params
         .get(name)
@@ -351,5 +476,24 @@ fn usize_param(params: &Value, name: &str) -> Result<Option<usize>, RpcError> {
             .as_u64()
             .map(|n| Some(n as usize))
             .ok_or_else(|| RpcError::invalid(format!("`{name}` must be a non-negative integer"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ddl_is_recognised_behind_leading_comments() {
+        assert!(is_ddl("CREATE TABLE t (id INT)"));
+        assert!(is_ddl("  drop table t"));
+        assert!(is_ddl("-- tradar: demo\nCREATE TABLE t (id INT)"));
+        assert!(is_ddl(
+            "/* make it */ -- and more\n  ALTER TABLE t ADD c INT"
+        ));
+        assert!(is_ddl("db.createCollection('x')"));
+        assert!(!is_ddl("-- CREATE is only mentioned here\nSELECT 1"));
+        assert!(!is_ddl("SELECT 1"));
+        assert!(!is_ddl("-- only a comment"));
     }
 }

@@ -307,3 +307,190 @@ async fn complete_is_context_aware_like_the_tui() {
     let flat = complete("SELECT * FROM us").await;
     assert_eq!(texts(&flat)[0], "users");
 }
+
+#[tokio::test]
+async fn ddl_refreshes_completion_without_a_schema_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+    let q = |sql: &str| json!({"connection": "local", "query": sql});
+
+    ok(&call(
+        &server,
+        "execute",
+        q("CREATE TABLE widgets (id INTEGER, sku TEXT)"),
+    )
+    .await);
+
+    let r = call(
+        &server,
+        "complete",
+        json!({"connection": "local", "text": "SELECT * FROM wid"}),
+    )
+    .await;
+    assert_eq!(ok(&r)["items"][0]["text"], "widgets");
+
+    ok(&call(&server, "execute", q("DROP TABLE widgets")).await);
+    let r = call(
+        &server,
+        "complete",
+        json!({"connection": "local", "text": "SELECT * FROM wid"}),
+    )
+    .await;
+    assert_eq!(ok(&r)["items"], json!([]));
+}
+
+#[tokio::test]
+async fn a_located_error_carries_its_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+
+    let r = call(
+        &server,
+        "execute",
+        json!({"connection": "local", "query": "SELECT 1\nFROM"}),
+    )
+    .await;
+
+    // SQLite quotes the offending token and the driver turns that into a
+    // `LINE N: ... ^` marker; the server lifts it into structured data.
+    let message = r["error"]["message"].as_str().unwrap();
+    if message.contains("LINE ") {
+        assert!(r["error"]["data"]["line"].as_u64().unwrap() >= 1, "{r}");
+        assert!(r["error"]["data"]["column"].is_u64(), "{r}");
+    } else {
+        assert!(r["error"]["data"].is_null(), "{r}");
+    }
+}
+
+#[tokio::test]
+async fn cancel_stops_a_running_query_and_other_requests_are_not_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(connected(dir.path()).await);
+    // A recursive CTE that would run for a very long time.
+    let slow =
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c";
+
+    let running = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            call(
+                &server,
+                "execute",
+                json!({"connection": "local", "query": slow, "query_id": "q1"}),
+            )
+            .await
+        })
+    };
+    // Wait until it is registered, then prove an unrelated request still answers.
+    for _ in 0..100 {
+        let status = call(&server, "status", json!({"connection": "local"})).await;
+        assert!(status.get("error").is_none());
+        let cancelled = call(&server, "cancel", json!({"query_id": "q1"})).await;
+        if ok(&cancelled)["cancelled"] == true {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), running)
+        .await
+        .expect("a cancelled query must return promptly")
+        .unwrap();
+    assert_eq!(outcome["error"]["message"], "query cancelled");
+
+    let unknown = call(&server, "cancel", json!({"query_id": "nope"})).await;
+    assert_eq!(ok(&unknown)["cancelled"], false);
+}
+
+#[tokio::test]
+async fn one_connection_runs_requests_concurrently() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(server_with_sqlite(dir.path()));
+    let path = dir.path().join("c.sock");
+    tokio::spawn(serve(bind(&path).await.unwrap(), server));
+
+    let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    let slow =
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c";
+    for request in [json!({"id": 1, "method": "connect", "params": {"connection": "local"}})] {
+        write
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    let _connect = lines.next_line().await.unwrap().unwrap();
+
+    // The slow query goes first, the cancel second -- on the same socket.
+    for request in [
+        json!({"id": 2, "method": "execute", "params": {"connection": "local", "query": slow, "query_id": "z"}}),
+        json!({"id": 3, "method": "connectors.list"}),
+    ] {
+        write
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    // The fast reply (id 3) must arrive while the slow one (id 2) is still running.
+    let first: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        first["id"], 3,
+        "a slow query must not hold up later requests: {first}"
+    );
+
+    write
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"id": 4, "method": "cancel", "params": {"query_id": "z"}})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let v: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        seen.push(v["id"].as_u64().unwrap());
+    }
+    seen.sort();
+    assert_eq!(seen, [2, 4]);
+}
+
+#[tokio::test]
+async fn snippet_is_written_in_the_drivers_own_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+    let q = json!({"connection": "local", "query": "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"});
+    ok(&call(&server, "execute", q).await);
+
+    let read = call(
+        &server,
+        "snippet",
+        json!({"connection": "local", "name": "users"}),
+    )
+    .await;
+    assert_eq!(ok(&read)["text"], "SELECT * FROM \"users\" LIMIT 100;");
+
+    let missing = call(
+        &server,
+        "snippet",
+        json!({"connection": "local", "name": "nope"}),
+    )
+    .await;
+    assert!(
+        missing["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no table")
+    );
+
+    let bad = call(
+        &server,
+        "snippet",
+        json!({"connection": "local", "name": "users", "op": "zap"}),
+    )
+    .await;
+    assert_eq!(bad["error"]["code"], -32602);
+}
