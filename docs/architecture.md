@@ -491,6 +491,7 @@ nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar
 | `status` | `connection` | `alive` (ping theo yêu cầu), `in_transaction` |
 | `schema` | `connection` | các entry (`name`, `schema`, `object_kind`, `columns[]` với `primary_key`/`indexed`/`foreign_key`) |
 | `execute` | `connection`, `query`, `page_size?`, `query_id?` (client tự đặt, để `cancel` tìm được) | `kind` = `table`/`documents` (kèm `cursor`, `columns`, `total`, `truncated`, trang đầu `rows`) hoặc `affected` (kèm `rows`, không có cursor) |
+| `shutdown` | — | `ok`; server dừng sau khi reply đã gửi (`:TradarRestart` dùng để thay binary mới mà không cần `kill`) |
 | `cancel` | `query_id` | `cancelled` (false nếu không có query nào mang id đó) — bỏ future đang chờ, giống `cancel()` của TUI: database có thể vẫn chạy nốt câu lệnh phía nó |
 | `snippet` | `connection`, `name`, `schema?`, `op?` (`read`/`create`/`update`/`delete`), `columns?` | `text`: câu lệnh khung theo ngôn ngữ riêng của driver (`SELECT ... LIMIT` / `find()` / `_search`) qua `QueryDriver::crud_snippet` |
 | `fetch` | `cursor`, `offset?`, `limit?` | `rows`, `total`; vượt cuối = trang rỗng, không phải lỗi |

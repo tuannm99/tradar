@@ -499,3 +499,17 @@ async fn snippet_is_written_in_the_drivers_own_language() {
     .await;
     assert_eq!(bad["error"]["code"], -32602);
 }
+
+#[tokio::test]
+async fn shutdown_answers_and_signals_main_to_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_sqlite(dir.path());
+    let signal = server.shutdown_signal();
+
+    let reply = call(&server, "shutdown", Value::Null).await;
+
+    assert_eq!(ok(&reply)["ok"], true);
+    tokio::time::timeout(std::time::Duration::from_secs(1), signal.notified())
+        .await
+        .expect("shutdown must wake whoever waits on the signal");
+}

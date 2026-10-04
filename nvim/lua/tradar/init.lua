@@ -672,6 +672,17 @@ function M.run(range_start, range_end, all, transform)
   end, function(err) notify(err, vim.log.levels.ERROR) end)
 end
 
+--- Stops the background server (it restarts itself on the next command).
+--- For picking up a rebuilt binary: a long-running server keeps the old one.
+function M.restart()
+  if not rpc.connected() then return notify('no server is running; the next command starts a fresh one') end
+  rpc.request('shutdown', nil, function()
+    rpc.close()
+    state.connected, state.connecting, state.drivers, state.schema_cache = {}, {}, nil, {}
+    notify('server stopped; the next command starts a fresh one')
+  end)
+end
+
 function M.cancel()
   if not state.running then return notify('nothing is running') end
   call('cancel', { query_id = state.running.id }, function() end)

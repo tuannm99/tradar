@@ -15,7 +15,7 @@ Với `lazy.nvim`:
   config = function() require("tradar").setup {} end }
 ```
 
-`:checkhealth tradar` kiểm tra binary, server, connection đã lưu.
+`:checkhealth tradar` kiểm tra binary, server, connection đã lưu. Server chạy nền và giữ nguyên bản binary cũ cho tới khi dừng: sau khi build lại, chạy `:TradarRestart` (lệnh kế tiếp tự khởi động bản mới).
 
 ## Dùng
 

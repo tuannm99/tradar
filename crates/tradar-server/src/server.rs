@@ -49,6 +49,8 @@ pub struct Server {
     registry: HashMap<String, Box<dyn Connector>>,
     store: Option<ConnectionStore>,
     state: Mutex<State>,
+    /// Fired by the `shutdown` method; `main` waits on it next to Ctrl-C.
+    shutdown: Arc<Notify>,
 }
 
 impl Server {
@@ -60,7 +62,14 @@ impl Server {
             registry,
             store,
             state: Mutex::new(State::default()),
+            shutdown: Arc::new(Notify::new()),
         }
+    }
+
+    /// Completes when a client asks the server to stop (`shutdown`) -- how a
+    /// rebuilt binary replaces a long-running old one without `kill`.
+    pub fn shutdown_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.shutdown)
     }
 
     /// One request object in, one response object out (JSON-RPC 2.0, minus
@@ -94,6 +103,10 @@ impl Server {
             "schema" => self.schema(params).await,
             "execute" => self.execute(params).await,
             "cancel" => self.cancel(params),
+            "shutdown" => {
+                self.shutdown.notify_one();
+                Ok(json!({"ok": true}))
+            }
             "fetch" => self.fetch(params),
             "cursor.close" => self.close_cursor(params),
             "split" => self.split(params),

@@ -13,6 +13,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(default_socket_path);
     let store = ConnectionStore::at(default_connections_path()?);
     let server = Arc::new(Server::new(registry(), Some(store)));
+    let shutdown = server.shutdown_signal();
 
     let listener = bind(&path).await?;
     eprintln!("tradar-server listening on {}", path.display());
@@ -20,6 +21,10 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         _ = serve(listener, server) => {}
         _ = tokio::signal::ctrl_c() => {}
+        _ = shutdown.notified() => {
+            // Let the `shutdown` reply reach the client before the sockets go.
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
     }
     let _ = std::fs::remove_file(&path);
     Ok(())

@@ -8,6 +8,7 @@ vim.api.nvim_create_user_command('TradarRun', function(a)
   if a.range > 0 then t().run(a.line1, a.line2) else t().run() end
 end, { range = true })
 vim.api.nvim_create_user_command('TradarRunAll', function() t().run(nil, nil, true) end, {})
+vim.api.nvim_create_user_command('TradarRestart', function() t().restart() end, {})
 vim.api.nvim_create_user_command('TradarCancel', function() t().cancel() end, {})
 vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})
 vim.api.nvim_create_user_command('TradarSchema', function() t().schema() end, {})
