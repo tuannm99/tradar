@@ -469,7 +469,7 @@ User yêu cầu: (1) editor/results (và HTTP request/response) đổi được 
 
 ## Server headless (`tradar-server`) + plugin Neovim
 
-Thêm 2026-10-04, chi tiết lịch sử/quyết định ở `docs/backlog/server-headless-nvim-2026-10-04.md`. Mục tiêu: dùng Neovim làm UI (editor, điều hướng, vim motion có sẵn) thay vì tự viết lại trong TUI, và cho nhiều session Neovim dùng chung một tiến trình giữ connection. TUI (`tradar-app`) không bị thay thế — hai bên là hai client của cùng bộ connector.
+Thêm 2026-10-04, chi tiết lịch sử/quyết định ở `docs/backlog/server-headless-nvim-2026-10-04.md`. Mục tiêu: dùng Neovim làm UI (editor, điều hướng, vim motion có sẵn) thay vì tự viết lại trong TUI, và cho nhiều session Neovim dùng chung một tiến trình giữ connection. TUI (`tradar-app`) không bị xoá nhưng **đóng băng từ 2026-10-04** (chỉ sửa lỗi; Neovim là giao diện chính — xem `docs/roadmap.md`, "Hướng đi hiện tại") — hai bên là hai client của cùng bộ connector.
 
 ```
 nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar-server  ──>  QueryDriver  ──>  database

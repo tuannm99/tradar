@@ -2,6 +2,21 @@
 
 Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét, không lẫn vào lịch sử. Việc **đã xong** nằm trong `docs/backlog/` (một file mỗi sub-project, tách ra từ `docs/backlog.md` cũ khi file đó dài quá 450 dòng — xem `docs/backlog/README.md` để có mục lục). Thiết kế hệ thống nằm ở `docs/architecture.md`. Cập nhật file này mỗi khi một mục ở đây bắt đầu/kết thúc hoặc có mục mới, đúng tinh thần "roadmap tracks everything" đã theo xuyên suốt dự án.
 
+## Hướng đi hiện tại (chốt 2026-10-04)
+
+**Giao diện chính của `tradar` là Neovim + `tradar-server`** (`nvim/`, `crates/tradar-server`), không phải TUI. Lý do: editor/điều hướng/vim keymap tự viết trong TUI vừa khó dùng vừa tốn công bảo trì (đang làm lại một phần Neovim); Neovim có sẵn tất cả, và một server giữ connection cho phép mọi session Neovim dùng chung.
+
+**TUI (`tradar-app`, `tradar-query-workbench`'s `components/`) đóng băng:** chỉ sửa lỗi, không thêm tính năng mới. Code giữ nguyên, vẫn phải build và qua test (`make check`) — connector crate và `QueryDriver` là nền chung của cả hai nên không đóng băng. Việc *bỏ hẳn* TUI chưa quyết định: chờ vài tuần dùng Neovim trên database thật rồi xét lại (mục cuối của phần "Thứ tự tiếp theo" bên dưới). Tính năng mới đi vào plugin/server; nếu thứ gì chỉ sửa được ở `QueryDriver`/connector thì sửa ở đó và cả hai giao diện cùng hưởng (như đợt 2026-10-04 sửa `numeric`/`DECIMAL` hiện `NULL`).
+
+## Thứ tự tiếp theo
+
+1. **Dùng thật vài ngày trên database của chính mình** (người dùng làm, không phải việc code): để ý tên bảng kèm schema, kiểu dữ liệu lạ, độ chậm khi schema lớn (`K`/completion lần đầu). Mọi lỗi gặp được vào đây rồi sửa trước tính năng mới — bài học 2026-10-04: smoke test chỉ trên SQLite che mất cả một nhóm lỗi hiển thị kiểu dữ liệu, xem `docs/backlog/real-backend-fixes-2026-10-04.md`.
+2. **Chạy plugin với Elasticsearch và Cassandra thật** — hai connector duy nhất chưa chạy thật (image lớn: kéo về, test, dọn). Rủi ro: lỗi cùng loại Postgres/MySQL mà test đơn vị không thấy.
+3. **Mục nhỏ**: thứ tự cột tài liệu Mongo theo thứ tự trường; `gd` theo FK cho kết quả `JOIN`; navigator dạng cây; huỷ query thật sự phía database.
+4. **Quyết định cuối về TUI** (giữ đóng băng hay bỏ hẳn) — sau mục 1.
+
+**Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước, vì hiện bảo mật dựa vào quyền `0600` của unix socket; chỉ đáng khi server chạy ở máy khác hoặc dùng chung); Kafka/RabbitMQ/HTTP/Socket qua server (cần kênh đẩy từ server); Windows named pipe.
+
 ## Checklist tổng quan
 
 Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở các mục văn xuôi bên dưới, checklist này chỉ để quét nhanh, **không thay thế**. Tick khi một mục chuyển sang "xong" ở phần chi tiết.
@@ -46,9 +61,9 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [ ] Chạy plugin với Elasticsearch và Cassandra thật (chưa kiểm chứng; mới có test đơn vị phía plugin)
 - [ ] Thứ tự cột theo thứ tự trường tài liệu (cần server trả thứ tự khoá, Lua decode mất thứ tự)
 - [ ] Huỷ thật sự phía database (Postgres `pg_cancel_request`, SQLite interrupt) — hiện chỉ bỏ phần chờ
-- [ ] Row-edit trong buffer results (`edit.sql` đã có, chưa có UI Lua)
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response
-- [ ] Quyết định số phận TUI (giữ / đóng băng / bỏ) sau khi plugin dùng ổn
+- [x] TUI đóng băng (chỉ sửa lỗi) — chốt 2026-10-04, xem "Hướng đi hiện tại" ở đầu file
+- [ ] Quyết định cuối: bỏ hẳn TUI hay giữ đóng băng — sau vài tuần dùng Neovim trên database thật
 - [ ] Đóng gói: đường dẫn socket dài hơn ~108 byte, Windows named pipe, phiên bản hoá protocol
 
 **`tradar` CLI: import/export** — chưa scope, tier thấp
