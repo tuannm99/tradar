@@ -113,6 +113,13 @@ impl QueryEngine {
         }
     }
 
+    /// The driver this engine runs queries through, for a headless host
+    /// (`tradar-server`) that talks to it directly instead of through this
+    /// engine's tick-driven submit/outcome loop.
+    pub fn driver(&self) -> Arc<dyn QueryDriver> {
+        Arc::clone(&self.driver)
+    }
+
     pub fn connection(&self) -> &SavedConnection {
         &self.connection
     }
@@ -344,6 +351,10 @@ impl QueryEngine {
 }
 
 impl Session for QueryEngine {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn tick(&mut self) -> bool {
         let mut changed = false;
         for _ in 0..MAX_DRAIN_PER_TICK {

@@ -28,6 +28,17 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Socket — xong (2026-09-29), xem `docs/backlog/socket-connector-2026-09-29.md`
 - [ ] gRPC (cần chốt phạm vi v1 trước)
 
+**Server headless + plugin Neovim** — xem `docs/backlog/server-headless-nvim-2026-10-04.md`
+
+- [x] Giai đoạn 1: `tradar-server` (JSON-RPC/unix socket, cursor phía server) + plugin `nvim/` cho các connector có `QueryDriver` — xong (2026-10-04)
+- [ ] `completion_context` qua protocol (alias `.`, gợi ý JOIN theo FK, Mongo shape) — hiện omnifunc chỉ keyword + tên schema
+- [ ] Diagnostics: đưa vị trí lỗi (`LINE N: ^`) vào `vim.diagnostic`
+- [ ] Huỷ query đang chạy + ping nền (`QueryEngine::tick` không chạy ở server)
+- [ ] Row-edit trong buffer results (`edit.sql` đã có, chưa có UI Lua)
+- [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response
+- [ ] Quyết định số phận TUI (giữ / đóng băng / bỏ) sau khi plugin dùng ổn
+- [ ] Đóng gói: đường dẫn socket dài hơn ~108 byte, Windows named pipe, phiên bản hoá protocol
+
 **`tradar` CLI: import/export** — chưa scope, tier thấp
 
 - [ ] Chốt các điểm mở (subcommand vs binary riêng, streaming, import vs export...)

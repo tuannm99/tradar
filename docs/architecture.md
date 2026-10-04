@@ -4,7 +4,7 @@ Tài liệu này gồm hai phần: kiến trúc đang triển khai hiện tại,
 
 ## Triển khai hiện tại
 
-Tradar là một Cargo workspace gồm mười sáu crate, cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới. **Cập nhật 2026-08-16**: các connector crate được đổi tên prefix `tradar-connector-<tên>` (trước đó `tradar-<tên>`) và chuyển ra sống trực tiếp dưới `crates/`, bỏ hẳn thư mục lồng `crates/connectors/` — dọn dẹp thuần cấu trúc, không đổi trait/API nào, làm cùng lúc với việc thêm connector thứ 9 (HTTP). **Cập nhật 2026-09-29**: thêm connector thứ 10 và 11, `tradar-connector-clickhouse` và `tradar-connector-socket` — xem `docs/backlog/clickhouse-connector-2026-09-29.md` và `docs/backlog/socket-connector-2026-09-29.md`. **Cập nhật 2026-10-01**: thêm connector thứ 12, `tradar-connector-mysql` (MySQL/MariaDB, một driver cho cả hai) — xem `docs/backlog/mysql-connector-2026-10-01.md`.
+Tradar là một Cargo workspace gồm mười bảy crate (crate thứ 17, `tradar-server`, thêm 2026-10-04 — xem mục "Server headless" cuối tài liệu này), cấu trúc sao cho ranh giới giữa các layer đã có hình dạng ranh giới crate, đúng theo hướng phụ thuộc mô tả ở "Bố cục workspace" bên dưới. **Cập nhật 2026-08-16**: các connector crate được đổi tên prefix `tradar-connector-<tên>` (trước đó `tradar-<tên>`) và chuyển ra sống trực tiếp dưới `crates/`, bỏ hẳn thư mục lồng `crates/connectors/` — dọn dẹp thuần cấu trúc, không đổi trait/API nào, làm cùng lúc với việc thêm connector thứ 9 (HTTP). **Cập nhật 2026-09-29**: thêm connector thứ 10 và 11, `tradar-connector-clickhouse` và `tradar-connector-socket` — xem `docs/backlog/clickhouse-connector-2026-09-29.md` và `docs/backlog/socket-connector-2026-09-29.md`. **Cập nhật 2026-10-01**: thêm connector thứ 12, `tradar-connector-mysql` (MySQL/MariaDB, một driver cho cả hai) — xem `docs/backlog/mysql-connector-2026-10-01.md`.
 
 ```
 Cargo.toml                    [workspace], default-members = ["crates/tradar-app"]
@@ -466,6 +466,44 @@ User yêu cầu: (1) editor/results (và HTTP request/response) đổi được 
 - **Trước khi thêm Right/Middle vào mouse filter của `main.rs`**: event loop trước đó lọc mouse event ngay từ đầu, chỉ cho qua `Down(Left)`/`ScrollDown`/`ScrollUp` (lý do hiệu năng, xem "Vấn đề đã biết" trong `docs/backlog/known-issues.md`) — mở rộng thêm `Down(Right)`/`Down(Middle)` vào đúng whitelist đó, không đổi gì về cơ chế lọc `Moved`/`Drag` đã có.
 - **Verify tay qua tmux với sqlite thật** (chú ý: `tmux send-keys -H` với chuỗi hex nhiều byte gửi escape sequence SGR mouse **không hoạt động** đúng — tmux có vẻ tách rời timing giữa các byte khiến parser CSI của crossterm không ghép được thành một sự kiện; cách đúng là `tmux send-keys -l $'...'` (chuỗi literal ANSI-C quoting) gửi nguyên khối. Ghi lại ở đây phòng khi cần test mouse qua tmux lần sau): `F6` đổi layout ngang/dọc thấy đúng ngay; `Ctrl+Up` khi focus editor phóng to editor thấy rõ; right-click một row kết quả mở đúng menu 5 mục; click "Delete row" trong menu chạy đúng `dispatch_command(DeleteRow)` — bị từ chối đúng lý do "không có khoá chính" giống hệt bấm phím `d`, xác nhận chuột và bàn phím đi qua chung một code path.
 - **Chưa làm / cố tình không làm ngay** (biết trước, chưa đủ lý do làm ngay): right-click chưa có ở Navigator/ConnectionPicker/HistoryPicker — mẫu `ContextMenu` đã sẵn để mở rộng khi có yêu cầu cụ thể; middle-click paste chưa có ở các `TextInput` khác ngoài HTTP fields (form connection, các prompt một dòng) — cùng lý do, hạ tầng (`TextInput::insert_str`) đã có sẵn, chỉ cần thêm lời gọi khi cần; Browse mode (Redis, sidebar cố định 28 cột) **cố tình không** có zoom/orientation — nó không phải cặp editor/results, là layout riêng.
+
+## Server headless (`tradar-server`) + plugin Neovim
+
+Thêm 2026-10-04, chi tiết lịch sử/quyết định ở `docs/backlog/server-headless-nvim-2026-10-04.md`. Mục tiêu: dùng Neovim làm UI (editor, điều hướng, vim motion có sẵn) thay vì tự viết lại trong TUI, và cho nhiều session Neovim dùng chung một tiến trình giữ connection. TUI (`tradar-app`) không bị thay thế — hai bên là hai client của cùng bộ connector.
+
+```
+nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar-server  ──>  QueryDriver  ──>  database
+  buffer SQL = editor thật                                       giữ connection đã mở
+  results / navigator = scratch buffer                           giữ cursor kết quả
+```
+
+**Ranh giới crate.** `tradar-server` phụ thuộc `tradar-core`, `tradar-connector-spi`, `tradar-query-workbench` và các connector crate qua feature (cùng tên feature như `tradar-app`, chỉ gồm connector có `QueryDriver`). Nó **không** dùng `QueryEngine` theo kiểu tick-driven của TUI mà lấy thẳng `Arc<dyn QueryDriver>`: `Session::as_any()` (mặc định `None`) cho phép server downcast về `QueryEngine`, rồi `QueryEngine::driver()` trả driver. `tradar-connector-spi` vì thế không phải biết kiểu `QueryEngine`.
+
+**Transport.** Mỗi dòng là một JSON-RPC 2.0 request/response (không batch, không notification), thứ tự trả lời theo thứ tự gửi trên một kết nối. Socket mặc định `$XDG_RUNTIME_DIR/tradar/server.sock` (hoặc đối số dòng lệnh), thư mục `0700`, socket `0600`. Dòng dài quá 1 MiB bị từ chối.
+
+**Method.**
+
+| Method | Params | Kết quả |
+|---|---|---|
+| `connectors.list` | — | id connector build vào server |
+| `connections.list` | — | connection đã lưu + `connected`/`supported` |
+| `connect` / `disconnect` | `connection` | trạng thái |
+| `status` | `connection` | `alive` (ping theo yêu cầu), `in_transaction` |
+| `schema` | `connection` | các entry (`name`, `schema`, `object_kind`, `columns[]` với `primary_key`/`indexed`/`foreign_key`) |
+| `execute` | `connection`, `query`, `page_size?` | `kind` = `table`/`documents` (kèm `cursor`, `columns`, `total`, `truncated`, trang đầu `rows`) hoặc `affected` (kèm `rows`, không có cursor) |
+| `fetch` | `cursor`, `offset?`, `limit?` | `rows`, `total`; vượt cuối = trang rỗng, không phải lỗi |
+| `cursor.close` | `cursor` | — |
+| `split` | `connection`, `text` | các statement theo luật của chính driver (`start`/`end` là byte offset) |
+| `keywords` | `connection` | từ vựng của ngôn ngữ query của driver |
+| `edit.source` / `edit.sql` | `query` / `table`, `key`, `change` | bảng nguồn + cột khoá / câu lệnh sửa dòng (chỉ **sinh**, không chạy) |
+
+Lỗi: `-32601` method lạ, `-32602` params sai, `-32000` lỗi driver/server (message giống hệt chữ TUI sẽ hiện), `-32700` JSON hỏng.
+
+**Cursor phía server.** `execute` giữ nguyên kết quả (tối đa `MAX_ROWS` dòng) trong server và chỉ trả `page_size` dòng đầu; client kéo thêm bằng `fetch`. Giữ tối đa 16 cursor, cái cũ nhất bị loại trước.
+
+**Plugin (`nvim/`).** `:TradarConnect [tên]`, `:TradarRun` (visual, hoặc statement dưới con trỏ — ranh giới statement lấy từ `split`, không phải regex ở Lua), `:TradarRunAll`, `:TradarMore`, `:TradarSchema` (`<CR>` chèn tên vào buffer SQL), `omnifunc`. `require('tradar').setup{ socket=, server_cmd=, autostart=, page_size= }`; nếu không kết nối được và `autostart ~= false`, plugin tự spawn `tradar-server` một lần.
+
+**Giai đoạn 1 chưa làm** (theo dõi ở `docs/roadmap.md`): Kafka/RabbitMQ/HTTP/Socket, `completion_context` (alias, FK join), diagnostics từ vị trí lỗi, huỷ query, ping nền, Windows, và quyết định số phận TUI.
 
 ## Non-goals của kiến trúc mục tiêu
 

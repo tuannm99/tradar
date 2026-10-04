@@ -55,6 +55,15 @@ pub trait Session: Send + Sync {
     /// loop in `main.rs` can skip redrawing an unchanged screen.
     fn tick(&mut self) -> bool;
 
+    /// Lets a headless host (`tradar-server`) recover the concrete session
+    /// type -- in practice `QueryEngine`, to reach its `QueryDriver` --
+    /// without this crate knowing that type exists. `None` by default: a
+    /// session with no query language (Kafka, RabbitMQ, HTTP, Socket) has
+    /// nothing a headless client could drive yet.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
     /// Builds this session's screen. `restore` is whatever that screen
     /// returned from `Component::restore_state` when the app last quit --
     /// opaque here, meaningful only to the screen (a query screen fills

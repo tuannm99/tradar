@@ -16,6 +16,7 @@ members = [
   "crates/tradar-connector-kafka",
   "crates/tradar-connector-http",
   "crates/tradar-connector-socket",
+  "crates/tradar-server",
   "crates/tradar-app",
 ]
 default-members = ["crates/tradar-app"]

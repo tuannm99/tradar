@@ -5237,6 +5237,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tradar-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tradar-connector-cassandra",
+ "tradar-connector-clickhouse",
+ "tradar-connector-elasticsearch",
+ "tradar-connector-mongo",
+ "tradar-connector-mysql",
+ "tradar-connector-postgres",
+ "tradar-connector-redis",
+ "tradar-connector-spi",
+ "tradar-connector-sqlite",
+ "tradar-core",
+ "tradar-query-workbench",
+]
+
+[[package]]
 name = "tree-sitter"
 version = "0.26.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
