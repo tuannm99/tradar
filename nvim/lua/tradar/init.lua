@@ -8,8 +8,6 @@ local M = {}
 local opts = {}
 local state = {
   connection = nil, -- name of the active saved connection
-  keywords = {},
-  names = {}, -- table/column names, for omnifunc
   sql_buf = nil, -- last buffer a query was run from; where the navigator inserts into
   cursor = nil, -- { id, total, shown, kind, columns }
   results_buf = nil,
@@ -87,14 +85,7 @@ function M.connect(name)
   local function go(chosen)
     call('connect', { connection = chosen }, function()
       state.connection = chosen
-      call('keywords', { connection = chosen }, function(k) state.keywords = k end)
       call('schema', { connection = chosen }, function(entries)
-        local names = {}
-        for _, e in ipairs(entries) do
-          names[#names + 1] = e.name
-          for _, c in ipairs(e.columns or {}) do names[#names + 1] = c.name end
-        end
-        state.names = names
         notify(('connected to %s (%d objects)'):format(chosen, #entries))
       end)
     end)
@@ -186,22 +177,25 @@ function M.schema()
   end)
 end
 
---- `omnifunc` / `completefunc`: keywords of the driver's own language plus
---- schema names. Context-aware ranking (FK joins, aliases) is a later step.
+--- `omnifunc`: asks the server, which runs the same context-aware completion
+--- as the TUI (alias `.`, JOIN ranking by FK, Mongo shape). Synchronous by
+--- necessity -- omnifunc has to return its list -- but bounded to 500ms.
 function M.omnifunc(findstart, base)
+  local row, col = unpack(vim.api.nvim_win_get_cursor(0))
   if findstart == 1 then
-    local col = vim.api.nvim_win_get_cursor(0)[2]
     local line = vim.api.nvim_get_current_line():sub(1, col)
-    return col - #line:match('[%w_]*$')
+    return col - #line:match('[%w_$]*$')
   end
-  local out, lower = {}, base:lower()
-  local function add(list, kind)
-    for _, w in ipairs(list) do
-      if w:lower():sub(1, #lower) == lower then out[#out + 1] = { word = w, menu = kind } end
-    end
-  end
-  add(state.names, '[schema]')
-  add(state.keywords, '[kw]')
+  if not state.connection then return {} end
+  local lines = vim.api.nvim_buf_get_lines(0, 0, row, false)
+  lines[#lines] = lines[#lines]:sub(1, col)
+  local err, result = rpc.request_sync('complete', {
+    connection = state.connection,
+    text = table.concat(lines, '\n'),
+  })
+  if err or not result then return {} end
+  local out = {}
+  for _, item in ipairs(result.items) do out[#out + 1] = { word = item.text, menu = '[' .. item.kind .. ']' } end
   return out
 end
 

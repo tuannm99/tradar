@@ -31,7 +31,8 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 **Server headless + plugin Neovim** — xem `docs/backlog/server-headless-nvim-2026-10-04.md`
 
 - [x] Giai đoạn 1: `tradar-server` (JSON-RPC/unix socket, cursor phía server) + plugin `nvim/` cho các connector có `QueryDriver` — xong (2026-10-04)
-- [ ] `completion_context` qua protocol (alias `.`, gợi ý JOIN theo FK, Mongo shape) — hiện omnifunc chỉ keyword + tên schema
+- [x] `completion_context` qua protocol (method `complete`: alias `.`, gợi ý JOIN theo FK, Mongo shape) — xong (2026-10-04)
+- [ ] Tự làm mới completion sau DDL (hiện phải gọi `schema`/`:TradarSchema`)
 - [ ] Diagnostics: đưa vị trí lỗi (`LINE N: ^`) vào `vim.diagnostic`
 - [ ] Huỷ query đang chạy + ping nền (`QueryEngine::tick` không chạy ở server)
 - [ ] Row-edit trong buffer results (`edit.sql` đã có, chưa có UI Lua)

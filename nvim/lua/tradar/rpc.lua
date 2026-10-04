@@ -87,6 +87,15 @@ function M.request(method, params, cb)
   pipe:write(vim.json.encode({ jsonrpc = '2.0', id = next_id, method = method, params = params }) .. '\n')
 end
 
+--- Blocking variant for callers that must answer synchronously (omnifunc).
+--- Bounded, and only ever talks to a local socket; returns `err, result`.
+function M.request_sync(method, params, timeout_ms)
+  local done, err, result = false, nil, nil
+  M.request(method, params, function(e, r) done, err, result = true, e, r end)
+  if not vim.wait(timeout_ms or 500, function() return done end, 5) then return 'timeout' end
+  return err, result
+end
+
 function M.close()
   if pipe then pipe:close() end
   pipe, buffer, pending = nil, '', {}

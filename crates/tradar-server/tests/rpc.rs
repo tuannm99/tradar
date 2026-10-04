@@ -252,3 +252,58 @@ async fn answers_over_a_real_unix_socket_with_owner_only_permissions() {
     // A second server must refuse to steal a live socket.
     assert!(bind(&path).await.is_err());
 }
+
+#[tokio::test]
+async fn complete_is_context_aware_like_the_tui() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+    let q = |sql: &str| json!({"connection": "local", "query": sql});
+    ok(&call(
+        &server,
+        "execute",
+        q("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"),
+    )
+    .await);
+    ok(&call(&server, "execute", q("CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), total REAL)")).await);
+    // `connect` built the completion source before these tables existed;
+    // `schema` is what refreshes it.
+    ok(&call(&server, "schema", json!({"connection": "local"})).await);
+
+    let texts = |r: &Value| -> Vec<String> {
+        ok(r)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["text"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let complete = |text: &str| {
+        call(
+            &server,
+            "complete",
+            json!({"connection": "local", "text": text}),
+        )
+    };
+
+    // `alias.` -> only that table's own columns.
+    let cols = complete("SELECT * FROM orders o WHERE o.").await;
+    assert_eq!(texts(&cols), ["id", "total", "user_id"]);
+    assert_eq!(ok(&cols)["items"][0]["kind"], "column");
+
+    // Partial word after the dot narrows, and `prefix` reports what was typed.
+    let narrowed = complete("SELECT * FROM orders o WHERE o.us").await;
+    assert_eq!(texts(&narrowed), ["user_id"]);
+    assert_eq!(ok(&narrowed)["prefix"], "us");
+
+    // Multi-line context still resolves the alias.
+    let multi = complete("SELECT *\nFROM orders o\nWHERE o.t").await;
+    assert_eq!(texts(&multi), ["total"]);
+
+    // After JOIN, a table already in the query is not offered again.
+    let join = complete("SELECT * FROM users u JOIN ").await;
+    assert!(!texts(&join).contains(&"users".to_string()));
+
+    // Flat fallback: schema names, then keywords.
+    let flat = complete("SELECT * FROM us").await;
+    assert_eq!(texts(&flat)[0], "users");
+}

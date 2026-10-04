@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 use tradar_connector_spi::Connector;
 use tradar_core::storage::{ConnectionStore, SavedConnection};
-use tradar_query_workbench::query_driver::QueryDriver;
+use tradar_query_workbench::components::completion::{CandidateKind, CompletionSource};
+use tradar_query_workbench::query_driver::{QueryDriver, completion_context};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 use crate::protocol::{
@@ -29,6 +30,10 @@ const MAX_CURSORS: usize = 16;
 #[derive(Default)]
 struct State {
     drivers: HashMap<String, Arc<dyn QueryDriver>>,
+    /// Built once per connection (keywords + schema) and rebuilt whenever
+    /// `schema` is called, the same lifetime the TUI gives its own
+    /// `CompletionSource` -- never per keystroke.
+    completions: HashMap<String, Arc<CompletionSource>>,
     cursors: HashMap<u64, StoredResult>,
     cursor_order: VecDeque<u64>,
     next_cursor: u64,
@@ -86,6 +91,7 @@ impl Server {
             "cursor.close" => self.close_cursor(params),
             "split" => self.split(params),
             "keywords" => self.keywords(params),
+            "complete" => self.complete(params),
             "edit.source" => self.edit_source(params),
             "edit.sql" => self.edit_sql(params),
             _ => Err(RpcError {
@@ -161,17 +167,21 @@ impl Server {
             .and_then(|any| any.downcast_ref::<QueryEngine>())
             .map(QueryEngine::driver)
             .ok_or_else(|| RpcError::app("this connector has no query driver to serve"))?;
-        self.state
-            .lock()
-            .unwrap()
-            .drivers
-            .insert(name.to_string(), driver);
+        // A failed schema load still connects, as in the TUI: completion
+        // just has no schema names to offer.
+        let schema = driver.list_schema().await.unwrap_or_default();
+        let source = Arc::new(CompletionSource::new(driver.keywords(), &schema));
+        let mut state = self.state.lock().unwrap();
+        state.drivers.insert(name.to_string(), driver);
+        state.completions.insert(name.to_string(), source);
         Ok(json!({"connected": true, "already": false}))
     }
 
     fn disconnect(&self, params: &Value) -> Result<Value, RpcError> {
         let name = str_param(params, "connection")?;
-        let removed = self.state.lock().unwrap().drivers.remove(name).is_some();
+        let mut state = self.state.lock().unwrap();
+        state.completions.remove(name);
+        let removed = state.drivers.remove(name).is_some();
         Ok(json!({"disconnected": removed}))
     }
 
@@ -184,6 +194,12 @@ impl Server {
     async fn schema(&self, params: &Value) -> Result<Value, RpcError> {
         let driver = self.driver(params)?;
         let entries = driver.list_schema().await?;
+        let source = Arc::new(CompletionSource::new(driver.keywords(), &entries));
+        self.state
+            .lock()
+            .unwrap()
+            .completions
+            .insert(str_param(params, "connection")?.to_string(), source);
         Ok(json!(entries.iter().map(schema_json).collect::<Vec<_>>()))
     }
 
@@ -253,6 +269,47 @@ impl Server {
 
     fn keywords(&self, params: &Value) -> Result<Value, RpcError> {
         Ok(json!(self.driver(params)?.keywords()))
+    }
+
+    /// `text` is everything from the start of the buffer up to the cursor
+    /// (context -- aliases, `JOIN`, a Mongo `db.<coll>.find({` -- needs the
+    /// earlier lines, not just the current one). The partial word being
+    /// typed is derived here, with the same word characters the TUI editor
+    /// uses, so both clients complete identically.
+    fn complete(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let text = str_param(params, "text")?;
+        let source = self
+            .state
+            .lock()
+            .unwrap()
+            .completions
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                RpcError::app(format!("`{name}` is not connected -- call `connect` first"))
+            })?;
+        let prefix_start = text
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .last()
+            .map_or(text.len(), |(i, _)| i);
+        let prefix = &text[prefix_start..];
+        let context = completion_context(text);
+        let items: Vec<Value> = source
+            .matches_in_context(prefix, &context)
+            .into_iter()
+            .map(|c| {
+                let kind = match c.kind {
+                    CandidateKind::Keyword => "keyword",
+                    CandidateKind::Table => "table",
+                    CandidateKind::Column => "column",
+                };
+                json!({"text": c.text, "kind": kind})
+            })
+            .collect();
+        Ok(json!({"prefix": prefix, "items": items}))
     }
 
     fn edit_source(&self, params: &Value) -> Result<Value, RpcError> {

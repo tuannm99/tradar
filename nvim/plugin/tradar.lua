@@ -10,3 +10,10 @@ end, { range = true })
 vim.api.nvim_create_user_command('TradarRunAll', function() t().run(nil, nil, true) end, {})
 vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})
 vim.api.nvim_create_user_command('TradarSchema', function() t().schema() end, {})
+
+-- Context-aware completion on any SQL buffer; returns nothing until a
+-- connection is active, so it never gets in the way of a plain .sql file.
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'sql',
+  callback = function(a) vim.bo[a.buf].omnifunc = "v:lua.require'tradar'.omnifunc" end,
+})

@@ -12,6 +12,14 @@ Xuất phát từ một nhận xét của user: query editor + navigator + cả 
 - `nvim/` (plugin Lua): `:TradarConnect`, `:TradarRun` (visual / statement dưới con trỏ), `:TradarRunAll`, `:TradarMore`, `:TradarSchema`, `omnifunc`.
 - Test: `crates/tradar-server/tests/rpc.rs` (8 test, SQLite thật, gồm một test qua unix socket thật + quyền `0600`); smoke test headless Neovim ↔ server thật chạy tay (connect, paging, `:TradarMore`, statement dưới con trỏ, navigator, omnifunc).
 
+## Bước 2 (cùng ngày): completion theo ngữ cảnh
+
+- Method `complete` tái dùng nguyên `query_driver::completion_context` + `CompletionSource::matches_in_context` (đã `pub` sẵn, không phải sửa crate workbench) nên TUI và Neovim gợi ý giống hệt nhau (alias `.`, JOIN xếp bảng liên quan FK lên đầu, Mongo shape).
+- Client gửi toàn bộ text từ đầu buffer tới con trỏ (context cần các dòng trước, ví dụ alias khai báo ở `FROM` dòng trên); phần từ đang gõ do server tách, cùng bộ ký tự từ với `QueryEditorComponent`.
+- `CompletionSource` dựng lúc `connect`, dựng lại ở mỗi `schema`. Hệ quả: bảng tạo sau khi connect chỉ được gợi ý sau một lần `schema` — đã ghi vào roadmap.
+- Plugin: `omnifunc` gọi `rpc.request_sync` (chặn tối đa 500ms bằng `vim.wait`) vì omnifunc bắt buộc trả danh sách đồng bộ; gắn tự động cho `FileType sql`.
+- Test: `complete_is_context_aware_like_the_tui` (alias, lọc theo prefix, nhiều dòng, JOIN không gợi ý lại bảng đã có, fallback phẳng) + smoke headless Neovim (`o.` → 3 cột, `o.us` → `user_id`). Lưu ý khi test headless: Normal mode không đặt con trỏ sau ký tự cuối (col 7 thay vì 8), cần `virtualedit=onemore` để mô phỏng Insert mode.
+
 ## Quyết định thiết kế và lý do
 
 - **JSON-RPC theo dòng, không msgpack-rpc.** Plugin chỉ cần `vim.json` + một pipe, người dùng gõ tay được bằng `socat`.
@@ -26,5 +34,4 @@ Xuất phát từ một nhận xét của user: query editor + navigator + cả 
 - Đường dẫn unix socket tối đa ~108 byte; `XDG_RUNTIME_DIR` rất dài sẽ lỗi `path must be shorter than SUN_LEN` (gặp thật khi smoke test với thư mục scratchpad dài) — truyền đường dẫn ngắn làm đối số cho `tradar-server` / `setup{socket=...}`.
 - Chỉ unix (WSL/Linux/macOS), chưa có Windows named pipe.
 - Chưa huỷ được query đang chạy (TUI có `cancel()`, protocol chưa có).
-- Completion hiện chỉ là keyword + tên schema, chưa có `completion_context` (alias `.`, gợi ý JOIN theo FK).
 - Không có xác thực ngoài quyền file của socket.

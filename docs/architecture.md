@@ -495,15 +495,18 @@ nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar
 | `cursor.close` | `cursor` | — |
 | `split` | `connection`, `text` | các statement theo luật của chính driver (`start`/`end` là byte offset) |
 | `keywords` | `connection` | từ vựng của ngôn ngữ query của driver |
+| `complete` | `connection`, `text` (từ đầu buffer tới con trỏ) | `prefix` (từ đang gõ, tính phía server cùng ký tự từ như editor TUI) + `items[]` (`text`, `kind` = `keyword`/`table`/`column`), qua đúng `completion_context` + `CompletionSource::matches_in_context` mà TUI dùng |
 | `edit.source` / `edit.sql` | `query` / `table`, `key`, `change` | bảng nguồn + cột khoá / câu lệnh sửa dòng (chỉ **sinh**, không chạy) |
 
 Lỗi: `-32601` method lạ, `-32602` params sai, `-32000` lỗi driver/server (message giống hệt chữ TUI sẽ hiện), `-32700` JSON hỏng.
 
+**Completion.** `CompletionSource` (keywords + schema) dựng một lần lúc `connect` và dựng lại mỗi lần gọi `schema` — cùng vòng đời với bản của TUI, không dựng lại mỗi phím. Vì vậy sau khi chạy DDL, client phải gọi `schema` (plugin làm khi `:TradarSchema`) để completion thấy bảng mới.
+
 **Cursor phía server.** `execute` giữ nguyên kết quả (tối đa `MAX_ROWS` dòng) trong server và chỉ trả `page_size` dòng đầu; client kéo thêm bằng `fetch`. Giữ tối đa 16 cursor, cái cũ nhất bị loại trước.
 
-**Plugin (`nvim/`).** `:TradarConnect [tên]`, `:TradarRun` (visual, hoặc statement dưới con trỏ — ranh giới statement lấy từ `split`, không phải regex ở Lua), `:TradarRunAll`, `:TradarMore`, `:TradarSchema` (`<CR>` chèn tên vào buffer SQL), `omnifunc`. `require('tradar').setup{ socket=, server_cmd=, autostart=, page_size= }`; nếu không kết nối được và `autostart ~= false`, plugin tự spawn `tradar-server` một lần.
+**Plugin (`nvim/`).** `:TradarConnect [tên]`, `:TradarRun` (visual, hoặc statement dưới con trỏ — ranh giới statement lấy từ `split`, không phải regex ở Lua), `:TradarRunAll`, `:TradarMore`, `:TradarSchema` (`<CR>` chèn tên vào buffer SQL), `omnifunc` (gắn tự động cho buffer `sql`; gọi `complete` đồng bộ, tối đa 500ms). `require('tradar').setup{ socket=, server_cmd=, autostart=, page_size= }`; nếu không kết nối được và `autostart ~= false`, plugin tự spawn `tradar-server` một lần.
 
-**Giai đoạn 1 chưa làm** (theo dõi ở `docs/roadmap.md`): Kafka/RabbitMQ/HTTP/Socket, `completion_context` (alias, FK join), diagnostics từ vị trí lỗi, huỷ query, ping nền, Windows, và quyết định số phận TUI.
+**Chưa làm** (theo dõi ở `docs/roadmap.md`): Kafka/RabbitMQ/HTTP/Socket, diagnostics từ vị trí lỗi, huỷ query, ping nền, Windows, và quyết định số phận TUI.
 
 ## Non-goals của kiến trúc mục tiêu
 
