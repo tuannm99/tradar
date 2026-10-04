@@ -515,9 +515,11 @@ Lỗi: `-32601` method lạ, `-32602` params sai, `-32000` lỗi driver/server (
 - **Completion:** nguồn `blink.cmp` (`tradar.blink`, async, `.` là ký tự kích hoạt) hoặc `omnifunc` dự phòng. Cấu hình của người dùng nên bỏ nguồn `lsp` cho `sql` nếu cài `sqlls`.
 - **Điều hướng:** `<leader>rt` (`:TradarTables`, telescope: preview cột/PK/FK, `<CR>` chèn tên, `<C-o>` mở bảng bằng `snippet`), `<leader>rh` (`:TradarHistory`, lưu ở `stdpath('state')/tradar_history.json`, `<CR>` dán, `<C-r>` chạy), `<leader>rs` (panel schema), `<leader>rc` chọn connection.
 - **Statusline:** `require('tradar').status()` → `db demo · 120/5000 rows · 83ms`, spinner khi đang chạy, `✗` khi ping nền (15s) thấy connection rớt, `tx` khi trong transaction; rỗng ngoài buffer SQL/tradar nên gắn vào lualine không tốn gì ở file khác.
+- **Bảo vệ:** `UPDATE`/`DELETE` không `WHERE`, `DROP`, `TRUNCATE` luôn hỏi; connection có tên chứa `protected` (mặc định `"prod"`) hỏi cho mọi lệnh ghi và có `⚠` trên statusline; lô `<leader>ra` hỏi một lần. Phân tích theo token (bỏ comment/chuỗi) ở `nvim/lua/tradar/guard.lua`, mặc định hỏi là `Cancel`.
+- **Điều hướng theo schema:** `K` (kiểu/PK/FK/index của bảng hay cột dưới con trỏ, phân giải alias `o.col` từ `FROM`/`JOIN` trong buffer, không biết thì rơi về hover của LSP), `gd` trên tên bảng mở bảng, `gd` trong kết quả trên ô cột khoá ngoại chạy `SELECT` dòng được tham chiếu (dùng `edit.source` để biết bảng nguồn + `schema` để biết FK; giá trị luôn là chuỗi literal như row-edit của TUI), `<leader>re` = `EXPLAIN` (SQLite: `EXPLAIN QUERY PLAN`; không bao giờ `ANALYZE` vì nó chạy câu lệnh). Schema được cache 1 phút phía plugin và bỏ cache khi chạy DDL từ đó. `K`/`gd` được gắn lại sau `LspAttach` vì `on_attach` của LSP đặt cùng phím sau FileType.
 - `:checkhealth tradar` kiểm tra binary, server, số connection, các plugin tuỳ chọn.
 
-**Chưa làm** (theo dõi ở `docs/roadmap.md`): Kafka/RabbitMQ/HTTP/Socket, sửa dòng trong buffer kết quả, `gd`/`K`/nhảy theo FK, Windows, và quyết định số phận TUI.
+**Chưa làm** (theo dõi ở `docs/roadmap.md`): Kafka/RabbitMQ/HTTP/Socket, sửa dòng trong buffer kết quả, Windows, và quyết định số phận TUI.
 
 ## Non-goals của kiến trúc mục tiêu
 

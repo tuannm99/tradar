@@ -2,6 +2,7 @@
 -- querying. See "Server headless" in docs/architecture.md.
 local rpc = require('tradar.rpc')
 local render = require('tradar.render')
+local guard = require('tradar.guard')
 local uv = vim.uv or vim.loop
 
 local M = {}
@@ -30,6 +31,8 @@ local state = {
   schema_buf = nil,
   schema_targets = {},
   sql_buf = nil, -- buffer the navigator inserts into
+  drivers = nil, -- connection name -> driver id (from connections.list)
+  schema_cache = {}, -- name -> { at, entries }
 }
 
 local function notify(msg, level) vim.notify('tradar: ' .. msg, level or vim.log.levels.INFO) end
@@ -86,6 +89,12 @@ end
 --- Whether the server has confirmed a connection (not merely a binding).
 function M.is_connected(name) return state.connected[name] == true end
 
+--- Connections whose name matches `setup{ protected = {...} }` (default
+--- `{"prod"}`): every write asks first, and the statusline shows `⚠`.
+function M.is_protected(name)
+  return guard.is_protected(name, opts.protected or { 'prod' })
+end
+
 local function ensure_connected(name, cb, on_error)
   if state.connected[name] then return cb() end
   if state.connecting[name] then
@@ -123,7 +132,7 @@ function M.status()
   if not in_tradar and not state.running then return '' end
   local conn = (state.running and state.running.conn) or M.connection_for(0)
   if not conn then return '' end
-  local parts = { 'db ' .. conn }
+  local parts = { 'db ' .. conn .. (M.is_protected(conn) and ' ⚠' or '') }
   if state.alive[conn] == false then parts[1] = parts[1] .. ' ✗' end
   if state.in_tx[conn] then parts[1] = parts[1] .. ' tx' end
   if state.running then
@@ -266,7 +275,7 @@ local function show_message(text, height)
   show(buf, height or 6)
 end
 
-local function show_result(r)
+local function show_result(r, meta)
   local buf = scratch('tradar://results', state.results_buf)
   state.results_buf = buf
   attach_results(buf)
@@ -278,6 +287,7 @@ local function show_result(r)
   state.result = {
     id = r.cursor, total = r.total, shown = #r.rows, kind = r.kind,
     columns = r.columns, rows = r.rows, truncated = r.truncated, fetching = false,
+    conn = meta and meta.conn, query = meta and meta.query,
   }
   paint_results()
   local win = show(buf)
@@ -407,6 +417,7 @@ attach_results = function(buf)
   map('n', 'gyj', function() M.yank_all('json') end, 'yank all as JSON')
   map('n', 'gyv', function() M.yank_all('csv') end, 'yank all as CSV')
   map('n', 'gym', function() M.yank_all('md') end, 'yank all as Markdown table')
+  map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
   map('n', 'q', function()
     local win = vim.fn.bufwinid(buf)
     if win ~= -1 then vim.api.nvim_win_close(win, true) end
@@ -459,7 +470,8 @@ local function set_diagnostic(buf, base_row, base_col, message, data)
   end
 end
 
-local function run_text(buf, text, base_row, base_col, retried)
+local function run_text(buf, text, base_row, base_col, flags)
+  flags = flags or {}
   if state.running then
     return notify('a query is already running — cancel it with <leader>rx', vim.log.levels.WARN)
   end
@@ -468,6 +480,21 @@ local function run_text(buf, text, base_row, base_col, retried)
     return M.connect(nil, function() run_text(buf, text, base_row, base_col) end)
   end
   state.sql_buf = buf
+
+  local reason = not flags.confirmed and opts.confirm ~= false and guard.assess(text, M.is_protected(conn))
+  if reason then
+    local first = guard.first_code_line(text)
+    -- "Cancel" is first so a reflexive <CR> is the safe answer.
+    vim.ui.select({ 'Cancel', 'Run anyway' }, {
+      prompt = ('tradar [%s]: %s\n  %s'):format(conn, reason, first:sub(1, 70)),
+    }, function(choice)
+      if choice == 'Run anyway' then
+        run_text(buf, text, base_row, base_col, vim.tbl_extend('force', flags, { confirmed = true }))
+      end
+    end)
+    return
+  end
+
   ensure_connected(conn, function()
     state.counter = state.counter + 1
     local id = ('nv%d-%d'):format(vim.fn.getpid(), state.counter)
@@ -486,17 +513,18 @@ local function run_text(buf, text, base_row, base_col, retried)
       state.last = r.kind == 'affected' and ('%d affected · %s'):format(r.rows, took)
         or ('%d/%d rows · %s'):format(#r.rows, r.total, took)
       if vim.api.nvim_buf_is_valid(buf) then vim.diagnostic.reset(ns, buf) end
-      show_result(r)
+      if guard.changes_schema(text) then state.schema_cache[conn] = nil end
+      show_result(r, { conn = conn, query = text })
     end, function(err, data)
       finish()
       if err == 'query cancelled' then
         state.last = 'cancelled'
         return notify('cancelled')
       end
-      if err:find('not connected', 1, true) and not retried then
+      if err:find('not connected', 1, true) and not flags.retried then
         -- The server restarted since we connected: reconnect once, quietly.
         state.connected[conn] = nil
-        return run_text(buf, text, base_row, base_col, true)
+        return run_text(buf, text, base_row, base_col, vim.tbl_extend('force', flags, { retried = true }))
       end
       state.last = 'error'
       show_message(err)
@@ -510,7 +538,7 @@ end
 --- Visual selection / range: runs exactly those lines.
 --- No range: the statement under the cursor (boundaries are the driver's,
 --- not a regex here). `all`: every statement in the buffer, in order.
-function M.run(range_start, range_end, all)
+function M.run(range_start, range_end, all, transform)
   local buf = vim.api.nvim_get_current_buf()
   if range_start then
     local lines = vim.api.nvim_buf_get_lines(buf, range_start - 1, range_end, false)
@@ -530,24 +558,41 @@ function M.run(range_start, range_end, all)
         return row, col
       end
       if all then
-        -- Sequentially: each run starts when the previous one finished.
-        local i = 0
-        local function next_statement()
-          i = i + 1
-          local s = statements[i]
-          if not s then return end
-          local row, col = position(s)
-          run_text(buf, s.text, row, col)
-          local timer = uv.new_timer()
-          timer:start(50, 50, vim.schedule_wrap(function()
-            if not state.running then
-              timer:stop()
-              timer:close()
-              if state.last ~= 'error' and state.last ~= 'cancelled' then next_statement() end
-            end
-          end))
+        -- One question for the whole batch, not one per statement.
+        local risky = {}
+        for _, st in ipairs(statements) do
+          local why = opts.confirm ~= false and guard.assess(st.text, M.is_protected(conn))
+          if why then risky[#risky + 1] = why end
         end
-        return next_statement()
+
+        local function go()
+          -- Sequentially: each run starts when the previous one finished,
+          -- and the batch stops at the first error or cancel.
+          local i = 0
+          local function next_statement()
+            i = i + 1
+            local st = statements[i]
+            if not st then return end
+            local row, col = position(st)
+            run_text(buf, st.text, row, col, { confirmed = true })
+            local timer = uv.new_timer()
+            timer:start(50, 50, vim.schedule_wrap(function()
+              if not state.running then
+                timer:stop()
+                timer:close()
+                if state.last ~= 'error' and state.last ~= 'cancelled' then next_statement() end
+              end
+            end))
+          end
+          next_statement()
+        end
+
+        if #risky == 0 then return go() end
+        vim.ui.select({ 'Cancel', 'Run all' }, {
+          prompt = ('tradar [%s]: %d of %d statements need a second look\n  %s'):format(
+            conn, #risky, #statements, table.concat(risky, '; '):sub(1, 90)),
+        }, function(choice) if choice == 'Run all' then go() end end)
+        return
       end
       local row, col = unpack(vim.api.nvim_win_get_cursor(0))
       local offset = col
@@ -559,7 +604,7 @@ function M.run(range_start, range_end, all)
       end
       chosen = chosen or statements[1]
       local srow, scol = position(chosen)
-      run_text(buf, chosen.text, srow, scol)
+      run_text(buf, transform and transform(chosen.text) or chosen.text, srow, scol)
     end)
   end, function(err) notify(err, vim.log.levels.ERROR) end)
 end
@@ -645,6 +690,206 @@ function M.schema()
   end)
 end
 
+-- ── schema-aware navigation: hover, go-to, follow a foreign key ──────────
+
+--- `cb(driver_id)` for a connection ("sqlite", "postgres", ...); cached.
+local function driver_of(conn, cb)
+  if state.drivers then return cb(state.drivers[conn]) end
+  call('connections.list', nil, function(list)
+    state.drivers = {}
+    for _, c in ipairs(list) do state.drivers[c.name] = c.driver end
+    cb(state.drivers[conn])
+  end)
+end
+
+--- Schema for `conn`, cached for a minute and dropped when a DDL statement
+--- runs from here -- hover must feel instant, and schemas rarely move.
+local function get_schema(conn, cb)
+  local hit = state.schema_cache[conn]
+  if hit and (uv.hrtime() - hit.at) < 60e9 then return cb(hit.entries) end
+  ensure_connected(conn, function()
+    call('schema', { connection = conn }, function(entries)
+      state.schema_cache[conn] = { at = uv.hrtime(), entries = entries }
+      cb(entries)
+    end)
+  end, function(err) notify(err, vim.log.levels.ERROR) end)
+end
+
+--- `public."Users"` -> `users` (last segment, unquoted, lowercase): how a
+--- table is compared across the ways a driver and a user may spell it.
+local function bare(name)
+  local last = tostring(name):match('([^.]+)$') or tostring(name)
+  return (last:gsub('^[`"%[]', ''):gsub('[`"%]]$', '')):lower()
+end
+
+local function find_table(entries, name)
+  local want = bare(name)
+  for _, e in ipairs(entries) do
+    if e.name:lower() == want or bare(e.name) == want then return e end
+  end
+end
+
+local function quote_ident(name, driver)
+  local q = (driver == 'mysql' or driver == 'clickhouse') and '`' or '"'
+  local parts = {}
+  for part in tostring(name):gmatch('[^.]+') do
+    if part:match('^[a-z_][a-z0-9_]*$') then
+      parts[#parts + 1] = part
+    else
+      parts[#parts + 1] = q .. part:gsub(q, q .. q) .. q
+    end
+  end
+  return table.concat(parts, '.')
+end
+
+--- Always a string literal: Postgres, SQLite and MySQL all coerce `'1'` to
+--- a number where the column is numeric, so one shape covers every type
+--- (the same choice the TUI's row edit makes).
+local function quote_literal(value, driver)
+  local v = tostring(value):gsub("'", "''")
+  if driver == 'mysql' then v = v:gsub('\\', '\\\\') end
+  return "'" .. v .. "'"
+end
+
+local function word_under_cursor()
+  local line = vim.api.nvim_get_current_line()
+  local col = vim.api.nvim_win_get_cursor(0)[2] + 1
+  local s, e = col, col
+  while s > 1 and line:sub(s - 1, s - 1):match('[%w_$]') do s = s - 1 end
+  while e <= #line and line:sub(e, e):match('[%w_$]') do e = e + 1 end
+  local word = line:sub(s, e - 1)
+  if word == '' then return nil end
+  local qualifier = line:sub(1, s - 1):match('([%w_$]+)%.$')
+  return word, qualifier
+end
+
+--- The table an alias stands for, read from `FROM x a` / `FROM x AS a` /
+--- `JOIN x a` anywhere in `text`. Text-level, like the TUI's own alias
+--- resolution -- and just as happy to be wrong about a pathological query,
+--- since the worst outcome is a hover that lists every table with that column.
+local STOP = { on = true, where = true, join = true, inner = true, left = true, right = true, full = true,
+  outer = true, cross = true, group = true, order = true, limit = true, having = true, union = true, using = true,
+  set = true, values = true, select = true, ['and'] = true, ['or'] = true }
+
+local function resolve_alias(text, alias)
+  local lower, want = text:lower(), alias:lower()
+  for _, kw in ipairs({ 'from', 'join' }) do
+    for tbl, rest in lower:gmatch('%f[%w_]' .. kw .. '%s+([%w_."`]+)%s+([%w_]+)') do
+      local word = rest
+      if word == 'as' then
+        -- `x AS a`: the alias is the word after AS, which this pass didn't capture
+        local after = lower:match('%f[%w_]' .. kw .. '%s+' .. vim.pesc(tbl) .. '%s+as%s+([%w_]+)')
+        word = after or word
+      end
+      if word == want and not STOP[word] then return tbl end
+    end
+  end
+end
+
+local function fallback(name)
+  if name == 'hover' then vim.lsp.buf.hover() else vim.lsp.buf.definition() end
+end
+
+--- `K`: what the schema knows about the table or column under the cursor,
+--- in a float. Falls back to the LSP's own hover when it knows nothing.
+function M.hover()
+  local conn = M.connection_for(0)
+  local word, qualifier = word_under_cursor()
+  if not (conn and word) then return fallback('hover') end
+  get_schema(conn, function(entries)
+    local lines
+    local tbl = find_table(entries, word)
+    if tbl then
+      lines = render.entry(tbl)
+    else
+      local want = word:lower()
+      local qual
+      if qualifier then
+        local buf_text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
+        local aliased = resolve_alias(buf_text, qualifier)
+        if aliased then
+          qual = bare(aliased)
+        elseif find_table(entries, qualifier) then
+          qual = bare(qualifier)
+        end -- else: unknown qualifier, don't restrict
+      end
+      lines = {}
+      for _, e in ipairs(entries) do
+        if not qual or bare(e.name) == qual then
+          for _, c in ipairs(e.columns or {}) do
+            if c.name:lower() == want then
+              local marks = (c.primary_key and '  pk' or '') .. (c.indexed and '  idx' or '')
+              local fk = c.foreign_key and ('  → ' .. c.foreign_key.table .. '.' .. c.foreign_key.column) or ''
+              lines[#lines + 1] = ('%s.%s  %s%s%s'):format(e.name, c.name, c.type, marks, fk)
+            end
+          end
+        end
+      end
+      if #lines == 0 then lines = nil end
+    end
+    if not lines then return fallback('hover') end
+    vim.lsp.util.open_floating_preview(lines, 'text', { border = 'rounded', focus_id = 'tradar_hover', max_width = 90 })
+  end)
+end
+
+--- `gd` on a table name: show its rows. Anything else: the LSP's own.
+function M.goto_table()
+  local buf = vim.api.nvim_get_current_buf()
+  local conn = M.connection_for(buf)
+  local word = word_under_cursor()
+  if not (conn and word) then return fallback('definition') end
+  get_schema(conn, function(entries)
+    local tbl = find_table(entries, word)
+    if tbl then M.open_table(buf, tbl) else fallback('definition') end
+  end)
+end
+
+--- In the results buffer, `gd` on a cell of a foreign-key column runs the
+--- `SELECT` for the row it points at. Works for results of a single-table
+--- query (the same limit the TUI's row edit has: the driver must be able
+--- to say which table the rows came from).
+function M.follow_fk()
+  local r = state.result
+  local row, col = cell_at()
+  if not (r and r.conn and row) then return notify('put the cursor on a cell of a table result', vim.log.levels.WARN) end
+  local name, value = r.columns[col], r.rows[row][col]
+  call('edit.source', { connection = r.conn, query = r.query }, function(src)
+    if not src.table then
+      return notify('cannot tell which table these rows come from (only single-table SELECTs)', vim.log.levels.WARN)
+    end
+    get_schema(r.conn, function(entries)
+      local tbl = find_table(entries, src.table)
+      local column
+      for _, c in ipairs(tbl and tbl.columns or {}) do
+        if c.name:lower() == name:lower() then column = c break end
+      end
+      if not (column and column.foreign_key) then
+        return notify(('`%s` is not a foreign key'):format(name), vim.log.levels.WARN)
+      end
+      if value == nil or value == 'NULL' then return notify('NULL references nothing', vim.log.levels.WARN) end
+      local fk = column.foreign_key
+      driver_of(r.conn, function(driver)
+        local sql = ('SELECT * FROM %s WHERE %s = %s LIMIT 100;'):format(
+          quote_ident(fk.table, driver), quote_ident(fk.column, driver), quote_literal(value, driver))
+        local buf = state.sql_buf
+        if not (buf and vim.api.nvim_buf_is_valid(buf)) then buf = vim.api.nvim_get_current_buf() end
+        run_text(buf, sql, 0, 0, { confirmed = true })
+      end)
+    end)
+  end, function(err) notify(err, vim.log.levels.ERROR) end)
+end
+
+--- Plans the statement under the cursor (`EXPLAIN`, or SQLite's
+--- `EXPLAIN QUERY PLAN`). Never `ANALYZE`: that would *execute* it.
+function M.explain()
+  local conn = M.connection_for(0)
+  if not conn then return M.connect(nil, M.explain) end
+  driver_of(conn, function(driver)
+    local prefix = driver == 'sqlite' and 'EXPLAIN QUERY PLAN ' or 'EXPLAIN '
+    M.run(nil, nil, false, function(text) return prefix .. text end)
+  end)
+end
+
 -- ── completion ───────────────────────────────────────────────────────────
 
 --- `cb(items)` with `{text, kind}` for the text before the cursor. Used by
@@ -700,13 +945,25 @@ function M.attach(buf)
     map('n', 't', function() require('tradar.telescope').tables() end, 'tables (telescope)')
     map('n', 'h', function() require('tradar.telescope').history() end, 'history (telescope)')
     map('n', 'm', function() M.more() end, 'load more rows')
+    map('n', 'e', M.explain, 'explain statement under cursor')
   end
+  M.attach_nav(buf)
   local conn = M.connection_for(buf)
   if conn and not state.connected[conn] then
     ensure_connected(conn, function() end, function(err)
       notify(('could not connect `%s`: %s'):format(conn, err), vim.log.levels.WARN)
     end)
   end
+end
+
+--- `K`/`gd` on SQL buffers. Split from `attach` because an LSP's own
+--- `on_attach` (sqlls, here) sets the same keys after FileType and would
+--- win: the LspAttach hook in plugin/tradar.lua calls this again afterwards.
+function M.attach_nav(buf)
+  buf = resolve_buf(buf)
+  if opts.keymaps == false then return end
+  vim.keymap.set('n', 'K', M.hover, { buffer = buf, desc = 'tradar: table/column info' })
+  vim.keymap.set('n', 'gd', M.goto_table, { buffer = buf, desc = 'tradar: open table under cursor' })
 end
 
 function M.setup(user)

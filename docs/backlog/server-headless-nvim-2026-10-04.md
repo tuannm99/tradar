@@ -30,6 +30,15 @@ Làm theo cấu hình thật của user (`~/.config/nvim`: `lazy.nvim` với `de
 - **Bug tìm ra nhờ smoke test (đều đã sửa):** (1) `jobstart` bị gọi trong callback libuv ("fast context") nên server không tự khởi động được — kết nối giờ `vim.schedule_wrap` về main loop; (2) `is_ddl` chỉ nhìn từ khoá đầu nên một `CREATE TABLE` đi kèm dòng comment phía trên (rất hay gặp, và chính modeline `-- tradar:` cũng là comment) không làm mới completion — giờ bỏ qua comment đầu câu lệnh; (3) kiểm tra "đã connect" ban đầu của test quá yếu (`status()` hiện tên connection dù chưa nối được) nên che mất bug (1).
 - **Test:** `tradar-server` 14 test tích hợp + 3 test đơn vị (huỷ query, request đồng thời trên một socket, vị trí lỗi, DDL refresh, snippet...); smoke headless Neovim 17 kiểm tra (modeline, autostart, chạy, phân trang, cuộn tự tải, yank, export 450 dòng, diagnostic, blink, open table, history, spinner, huỷ); chạy lại trên cấu hình thật của user (lazy-load theo `ft=sql`, phím, blink gộp, lualine, picker telescope, `:checkhealth`). Điều **chưa** kiểm chứng: dùng tay trong Neovim có giao diện, và việc huỷ một câu SQLite đệ quy vô hạn có giải phóng được kết nối đó không (huỷ chỉ bỏ future phía server; xem giới hạn).
 
+## Bước 4 (cùng ngày): bảo vệ + điều hướng theo schema
+
+Thuần phía plugin (`guard.lua`, `init.lua`); server không đổi.
+
+- **Bảo vệ:** hỏi xác nhận cho `UPDATE`/`DELETE` thiếu `WHERE`, `DROP`, `TRUNCATE`, và mọi lệnh ghi trên connection "protected" (tên chứa `prod`). Chọn làm client-side vì nó là chính sách của người dùng trên editor của họ, không phải của server; đánh đổi: TUI không có (TUI đã có "xem rồi mới chạy" cho row-edit nhưng không chặn câu SQL gõ tay).
+- **`K`/`gd`/`<leader>re`:** xem `docs/architecture.md`. `gd` theo FK chỉ chạy được trên kết quả của truy vấn **một bảng** (cùng giới hạn `edit_source` của row-edit trong TUI).
+- **Bug tìm ra nhờ test (đã sửa):** `K` trên `o.user_id` coi `o` là tên bảng nên không tìm thấy gì — alias phải được phân giải từ `FROM`/`JOIN`; test ban đầu không phân biệt được (chỉ một bảng có cột đó), nên thêm ca `u.id` (cả `users` và `orders` đều có `id`) để chứng minh alias được phân giải thật.
+- **Test:** `guard` 23 ca (comment/chuỗi/identifier giả `WHERE`, CTE giấu `DELETE`, ...); smoke headless 10 ca bảo vệ (Cancel không đụng dữ liệu, "Run anyway", connection prod, lô hỏi một lần, `confirm=false`) + 11 ca điều hướng; chạy lại smoke giai đoạn A và cấu hình thật của user, kể cả việc `K`/`gd` giành lại phím sau `on_attach` của LSP.
+
 ## Quyết định thiết kế và lý do
 
 - **JSON-RPC theo dòng, không msgpack-rpc.** Plugin chỉ cần `vim.json` + một pipe, người dùng gõ tay được bằng `socat`.

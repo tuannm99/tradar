@@ -24,3 +24,14 @@ vim.api.nvim_create_autocmd('FileType', {
   group = vim.api.nvim_create_augroup('tradar_sql', { clear = true }),
   callback = function(a) t().attach(a.buf) end,
 })
+
+-- An LSP's own on_attach sets K/gd after FileType; take them back once all
+-- LspAttach handlers have run.
+vim.api.nvim_create_autocmd('LspAttach', {
+  group = vim.api.nvim_create_augroup('tradar_lsp', { clear = true }),
+  callback = function(a)
+    if vim.bo[a.buf].filetype == 'sql' then
+      vim.schedule(function() if vim.api.nvim_buf_is_valid(a.buf) then t().attach_nav(a.buf) end end)
+    end
+  end,
+})

@@ -36,8 +36,11 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Diagnostics: vị trí lỗi vào `vim.diagnostic` — xong (2026-10-04)
 - [x] Huỷ query đang chạy + ping nền (ở plugin) — xong (2026-10-04)
 - [x] Giai đoạn A của plugin (gắn connection theo file, async, kết quả yank/export, statusline, blink source, picker telescope, history, `:checkhealth`) — xong (2026-10-04)
-- [ ] Giai đoạn B: `K` hover (kiểu/PK/FK/index), `gd` trên tên bảng (DDL/cột), `gd` trên ô FK trong kết quả = chạy `SELECT` dòng được tham chiếu, `EXPLAIN` một phím, navigator dạng cây
-- [ ] Giai đoạn C: sửa ô ngay trong kết quả (`edit.sql` → xem → xác nhận), chặn `UPDATE`/`DELETE` thiếu `WHERE`, nhãn `prod` tô viền cảnh báo, filetype riêng cho Mongo/Elasticsearch/Redis
+- [x] Giai đoạn B (trừ navigator cây): `K` hover, `gd` trên tên bảng, `gd` theo FK trong kết quả, `EXPLAIN` một phím — xong (2026-10-04)
+- [ ] Navigator dạng cây (`connection → schema → bảng → cột`) trong Neovim, hiện chỉ có panel phẳng + picker telescope
+- [ ] `gd` theo FK cho kết quả nhiều bảng (JOIN) — cần biết cột đến từ bảng nào, `QueryResult` chưa mang thông tin đó
+- [x] Chặn `UPDATE`/`DELETE` thiếu `WHERE`/`DROP`/`TRUNCATE` + connection "protected" hỏi mọi lệnh ghi + `⚠` trên statusline — xong (2026-10-04)
+- [ ] Giai đoạn C còn lại: sửa ô ngay trong kết quả (`edit.sql` → xem → xác nhận), filetype riêng cho Mongo/Elasticsearch/Redis (guard hiện chỉ hiểu SQL)
 - [ ] Huỷ thật sự phía database (Postgres `pg_cancel_request`, SQLite interrupt) — hiện chỉ bỏ phần chờ
 - [ ] Row-edit trong buffer results (`edit.sql` đã có, chưa có UI Lua)
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response
