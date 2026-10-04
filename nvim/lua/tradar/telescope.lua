@@ -31,7 +31,7 @@ function M.tables(opts)
       finder = t.finders.new_table({
         results = entries,
         entry_maker = function(e)
-          local label = (e.schema and (e.schema .. '.') or '') .. e.name
+          local label = render.qualified(e)
           return {
             value = e,
             ordinal = label,
@@ -50,7 +50,7 @@ function M.tables(opts)
         t.actions.select_default:replace(function()
           local entry = t.state.get_selected_entry()
           t.actions.close(prompt_bufnr)
-          if entry then tradar.insert_text(buf, (entry.value.schema and (entry.value.schema .. '.') or '') .. entry.value.name) end
+          if entry then tradar.insert_text(buf, render.qualified(entry.value)) end
         end)
         map({ 'i', 'n' }, '<C-o>', function()
           local entry = t.state.get_selected_entry()

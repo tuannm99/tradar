@@ -1,6 +1,6 @@
 # Lỗi tìm ra khi chạy với backend thật — 2026-10-04
 
-Toàn bộ smoke test của plugin Neovim ban đầu chạy trên SQLite. Khi chạy tiếp với Postgres 16, ClickHouse 25.8, Dragonfly (giao thức Redis), MongoDB 7 và MySQL thật (qua Docker), phát hiện những lỗi dưới đây — phần lớn nằm sẵn trong driver, không phải trong code mới. Chưa chạy với Elasticsearch và Cassandra (image quá lớn để kéo trong lần này): phần plugin cho chúng (guard, modeline) chỉ có test đơn vị.
+Toàn bộ smoke test của plugin Neovim ban đầu chạy trên SQLite. Khi chạy tiếp với Postgres 16, ClickHouse 25.8, Dragonfly (giao thức Redis), MongoDB 7 và MySQL thật (qua Docker), phát hiện những lỗi dưới đây — phần lớn nằm sẵn trong driver, không phải trong code mới. Elasticsearch 8.15 và Cassandra 5.0 được chạy thật ngay sau đó (cùng ngày, mục "Đợt 2" cuối file).
 
 ## Đã sửa
 
@@ -19,6 +19,19 @@ Toàn bộ smoke test của plugin Neovim ban đầu chạy trên SQLite. Khi ch
 
 ## Chưa làm / biết trước
 
-- Test với Elasticsearch và Cassandra thật.
 - Mongo hiện tên cột theo thứ tự chữ cái, không theo thứ tự trường trong tài liệu.
 - `gd` theo FK trong kết quả nhiều bảng (JOIN) vẫn chưa có.
+
+## Đợt 2 (cùng ngày): Elasticsearch 8.15 + Cassandra 5.0 thật
+
+Chạy plugin với cả hai trong Docker (bộ smoke headless + bộ test của từng crate: ES 43/43 trên ES 7.16.1, Cassandra 14/14).
+
+**Elasticsearch** chạy đúng ở phần lớn: PUT tài liệu (yêu cầu nhiều dòng: dòng động từ + thân JSON), `_search` (mỗi hit một dòng bảng, `_id` đầu), `DELETE /index` và `_delete_by_query` luôn hỏi, `GET /index-không-tồn-tại` báo lỗi 404 thay vì hiện như dữ liệu, thân JSON hỏng bị chặn trước khi gửi, `_cat/indices` (phản hồi văn bản) chạy được, `K` hiện các trường trong mapping. Một lỗi: **sửa/xoá hit không thấy ngay trên lưới** — Elasticsearch chỉ cho tìm thấy một thay đổi sau lần refresh kế (~1 giây) mà UI chạy lại `_search` ngay sau khi sửa, nên lưới hiện giá trị cũ dù bản cập nhật đã ghi (kiểm chứng bằng `curl`: `_version` 2, `year` đã đổi). Sửa: `edit_sql` thêm `?refresh=true` cho cả `_update` lẫn `DELETE` (chỉ câu lệnh sửa dòng; snippet mẫu giữ nguyên); 4 test kỳ vọng chuỗi chính xác được cập nhật.
+
+**Cassandra**: kết nối, `CREATE KEYSPACE/TABLE`, `INSERT`/`SELECT`, vị trí lỗi CQL (gạch chân đúng dòng 2 cột 0), `TRUNCATE` hỏi xác nhận, `K` trên bảng đều chạy. Hai lỗi:
+- **Giá trị phức hợp in theo `Debug` của Rust** (đã ghi trong comment của code như một lựa chọn): `timestamp` hiện `Timestamp(CqlTimestamp(1785804417000))`, `decimal` hiện `Decimal(CqlDecimal { int_val: CqlVarint([4, 226]), scale: 2 })`, `set<text>` hiện `Set([Text("a"), Text("b")])`. Sửa `stringify_cql_value` in như `cqlsh`: `2026-08-04 00:46:57.000+0000`, `12.50`, `{'a', 'b'}`; thêm `varint` lớn tuỳ ý (chia theo 10^9 trên limb 32-bit, không thêm crate), `date`, `time`, `duration`, `counter`, list/set/map/tuple/UDT/vector (chuỗi trong tập hợp đặt trong nháy đơn). Test đơn vị cho từng kiểu, gồm `2^70`, số âm và giá trị thật server trả.
+- **Plugin hiện `demo.demo.users`**: Cassandra báo tên bảng đã gồm keyspace (`demo.users`) *và* trường `schema = demo`. Thêm `render.qualified` (không ghép tiền tố nếu tên đã có sẵn) cho `K`, picker và panel schema.
+
+**Giới hạn còn lại của Cassandra** (không sửa trong đợt này, đã vào roadmap): (1) sửa/xoá dòng báo chỉ-đọc — driver chưa có `edit_source`/`edit_sql`; không thể dùng chung `build_sql_edit` vì CQL cần literal đúng kiểu (uuid và số không có nháy, văn bản có nháy) nên driver phải nhớ kiểu cột từ `list_schema`; (2) completion sau `keyspace.` không gợi ý bảng (tên bảng là `demo.users`, còn từ đang gõ sau dấu chấm là `us`) — hành vi sẵn có của `CompletionSource`, dùng chung với TUI.
+
+**Hạ tầng test (không phải lỗi code, ghi lại để khỏi mất thời gian lần sau):** bộ test ES khởi động nhiều container ES 7.16.1 cùng lúc — với Docker ~10 GB RAM, chạy mặc định làm container chết (`WaitLog(EndOfStream)`); chạy với `-- --test-threads=2`. Test Cassandra cần cổng 9042 trên host, không chạy cùng container Cassandra khác, và vừa gỡ container cũ thì cổng chưa được nhả ngay (chạy lại là qua).

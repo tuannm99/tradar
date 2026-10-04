@@ -94,12 +94,12 @@ fn cassandra_error_marker(message: &str, query: &str) -> Option<String> {
     query_driver::line_and_caret(query, char_index)
 }
 
-/// Turns one cell into display text. Cassandra's CQL types are a closed,
-/// well-known set (unlike Mongo's arbitrary BSON), so the common scalars
-/// get a real conversion; the handful of composite/exotic types (list,
-/// set, map, tuple, UDT, vector, duration, decimal, varint, counter) fall
-/// back to `Debug` -- passthrough rather than inventing a bespoke
-/// serialization, same choice made for Mongo's `Bson::element_type()`.
+/// Turns one cell into display text, the way `cqlsh` prints it: ISO
+/// timestamps, plain decimals, `{a, b}` for a set, `[a, b]` for a list,
+/// `{k: v}` for a map. An earlier version fell back to Rust's `Debug` for
+/// anything composite or exotic, which put `Timestamp(CqlTimestamp(1785804417000))`
+/// and `Decimal(CqlDecimal { int_val: CqlVarint([4, 226]), scale: 2 })` in
+/// the grid -- found by running against a real Cassandra.
 fn stringify_cql_value(value: &CqlValue) -> String {
     match value {
         CqlValue::Ascii(s) | CqlValue::Text(s) => s.clone(),
@@ -108,15 +108,192 @@ fn stringify_cql_value(value: &CqlValue) -> String {
         CqlValue::SmallInt(n) => n.to_string(),
         CqlValue::Int(n) => n.to_string(),
         CqlValue::BigInt(n) => n.to_string(),
+        CqlValue::Counter(c) => c.0.to_string(),
         CqlValue::Float(n) => n.to_string(),
         CqlValue::Double(n) => n.to_string(),
         CqlValue::Uuid(u) => u.to_string(),
         CqlValue::Timeuuid(u) => u.to_string(),
         CqlValue::Inet(ip) => ip.to_string(),
         CqlValue::Blob(bytes) => format!("<blob {} bytes>", bytes.len()),
+        CqlValue::Varint(v) => signed_be_to_decimal(v.as_signed_bytes_be_slice()),
+        CqlValue::Decimal(d) => {
+            let (bytes, scale) = d.as_signed_be_bytes_slice_and_exponent();
+            format_decimal(&signed_be_to_decimal(bytes), scale)
+        }
+        CqlValue::Timestamp(t) => format_timestamp_ms(t.0),
+        CqlValue::Date(d) => {
+            let (y, m, day) = civil_from_days(i64::from(d.0) - (1i64 << 31));
+            format!("{y:04}-{m:02}-{day:02}")
+        }
+        CqlValue::Time(t) => {
+            let ns = t.0.max(0);
+            let secs = ns / 1_000_000_000;
+            format!(
+                "{:02}:{:02}:{:02}.{:09}",
+                secs / 3600,
+                secs / 60 % 60,
+                secs % 60,
+                ns % 1_000_000_000
+            )
+        }
+        CqlValue::Duration(d) => format!("{}mo{}d{}ns", d.months, d.days, d.nanoseconds),
+        CqlValue::List(items) | CqlValue::Vector(items) => {
+            format!("[{}]", join_nested(items.iter()))
+        }
+        CqlValue::Set(items) => format!("{{{}}}", join_nested(items.iter())),
+        CqlValue::Map(pairs) => {
+            let body: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| format!("{}: {}", nested(k), nested(v)))
+                .collect();
+            format!("{{{}}}", body.join(", "))
+        }
+        CqlValue::Tuple(items) => {
+            let body: Vec<String> = items
+                .iter()
+                .map(|v| v.as_ref().map_or("NULL".to_string(), nested))
+                .collect();
+            format!("({})", body.join(", "))
+        }
+        CqlValue::UserDefinedType { fields, .. } => {
+            let body: Vec<String> = fields
+                .iter()
+                .map(|(name, v)| {
+                    format!("{name}: {}", v.as_ref().map_or("NULL".to_string(), nested))
+                })
+                .collect();
+            format!("{{{}}}", body.join(", "))
+        }
         CqlValue::Empty => String::new(),
+        // `CqlValue` is non-exhaustive across driver releases; a variant
+        // added later still shows something rather than failing to build.
+        #[allow(unreachable_patterns)]
         other => format!("{other:?}"),
     }
+}
+
+/// A value inside a collection: text is single-quoted (`'a'`), as `cqlsh`
+/// does, so `{'a, b'}` and `{'a', 'b'}` stay distinguishable.
+fn nested(value: &CqlValue) -> String {
+    match value {
+        CqlValue::Ascii(s) | CqlValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        other => stringify_cql_value(other),
+    }
+}
+
+fn join_nested<'a>(items: impl Iterator<Item = &'a CqlValue>) -> String {
+    items.map(nested).collect::<Vec<_>>().join(", ")
+}
+
+/// A two's-complement big-endian integer of any width as decimal text --
+/// what a CQL `varint`, and the unscaled part of a `decimal`, are on the
+/// wire. Repeated division by 10^9 over base-2^32 limbs; no bignum crate.
+fn signed_be_to_decimal(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "0".to_string();
+    }
+    let negative = bytes[0] & 0x80 != 0;
+    let mut magnitude: Vec<u8> = bytes.to_vec();
+    if negative {
+        // Two's complement -> magnitude: invert, then add one.
+        for b in magnitude.iter_mut() {
+            *b = !*b;
+        }
+        for b in magnitude.iter_mut().rev() {
+            let (sum, carry) = b.overflowing_add(1);
+            *b = sum;
+            if !carry {
+                break;
+            }
+        }
+    }
+    // Limbs, most significant first.
+    let mut limbs: Vec<u32> = Vec::new();
+    for chunk in magnitude.rchunks(4).collect::<Vec<_>>().into_iter().rev() {
+        let mut limb = 0u32;
+        for &b in chunk {
+            limb = (limb << 8) | u32::from(b);
+        }
+        limbs.push(limb);
+    }
+    let mut groups: Vec<u32> = Vec::new();
+    while limbs.iter().any(|&l| l != 0) {
+        let mut remainder = 0u64;
+        for limb in limbs.iter_mut() {
+            let cur = (remainder << 32) | u64::from(*limb);
+            *limb = (cur / 1_000_000_000) as u32;
+            remainder = cur % 1_000_000_000;
+        }
+        groups.push(remainder as u32);
+    }
+    let mut out = String::new();
+    if negative && !groups.is_empty() {
+        out.push('-');
+    }
+    match groups.split_last() {
+        None => return "0".to_string(),
+        Some((top, rest)) => {
+            out.push_str(&top.to_string());
+            for g in rest.iter().rev() {
+                out.push_str(&format!("{g:09}"));
+            }
+        }
+    }
+    out
+}
+
+/// `unscaled` (decimal text, maybe negative) with `scale` digits after the
+/// point; a negative scale means trailing zeros.
+fn format_decimal(unscaled: &str, scale: i32) -> String {
+    let (sign, digits) = match unscaled.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", unscaled),
+    };
+    if scale <= 0 {
+        let zeros = "0".repeat(scale.unsigned_abs() as usize);
+        return if digits == "0" {
+            "0".to_string()
+        } else {
+            format!("{sign}{digits}{zeros}")
+        };
+    }
+    let scale = scale as usize;
+    let padded = if digits.len() <= scale {
+        format!("{}{digits}", "0".repeat(scale - digits.len() + 1))
+    } else {
+        digits.to_string()
+    };
+    let (int_part, frac_part) = padded.split_at(padded.len() - scale);
+    format!("{sign}{int_part}.{frac_part}")
+}
+
+/// Days since 1970-01-01 -> (year, month, day), proleptic Gregorian
+/// (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// A CQL `timestamp` (ms since the epoch) as `cqlsh` prints it, in UTC.
+fn format_timestamp_ms(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    let in_day = ms.rem_euclid(86_400_000);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}.{:03}+0000",
+        in_day / 3_600_000,
+        in_day / 60_000 % 60,
+        in_day / 1_000 % 60,
+        in_day % 1_000
+    )
 }
 
 fn stringify_row(row: &Row) -> Vec<String> {
@@ -360,6 +537,81 @@ pub fn connector() -> Box<dyn Connector> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn varint_and_decimal_read_as_the_number_they_hold() {
+        // 1250 = 0x04E2, scale 2 -> 12.50 (the bytes a real Cassandra sent).
+        assert_eq!(signed_be_to_decimal(&[4, 226]), "1250");
+        assert_eq!(format_decimal("1250", 2), "12.50");
+        assert_eq!(signed_be_to_decimal(&[0]), "0");
+        assert_eq!(signed_be_to_decimal(&[127]), "127");
+        assert_eq!(signed_be_to_decimal(&[0, 128]), "128");
+        assert_eq!(signed_be_to_decimal(&[255]), "-1");
+        assert_eq!(signed_be_to_decimal(&[255, 127]), "-129");
+        assert_eq!(signed_be_to_decimal(&[128]), "-128");
+        // 2^70 needs more than a machine word.
+        assert_eq!(
+            signed_be_to_decimal(&[0x40, 0, 0, 0, 0, 0, 0, 0, 0]),
+            "1180591620717411303424"
+        );
+        assert_eq!(format_decimal("5", 3), "0.005");
+        assert_eq!(format_decimal("-5", 3), "-0.005");
+        assert_eq!(format_decimal("123", 0), "123");
+        assert_eq!(format_decimal("12", -3), "12000");
+        assert_eq!(format_decimal("0", -2), "0");
+    }
+
+    #[test]
+    fn timestamps_dates_and_times_read_as_calendar_text() {
+        use scylla::value::{CqlDate, CqlTime, CqlTimestamp};
+        // The value a real Cassandra returned for '2026-08-04 00:46:57+0000'.
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Timestamp(CqlTimestamp(1_785_804_417_000))),
+            "2026-08-04 00:46:57.000+0000"
+        );
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Timestamp(CqlTimestamp(0))),
+            "1970-01-01 00:00:00.000+0000"
+        );
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Timestamp(CqlTimestamp(-1))),
+            "1969-12-31 23:59:59.999+0000"
+        );
+        // 2^31 days is the epoch in CQL's `date` encoding.
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Date(CqlDate((1u32 << 31) + 20_669))),
+            "2026-08-04"
+        );
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Time(CqlTime(3_723_000_000_456))),
+            "01:02:03.000000456"
+        );
+    }
+
+    #[test]
+    fn collections_read_the_way_cqlsh_prints_them() {
+        let text = |s: &str| CqlValue::Text(s.to_string());
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Set(vec![text("a"), text("b")])),
+            "{'a', 'b'}"
+        );
+        assert_eq!(
+            stringify_cql_value(&CqlValue::List(vec![CqlValue::Int(1), CqlValue::Int(2)])),
+            "[1, 2]"
+        );
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Map(vec![(text("k"), CqlValue::Int(1))])),
+            "{'k': 1}"
+        );
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Tuple(vec![Some(CqlValue::Int(1)), None])),
+            "(1, NULL)"
+        );
+        assert_eq!(
+            stringify_cql_value(&CqlValue::Set(vec![text("it's")])),
+            "{'it''s'}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -422,15 +674,6 @@ mod tests {
             stringify_row(&row),
             vec!["1".to_string(), "NULL".to_string()]
         );
-    }
-
-    #[test]
-    fn an_exotic_variant_falls_back_to_debug_rather_than_erroring() {
-        let value = CqlValue::List(vec![CqlValue::Int(1), CqlValue::Int(2)]);
-
-        // Not asserting the exact Debug text (that's scylla's concern, not
-        // ours) -- just that it doesn't panic and produces *something*.
-        assert!(!stringify_cql_value(&value).is_empty());
     }
 
     #[test]

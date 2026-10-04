@@ -431,6 +431,12 @@ impl QueryDriver for ElasticsearchDriver {
     /// own, so a flat `{"customer.name": v}` would create a spurious
     /// top-level field literally named `"customer.name"` instead of
     /// reaching the real nested field).
+    ///
+    /// Both statements carry `?refresh=true`: Elasticsearch makes a write
+    /// searchable only on its next refresh (about a second), and the UI
+    /// re-runs the original `_search` right after an edit -- without this it
+    /// would show the old value for a change that had in fact been applied
+    /// (found by editing a hit against a real cluster).
     fn edit_sql(&self, edit: &query_driver::RowEdit) -> Option<String> {
         let index = &edit.table;
         let id = edit.key.iter().find(|(k, _)| k == "_id")?.1.as_str();
@@ -439,11 +445,13 @@ impl QueryDriver for ElasticsearchDriver {
                 let doc = nest_dotted_path(column, es_infer_value(value));
                 let body = serde_json::json!({ "doc": doc });
                 format!(
-                    "POST {index}/_update/{id}\n{}",
+                    "POST {index}/_update/{id}?refresh=true\n{}",
                     serde_json::to_string_pretty(&body).unwrap_or_default()
                 )
             }
-            query_driver::RowChange::DeleteRow => format!("DELETE {index}/_doc/{id}"),
+            query_driver::RowChange::DeleteRow => {
+                format!("DELETE {index}/_doc/{id}?refresh=true")
+            }
         })
     }
 
@@ -904,7 +912,7 @@ mod tests {
 
         assert_eq!(
             driver.edit_sql(&edit),
-            Some("DELETE my-index/_doc/abc123".to_string())
+            Some("DELETE my-index/_doc/abc123?refresh=true".to_string())
         );
     }
 
@@ -922,12 +930,15 @@ mod tests {
 
         assert_eq!(
             driver.edit_sql(&edit_for("42")),
-            Some("POST my-index/_update/1\n{\n  \"doc\": {\n    \"views\": 42\n  }\n}".to_string())
+            Some(
+                "POST my-index/_update/1?refresh=true\n{\n  \"doc\": {\n    \"views\": 42\n  }\n}"
+                    .to_string()
+            )
         );
         assert_eq!(
             driver.edit_sql(&edit_for("Ada")),
             Some(
-                "POST my-index/_update/1\n{\n  \"doc\": {\n    \"views\": \"Ada\"\n  }\n}"
+                "POST my-index/_update/1?refresh=true\n{\n  \"doc\": {\n    \"views\": \"Ada\"\n  }\n}"
                     .to_string()
             )
         );
@@ -952,7 +963,7 @@ mod tests {
         assert_eq!(
             driver.edit_sql(&edit),
             Some(
-                "POST my-index/_update/1\n{\n  \"doc\": {\n    \"customer\": {\n      \"name\": \"Ada\"\n    }\n  }\n}"
+                "POST my-index/_update/1?refresh=true\n{\n  \"doc\": {\n    \"customer\": {\n      \"name\": \"Ada\"\n    }\n  }\n}"
                     .to_string()
             )
         );

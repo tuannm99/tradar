@@ -1,6 +1,15 @@
 -- Result pages <-> text. Pure functions: no buffers, no server.
 local M = {}
 
+--- `schema.name`, unless the driver already put the schema in the name
+--- (Cassandra reports `demo.users` *and* keyspace `demo`) -- no `demo.demo.users`.
+function M.qualified(entry)
+  if entry.schema and entry.name:sub(1, #entry.schema + 1) ~= entry.schema .. '.' then
+    return entry.schema .. '.' .. entry.name
+  end
+  return entry.name
+end
+
 local SEP = ' │ '
 local SEP_WIDTH = 3
 
@@ -158,8 +167,7 @@ end
 
 --- One table and its columns, for a picker preview.
 function M.entry(entry)
-  local prefix = entry.schema and (entry.schema .. '.') or ''
-  local lines = { prefix .. entry.name .. (entry.object_kind and ('  [' .. entry.object_kind .. ']') or '') }
+  local lines = { M.qualified(entry) .. (entry.object_kind and ('  [' .. entry.object_kind .. ']') or '') }
   if entry.kind then lines[1] = lines[1] .. '  (' .. entry.kind .. ')' end
   lines[#lines + 1] = ''
   for _, col in ipairs(entry.columns or {}) do
@@ -175,9 +183,8 @@ end
 function M.schema(entries)
   local lines, targets = {}, {}
   for _, entry in ipairs(entries) do
-    local prefix = entry.schema and (entry.schema .. '.') or ''
-    lines[#lines + 1] = prefix .. entry.name .. (entry.object_kind and ('  [' .. entry.object_kind .. ']') or '')
-    targets[#lines] = prefix .. entry.name
+    lines[#lines + 1] = M.qualified(entry) .. (entry.object_kind and ('  [' .. entry.object_kind .. ']') or '')
+    targets[#lines] = M.qualified(entry)
     for _, col in ipairs(entry.columns or {}) do
       local marks = (col.primary_key and ' pk' or '') .. (col.indexed and ' idx' or '')
       local fk = col.foreign_key and (' → ' .. col.foreign_key.table .. '.' .. col.foreign_key.column) or ''
