@@ -62,7 +62,9 @@ end
 
 local function modeline(buf)
   for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, 10, false)) do
-    local name = line:match('^%s*%-%-%s*tradar:%s*(.-)%s*$') or line:match('^%s*//%s*tradar:%s*(.-)%s*$')
+    local name = line:match('^%s*%-%-%s*tradar:%s*(.-)%s*$')
+      or line:match('^%s*//%s*tradar:%s*(.-)%s*$')
+      or line:match('^%s*#%s*tradar:%s*(.-)%s*$')
     if name and name ~= '' then return name end
   end
 end
@@ -84,6 +86,16 @@ end
 function M.connection_for(buf)
   buf = resolve_buf(buf)
   return vim.b[buf].tradar_connection or modeline(buf) or project_file(buf) or state.default
+end
+
+--- `cb(driver_id)` for a connection ("sqlite", "postgres", ...); cached.
+local function driver_of(conn, cb)
+  if state.drivers then return cb(state.drivers[conn]) end
+  call('connections.list', nil, function(list)
+    state.drivers = {}
+    for _, c in ipairs(list) do state.drivers[c.name] = c.driver end
+    cb(state.drivers[conn])
+  end)
 end
 
 --- Whether the server has confirmed a connection (not merely a binding).
@@ -127,8 +139,7 @@ end
 --- while a query runs, `✗` when the connection stopped answering. Empty off
 --- SQL/tradar buffers so it costs a statusline nothing there.
 function M.status()
-  local bo = vim.bo
-  local in_tradar = bo.filetype == 'sql' or vim.api.nvim_buf_get_name(0):find('^tradar://') ~= nil
+  local in_tradar = vim.b.tradar_attached or vim.api.nvim_buf_get_name(0):find('^tradar://') ~= nil
   if not in_tradar and not state.running then return '' end
   local conn = (state.running and state.running.conn) or M.connection_for(0)
   if not conn then return '' end
@@ -247,6 +258,14 @@ local function results_title(r)
   return text
 end
 
+--- The grid behind a result as `columns, rows` of strings -- a SQL table, or
+--- documents shown as a table -- or nil when it is raw JSON (or not rows).
+local function tabular(r)
+  if not r then return nil end
+  if r.kind == 'table' then return r.columns, r.rows end
+  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.trows end
+end
+
 local attach_results
 
 local function paint_results()
@@ -255,6 +274,9 @@ local function paint_results()
   local lines
   if r.kind == 'table' then
     lines, r.spans = render.table(r.columns, r.rows)
+  elseif r.view == 'table' then
+    r.tcols, r.trows = render.flatten(r.rows)
+    lines, r.spans = render.table(r.tcols, r.trows)
   else
     lines = render.documents(r.rows)
   end
@@ -275,6 +297,18 @@ local function show_message(text, height)
   show(buf, height or 6)
 end
 
+--- Documents are a table when they are *objects* (Mongo, Elasticsearch);
+--- plain replies (a Redis string, a list of numbers) stay as JSON lines --
+--- a one-column table of `value` adds nothing. `setup{ documents_view }`
+--- forces either.
+local function default_view(items)
+  if opts.documents_view then return opts.documents_view end
+  for _, item in ipairs(items) do
+    if type(item) == 'table' and not vim.islist(item) then return 'table' end
+  end
+  return 'json'
+end
+
 local function show_result(r, meta)
   local buf = scratch('tradar://results', state.results_buf)
   state.results_buf = buf
@@ -287,11 +321,20 @@ local function show_result(r, meta)
   state.result = {
     id = r.cursor, total = r.total, shown = #r.rows, kind = r.kind,
     columns = r.columns, rows = r.rows, truncated = r.truncated, fetching = false,
+    view = r.kind == 'documents' and default_view(r.rows) or nil,
     conn = meta and meta.conn, query = meta and meta.query,
   }
   paint_results()
   local win = show(buf)
   pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+end
+
+--- `gT`: documents as a table (editable, flat columns) or raw JSON.
+function M.toggle_view()
+  local r = state.result
+  if not r or r.kind ~= 'documents' then return notify('only document results have two views') end
+  r.view = r.view == 'table' and 'json' or 'table'
+  paint_results()
 end
 
 --- Appends the next page. Called by scrolling to the bottom and by
@@ -338,21 +381,25 @@ end
 --- Row index and column index under the results cursor (nil off the grid).
 local function cell_at()
   local r = state.result
-  if not r or r.kind ~= 'table' then return nil end
+  local cols, rows = tabular(r)
+  if not cols then return nil end
   local row = vim.api.nvim_win_get_cursor(0)[1] - 2
-  if row < 1 or row > #r.rows then return nil end
+  if row < 1 or row > #rows then return nil end
   return row, render.column_at(r.spans, vim.fn.virtcol('.'))
 end
 
 local function export_text(fmt, r)
+  local columns, rows = r.columns, r.rows
   if r.kind == 'documents' then
+    -- Documents keep their real structure as JSON; the flat formats use the
+    -- same flattened columns as the table view.
     if fmt == 'json' then return vim.json.encode(r.rows) .. '\n' end
-    return nil, 'documents can only be exported as json'
+    columns, rows = render.flatten(r.rows)
   end
-  if fmt == 'csv' then return render.csv(r.columns, r.rows) end
-  if fmt == 'json' then return render.json(r.columns, r.rows) end
-  if fmt == 'md' or fmt == 'markdown' then return render.markdown(r.columns, r.rows) end
-  if fmt == 'tsv' then return render.tsv(r.columns, r.rows, true) .. '\n' end
+  if fmt == 'csv' then return render.csv(columns, rows) end
+  if fmt == 'json' then return render.json(columns, rows) end
+  if fmt == 'md' or fmt == 'markdown' then return render.markdown(columns, rows) end
+  if fmt == 'tsv' then return render.tsv(columns, rows, true) .. '\n' end
   return nil, 'unknown format `' .. tostring(fmt) .. '` (csv, json, md, tsv)'
 end
 
@@ -392,31 +439,36 @@ attach_results = function(buf)
   map('n', 'gyc', function()
     local row, col = cell_at()
     if not row then return end
-    yank(tostring(state.result.rows[row][col] or ''), 'cell')
+    local _, rows = tabular(state.result)
+    yank(tostring(rows[row][col] or ''), 'cell')
   end, 'yank cell')
   map('n', 'gyr', function()
     local row = cell_at()
     if not row then return end
-    yank(render.tsv(state.result.columns, { state.result.rows[row] }, false), 'row')
+    local cols, rows = tabular(state.result)
+    yank(render.tsv(cols, { rows[row] }, false), 'row')
   end, 'yank row (tab-separated)')
   map('x', 'gyr', function()
     local a, b = vim.fn.line('v') - 2, vim.fn.line('.') - 2
     if a > b then a, b = b, a end
+    local cols, all = tabular(state.result)
     local rows = {}
-    for i = math.max(a, 1), math.min(b, #(state.result and state.result.rows or {})) do rows[#rows + 1] = state.result.rows[i] end
+    for i = math.max(a, 1), math.min(b, #(all or {})) do rows[#rows + 1] = all[i] end
     vim.api.nvim_feedkeys(vim.keycode('<Esc>'), 'nx', false)
-    if #rows > 0 then yank(render.tsv(state.result.columns, rows, false), #rows .. ' rows') end
+    if #rows > 0 then yank(render.tsv(cols, rows, false), #rows .. ' rows') end
   end, 'yank selected rows (tab-separated)')
   map('n', 'gyC', function()
     local _, col = cell_at()
     if not col then return end
+    local cols, rows = tabular(state.result)
     local values = {}
-    for _, row in ipairs(state.result.rows) do values[#values + 1] = tostring(row[col] or '') end
-    yank(table.concat(values, '\n'), 'column ' .. state.result.columns[col])
+    for _, row in ipairs(rows) do values[#values + 1] = tostring(row[col] or '') end
+    yank(table.concat(values, '\n'), 'column ' .. cols[col])
   end, 'yank column')
   map('n', 'gyj', function() M.yank_all('json') end, 'yank all as JSON')
   map('n', 'gyv', function() M.yank_all('csv') end, 'yank all as CSV')
   map('n', 'gym', function() M.yank_all('md') end, 'yank all as Markdown table')
+  map('n', 'gT', function() M.toggle_view() end, 'documents: table <-> JSON')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
   map('n', 'i', function() M.edit_cell() end, 'edit this cell (shows the UPDATE first)')
   map('n', 'dd', function() M.delete_row() end, 'delete this row (shows the DELETE first)')
@@ -483,18 +535,20 @@ local function run_text(buf, text, base_row, base_col, flags)
   end
   state.sql_buf = buf
 
-  local reason = not flags.confirmed and opts.confirm ~= false and guard.assess(text, M.is_protected(conn))
-  if reason then
-    local first = guard.first_code_line(text)
-    -- "Cancel" is first so a reflexive <CR> is the safe answer.
-    vim.ui.select({ 'Cancel', 'Run anyway' }, {
-      prompt = ('tradar [%s]: %s\n  %s'):format(conn, reason, first:sub(1, 70)),
-    }, function(choice)
-      if choice == 'Run anyway' then
-        run_text(buf, text, base_row, base_col, vim.tbl_extend('force', flags, { confirmed = true }))
-      end
+  if not flags.confirmed and opts.confirm ~= false then
+    local confirmed_flags = vim.tbl_extend('force', flags, { confirmed = true })
+    local protected = M.is_protected(conn)
+    return driver_of(conn, function(driver)
+      local reason = guard.assess(text, protected, driver)
+      if not reason then return run_text(buf, text, base_row, base_col, confirmed_flags) end
+      local first = guard.first_code_line(text)
+      -- "Cancel" is first so a reflexive <CR> is the safe answer.
+      vim.ui.select({ 'Cancel', 'Run anyway' }, {
+        prompt = ('tradar [%s]: %s\n  %s'):format(conn, reason, first:sub(1, 70)),
+      }, function(choice)
+        if choice == 'Run anyway' then run_text(buf, text, base_row, base_col, confirmed_flags) end
+      end)
     end)
-    return
   end
 
   ensure_connected(conn, function()
@@ -555,19 +609,15 @@ function M.run(range_start, range_end, all, transform)
   local text = table.concat(lines, '\n')
   ensure_connected(conn, function()
     call('split', { connection = conn, text = text }, function(statements)
+      -- The binding comment (`-- tradar: x`) can come back as a statement of
+      -- its own; it is not something to run.
+      statements = vim.tbl_filter(function(st) return not guard.is_comment_only(st.text) end, statements)
       if #statements == 0 then return notify('nothing to run', vim.log.levels.WARN) end
       local function position(s)
         local row, col = offset_to_pos(lines, s.start)
         return row, col
       end
       if all then
-        -- One question for the whole batch, not one per statement.
-        local risky = {}
-        for _, st in ipairs(statements) do
-          local why = opts.confirm ~= false and guard.assess(st.text, M.is_protected(conn))
-          if why then risky[#risky + 1] = why end
-        end
-
         local function go()
           -- Sequentially: each run starts when the previous one finished,
           -- and the batch stops at the first error or cancel.
@@ -590,11 +640,21 @@ function M.run(range_start, range_end, all, transform)
           next_statement()
         end
 
-        if #risky == 0 then return go() end
-        vim.ui.select({ 'Cancel', 'Run all' }, {
-          prompt = ('tradar [%s]: %d of %d statements need a second look\n  %s'):format(
-            conn, #risky, #statements, table.concat(risky, '; '):sub(1, 90)),
-        }, function(choice) if choice == 'Run all' then go() end end)
+        -- One question for the whole batch, not one per statement. The
+        -- driver is needed first: Mongo/Redis/Elasticsearch have their own
+        -- notion of "risky", and the lookup is async the first time.
+        driver_of(conn, function(driver)
+          local risky = {}
+          for _, st in ipairs(statements) do
+            local why = opts.confirm ~= false and guard.assess(st.text, M.is_protected(conn), driver)
+            if why then risky[#risky + 1] = why end
+          end
+          if #risky == 0 then return go() end
+          vim.ui.select({ 'Cancel', 'Run all' }, {
+            prompt = ('tradar [%s]: %d of %d statements need a second look\n  %s'):format(
+              conn, #risky, #statements, table.concat(risky, '; '):sub(1, 90)),
+          }, function(choice) if choice == 'Run all' then go() end end)
+        end)
         return
       end
       local row, col = unpack(vim.api.nvim_win_get_cursor(0))
@@ -694,16 +754,6 @@ function M.schema()
 end
 
 -- ── schema-aware navigation: hover, go-to, follow a foreign key ──────────
-
---- `cb(driver_id)` for a connection ("sqlite", "postgres", ...); cached.
-local function driver_of(conn, cb)
-  if state.drivers then return cb(state.drivers[conn]) end
-  call('connections.list', nil, function(list)
-    state.drivers = {}
-    for _, c in ipairs(list) do state.drivers[c.name] = c.driver end
-    cb(state.drivers[conn])
-  end)
-end
 
 --- Schema for `conn`, cached for a minute and dropped when a DDL statement
 --- runs from here -- hover must feel instant, and schemas rarely move.
@@ -855,7 +905,8 @@ function M.follow_fk()
   local r = state.result
   local row, col = cell_at()
   if not (r and r.conn and row) then return notify('put the cursor on a cell of a table result', vim.log.levels.WARN) end
-  local name, value = r.columns[col], r.rows[row][col]
+  local cols, rows = tabular(r)
+  local name, value = cols[col], rows[row][col]
   call('edit.source', { connection = r.conn, query = r.query }, function(src)
     if not src.table then
       return notify('cannot tell which table these rows come from (only single-table SELECTs)', vim.log.levels.WARN)
@@ -903,15 +954,16 @@ local function edit_target(cb)
         return notify(('read-only: `%s` has no primary key, so a row cannot be addressed'):format(src.table), vim.log.levels.WARN)
       end
       local key = {}
+      local cols, rows = tabular(r)
       for _, k in ipairs(keys) do
         local idx
-        for i, c in ipairs(r.columns) do
+        for i, c in ipairs(cols) do
           if c:lower() == k:lower() then idx = i break end
         end
         if not idx then
           return notify(('the key column `%s` is not in this result — select it too'):format(k), vim.log.levels.WARN)
         end
-        local v = r.rows[row][idx]
+        local v = rows[row][idx]
         if v == nil or v == 'NULL' then
           return notify(('cannot address the row: key `%s` is NULL'):format(k), vim.log.levels.WARN)
         end
@@ -966,7 +1018,8 @@ end
 --- grid shows it), see the `UPDATE`, confirm.
 function M.edit_cell()
   edit_target(function(r, row, col, src, key)
-    local column, current = r.columns[col], r.rows[row][col]
+    local cols, rows = tabular(r)
+    local column, current = cols[col], rows[row][col]
     vim.ui.input({ prompt = ('%s.%s = '):format(src.table, column), default = current }, function(value)
       if value == nil then return end
       if value == current then return notify('unchanged') end
@@ -992,7 +1045,14 @@ function M.explain()
   local conn = M.connection_for(0)
   if not conn then return M.connect(nil, M.explain) end
   driver_of(conn, function(driver)
-    local prefix = driver == 'sqlite' and 'EXPLAIN QUERY PLAN ' or 'EXPLAIN '
+    -- `EXPLAIN <statement>` is SQL; Mongo/Redis/Elasticsearch have no such prefix.
+    local prefixes = {
+      postgres = 'EXPLAIN ', mysql = 'EXPLAIN ', clickhouse = 'EXPLAIN ', sqlite = 'EXPLAIN QUERY PLAN ',
+    }
+    local prefix = prefixes[driver]
+    if not prefix then
+      return notify(('EXPLAIN is only available for SQL connections (this one is %s)'):format(driver or 'unknown'), vim.log.levels.WARN)
+    end
     M.run(nil, nil, false, function(text) return prefix .. text end)
   end)
 end
@@ -1029,10 +1089,12 @@ end
 
 -- ── buffer setup ─────────────────────────────────────────────────────────
 
---- Called for every SQL buffer: keymaps, omnifunc, and a quiet background
+--- Called for every SQL buffer (and any other buffer that names a connection
+--- in a `-- tradar: name` / `// tradar: name` / `# tradar: name` line): keymaps, omnifunc, and a quiet background
 --- connect so the first completion/run has nothing to wait for.
 function M.attach(buf)
   buf = resolve_buf(buf)
+  vim.b[buf].tradar_attached = true
   vim.bo[buf].omnifunc = "v:lua.require'tradar'.omnifunc"
   if opts.keymaps ~= false then
     local p = opts.prefix or '<leader>r'
@@ -1073,11 +1135,19 @@ function M.attach_nav(buf)
   vim.keymap.set('n', 'gd', M.goto_table, { buffer = buf, desc = 'tradar: open table under cursor' })
 end
 
+--- Attaches `buf` if it is SQL or declares a connection in its first lines --
+--- how a Mongo (`.mongo`), Redis, Elasticsearch or any other file opts in.
+function M.maybe_attach(buf)
+  buf = resolve_buf(buf)
+  if vim.b[buf].tradar_attached then return end
+  if vim.bo[buf].filetype == 'sql' or modeline(buf) then M.attach(buf) end
+end
+
 function M.setup(user)
   opts = user or {}
   local ok, wk = pcall(require, 'which-key')
   if ok and wk.add then wk.add({ { opts.prefix or '<leader>r', group = 'database (tradar)' } }) end
-  if vim.bo.filetype == 'sql' then M.attach(0) end
+  M.maybe_attach(0)
 end
 
 return M

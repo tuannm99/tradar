@@ -87,7 +87,7 @@ fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
         let args_text = &after_paren[..close];
         let args = split_top_level_args(args_text)?
             .into_iter()
-            .map(|arg| serde_json::from_str(arg.trim()))
+            .map(|arg| serde_json::from_str(&relax_json(arg.trim())))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("invalid JSON argument: {e}"))?;
         calls.push(MethodCall { name, args });
@@ -114,21 +114,21 @@ fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
 /// call to find the end of.
 fn find_matching_close_paren(text: &str) -> Option<usize> {
     let mut depth = 0i32;
-    let mut in_string = false;
+    let mut quote: Option<char> = None;
     let mut escaped = false;
     for (i, c) in text.char_indices() {
-        if in_string {
+        if let Some(open) = quote {
             if escaped {
                 escaped = false;
             } else if c == '\\' {
                 escaped = true;
-            } else if c == '"' {
-                in_string = false;
+            } else if c == open {
+                quote = None;
             }
             continue;
         }
         match c {
-            '"' => in_string = true,
+            '"' | '\'' => quote = Some(c),
             '(' | '{' | '[' => depth += 1,
             ')' if depth == 0 => return Some(i),
             ')' | '}' | ']' => depth -= 1,
@@ -136,6 +136,161 @@ fn find_matching_close_paren(text: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Turns the mongosh-style object literal people actually type -- unquoted
+/// keys, single-quoted strings, a trailing comma -- into strict JSON, which
+/// is all `serde_json` accepts: `{name: 'ann', tags: ['a', 'b',],}` becomes
+/// `{"name": "ann", "tags": ["a", "b"]}`. Strict JSON passes through
+/// unchanged, so this is safe to apply to every argument.
+///
+/// Also understands the handful of shell constructors people paste from
+/// `mongosh` output -- `ObjectId("..")`, `ISODate("..")`, `NumberLong(..)`,
+/// `NumberInt(..)`, `NumberDecimal("..")` -- as their Extended JSON form
+/// (`{"$oid": ".."}`, ...), which is what the BSON conversion downstream
+/// reads. This is also what makes the driver's own row edit work: the
+/// results grid shows an id as `ObjectId("..")` and `edit_sql` writes that
+/// same text back into the `updateOne`/`deleteOne` filter.
+///
+/// Deliberately small: no `//` comments, no dotted unquoted keys (`a.b: 1`
+/// is not valid JavaScript either -- quote it).
+fn relax_json(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len() + 8);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '"' => {
+                // A double-quoted string is already JSON: copy it as it is.
+                out.push(c);
+                i += 1;
+                while i < chars.len() {
+                    out.push(chars[i]);
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                        out.push(chars[i]);
+                    } else if chars[i] == '"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            '\'' => {
+                out.push('"');
+                i += 1;
+                while i < chars.len() {
+                    match chars[i] {
+                        '\\' if i + 1 < chars.len() => {
+                            if chars[i + 1] == '\'' {
+                                out.push('\'');
+                            } else {
+                                out.push('\\');
+                                out.push(chars[i + 1]);
+                            }
+                            i += 2;
+                        }
+                        '\'' => {
+                            i += 1;
+                            break;
+                        }
+                        '"' => {
+                            out.push_str("\\\"");
+                            i += 1;
+                        }
+                        other => {
+                            out.push(other);
+                            i += 1;
+                        }
+                    }
+                }
+                out.push('"');
+            }
+            c if c.is_alphabetic() || c == '_' || c == '$' => {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+                {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                if let Some((json, end)) = constructor_call(&word, &chars, i) {
+                    out.push_str(&json);
+                    i = end;
+                    continue;
+                }
+                // A key is a bare word right after `{` or `,` and right
+                // before `:` -- `true`/`null`/`$gt`-as-a-value stay as written.
+                let prev = out.chars().rev().find(|c| !c.is_whitespace());
+                let next = chars[i..].iter().find(|c| !c.is_whitespace());
+                if matches!(prev, Some('{') | Some(',')) && next == Some(&':') {
+                    out.push('"');
+                    out.push_str(&word);
+                    out.push('"');
+                } else {
+                    out.push_str(&word);
+                }
+            }
+            ',' => {
+                // A trailing comma before `}`/`]` is not JSON.
+                let next = chars[i + 1..].iter().find(|c| !c.is_whitespace());
+                if !matches!(next, Some('}') | Some(']')) {
+                    out.push(',');
+                }
+                i += 1;
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `ObjectId("..")`-style shell constructors as Extended JSON. `at` is the
+/// index just past the constructor's name; returns the replacement and the
+/// index just past the closing paren, or `None` when `word` is not one of the
+/// known constructors or its call is not a single plain literal.
+fn constructor_call(word: &str, chars: &[char], at: usize) -> Option<(String, usize)> {
+    let key = match word {
+        "ObjectId" => Some("$oid"),
+        "ISODate" => Some("$date"),
+        "NumberLong" => Some("$numberLong"),
+        "NumberDecimal" => Some("$numberDecimal"),
+        "NumberInt" => None,
+        _ => return None,
+    };
+    let mut i = at;
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if chars.get(i) != Some(&'(') {
+        return None;
+    }
+    let close = chars[i + 1..].iter().position(|&c| c == ')')? + i + 1;
+    let inner: String = chars[i + 1..close].iter().collect();
+    let inner = inner.trim();
+    let literal = match (inner.chars().next(), inner.chars().last()) {
+        (Some(q @ ('"' | '\'')), Some(l)) if l == q && inner.len() >= 2 => {
+            inner[1..inner.len() - 1].to_string()
+        }
+        _ if !inner.is_empty()
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-' || c == '.') =>
+        {
+            inner.to_string()
+        }
+        _ => return None,
+    };
+    let json = match key {
+        // NumberInt(5) is just the number 5.
+        None => literal,
+        Some(k) => format!("{{\"{k}\": {}}}", serde_json::Value::String(literal)),
+    };
+    Some((json, close + 1))
 }
 
 /// Splits `text` (the args of one call, comma-separated JSON values) on
@@ -152,21 +307,21 @@ fn split_top_level_args(text: &str) -> anyhow::Result<Vec<&str>> {
     let mut args = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
-    let mut in_string = false;
+    let mut quote: Option<char> = None;
     let mut escaped = false;
     for (i, c) in text.char_indices() {
-        if in_string {
+        if let Some(open) = quote {
             if escaped {
                 escaped = false;
             } else if c == '\\' {
                 escaped = true;
-            } else if c == '"' {
-                in_string = false;
+            } else if c == open {
+                quote = None;
             }
             continue;
         }
         match c {
-            '"' => in_string = true,
+            '"' | '\'' => quote = Some(c),
             '{' | '[' => depth += 1,
             '}' | ']' => depth -= 1,
             ',' if depth == 0 => {
@@ -1262,6 +1417,83 @@ pub fn connector() -> Box<dyn Connector> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relax_json_turns_shell_constructors_into_extended_json() {
+        use serde_json::json;
+        let parse = |text: &str| -> serde_json::Value {
+            serde_json::from_str(&relax_json(text)).unwrap_or_else(|e| panic!("{text}: {e}"))
+        };
+        assert_eq!(
+            parse(r#"{"_id": ObjectId("507f1f77bcf86cd799439011")}"#),
+            json!({"_id": {"$oid": "507f1f77bcf86cd799439011"}})
+        );
+        assert_eq!(
+            parse("{_id: ObjectId('507f1f77bcf86cd799439011'), n: NumberInt(5)}"),
+            json!({"_id": {"$oid": "507f1f77bcf86cd799439011"}, "n": 5})
+        );
+        assert_eq!(
+            parse(r#"{at: ISODate("2026-08-04T00:46:57Z"), big: NumberLong(9007199254740993)}"#),
+            json!({"at": {"$date": "2026-08-04T00:46:57Z"}, "big": {"$numberLong": "9007199254740993"}})
+        );
+        // Something that merely looks like a constructor inside a string is data.
+        assert_eq!(
+            parse(r#"{"note": "ObjectId(\"x\")"}"#),
+            json!({"note": "ObjectId(\"x\")"})
+        );
+    }
+
+    #[test]
+    fn relax_json_accepts_what_mongosh_accepts() {
+        let parse = |text: &str| -> serde_json::Value {
+            serde_json::from_str(&relax_json(text)).unwrap_or_else(|e| panic!("{text}: {e}"))
+        };
+        use serde_json::json;
+        assert_eq!(
+            parse("{name: 'ann', age: 30}"),
+            json!({"name": "ann", "age": 30})
+        );
+        assert_eq!(parse("{ $set: { age: 31 } }"), json!({"$set": {"age": 31}}));
+        assert_eq!(
+            parse("{age: {$gt: 18, $lt: 65}}"),
+            json!({"age": {"$gt": 18, "$lt": 65}})
+        );
+        assert_eq!(parse("{tags: ['a', 'b',], }"), json!({"tags": ["a", "b"]}));
+        assert_eq!(
+            parse("{ok: true, none: null}"),
+            json!({"ok": true, "none": null})
+        );
+        // A double quote inside a single-quoted string, and an escaped single quote.
+        assert_eq!(
+            parse(r#"{q: 'say "hi"', r: 'it\'s'}"#),
+            json!({"q": "say \"hi\"", "r": "it's"})
+        );
+        // A word that merely looks like a key inside a string is left alone.
+        assert_eq!(parse("{note: 'a, b: c'}"), json!({"note": "a, b: c"}));
+    }
+
+    #[test]
+    fn relax_json_leaves_strict_json_untouched() {
+        for strict in [
+            r#"{"name": "ann", "age": 30}"#,
+            r#"{"a": [1, 2, {"b": null}], "c": "x, y: z"}"#,
+            r#"{"escaped": "she said \"hi\""}"#,
+            "[]",
+            "42",
+        ] {
+            assert_eq!(relax_json(strict), strict);
+        }
+    }
+
+    #[test]
+    fn single_quoted_strings_do_not_confuse_the_argument_splitter() {
+        // The comma and the brace live inside single quotes: still one
+        // argument each, and the closing paren is the real one.
+        let text = "find({name: 'a, b}'}, {age: 1}) rest";
+        let close = find_matching_close_paren(&text["find(".len()..]).unwrap();
+        let args = split_top_level_args(&text["find(".len()..][..close]).unwrap();
+        assert_eq!(args, vec!["{name: 'a, b}'}", " {age: 1}"]);
+    }
+
     use super::*;
 
     #[test]

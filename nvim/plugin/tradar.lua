@@ -18,11 +18,24 @@ vim.api.nvim_create_user_command('TradarExport', function(a)
   t().export(fmt, path)
 end, { nargs = '*', complete = function() return { 'csv', 'json', 'md', 'tsv' } end })
 
--- Keymaps, omnifunc and a quiet background connect on every SQL buffer.
+-- Query files for the non-SQL connectors. Highlighting borrows a real
+-- grammar where one fits (`.mongo` is JavaScript) -- see README.
+vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq' } })
+pcall(vim.treesitter.language.register, 'javascript', 'mongo')
+pcall(vim.treesitter.language.register, 'json', 'esq')
+
+-- Keymaps, omnifunc and a quiet background connect on every SQL buffer, and
+-- on any buffer (whatever its filetype) that names a connection in a
+-- `-- tradar: name` / `// tradar: name` / `# tradar: name` line.
+local group = vim.api.nvim_create_augroup('tradar_sql', { clear = true })
 vim.api.nvim_create_autocmd('FileType', {
-  pattern = 'sql',
-  group = vim.api.nvim_create_augroup('tradar_sql', { clear = true }),
+  pattern = { 'sql', 'mongo', 'redis', 'esq' },
+  group = group,
   callback = function(a) t().attach(a.buf) end,
+})
+vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufNewFile' }, {
+  group = group,
+  callback = function(a) t().maybe_attach(a.buf) end,
 })
 
 -- An LSP's own on_attach sets K/gd after FileType; take them back once all
@@ -30,7 +43,7 @@ vim.api.nvim_create_autocmd('FileType', {
 vim.api.nvim_create_autocmd('LspAttach', {
   group = vim.api.nvim_create_augroup('tradar_lsp', { clear = true }),
   callback = function(a)
-    if vim.bo[a.buf].filetype == 'sql' then
+    if vim.b[a.buf].tradar_attached then
       vim.schedule(function() if vim.api.nvim_buf_is_valid(a.buf) then t().attach_nav(a.buf) end end)
     end
   end,

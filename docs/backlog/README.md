@@ -53,3 +53,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 
 Thiết kế hệ thống (không phải nhật ký) nằm ở `docs/architecture.md`.
 - [`server-headless-nvim-2026-10-04.md`](server-headless-nvim-2026-10-04.md) — giai đoạn 1 của `tradar-server` (JSON-RPC qua unix socket, cursor phía server) + plugin Neovim `nvim/`; TUI giữ song song.
+- [`real-backend-fixes-2026-10-04.md`](real-backend-fixes-2026-10-04.md) — lỗi tìm ra khi chạy plugin với Postgres/MySQL/ClickHouse/Redis/Mongo thật: `numeric`/mảng/`DECIMAL`... hiện `NULL`, `list_schema` MySQL hỏng, Mongo không nhận cú pháp mongosh và sửa dòng chưa từng chạy được; thêm Mongo/Redis/ES cho plugin.

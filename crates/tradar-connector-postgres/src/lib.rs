@@ -86,7 +86,7 @@ impl PostgresDriver {
 /// The body of `execute`, generic over what it runs against -- the pool
 /// directly, or a held transaction when one is open. Identical either way
 /// from here down; only `execute` itself decides which `Executor` to pass.
-async fn run<'e, E>(executor: E, query: &str) -> anyhow::Result<QueryResult>
+async fn run<'e, E>(executor: E, query: &'e str) -> anyhow::Result<QueryResult>
 where
     E: Executor<'e, Database = Postgres>,
 {
@@ -106,7 +106,10 @@ where
     // Streamed and capped rather than `fetch_all`: the point is to never
     // pull an unbounded result set into memory. One row past the cap is
     // read purely to know whether there were more.
-    let mut stream = sqlx::query(query).fetch(executor);
+    //
+    // `raw_sql`, not `query`: it uses Postgres's simple query protocol, so
+    // every value arrives as the server's own text -- see `stringify_column`.
+    let mut stream = sqlx::raw_sql(query).fetch(executor);
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut truncated = false;
@@ -380,61 +383,36 @@ impl QueryDriver for PostgresDriver {
     }
 }
 
-/// Renders one cell as text for the results grid. `sqlx::query()` (the
-/// dynamic, non-macro API this driver uses throughout, since it has to run
-/// arbitrary user-typed SQL) always fetches results over the *binary*
-/// wire protocol -- confirmed in sqlx-postgres's executor, which only
-/// drops to the text protocol for a statement with a `None` argument list,
-/// and `sqlx::query()` always starts one at `Some(..)` even with nothing
-/// bound. That means `String`'s `Decode` impl -- which only declares
-/// itself compatible with genuinely text-shaped columns (`TEXT`,
-/// `VARCHAR`, `BPCHAR`, `NAME`, `UNKNOWN`, `citext`) -- silently fails
-/// `try_get` for every other type, including extremely common ones like
-/// `UUID`/`JSON(B)`/timestamps, and the old fallback here swallowed that
-/// `Err` into a plain `"NULL"` -- indistinguishable from an actual null
-/// value, and wrong for every row. Each of the types below needs its own
-/// typed decode (there is no single decoder that works for arbitrary
-/// binary-format columns) before it can be turned into text.
+/// Renders one cell as text for the results grid.
 ///
-/// **Known gap**: types not listed here (arrays, enums, `inet`/`macaddr`,
-/// `money`, `interval`, `bytea`, ranges, composite/PostGIS types, ...)
-/// still fall through to the `String` attempt and still show as `NULL` --
-/// covers what a typical schema actually uses, not a claim of
-/// completeness. Extend this match arm by arm as a real gap turns up,
-/// same as the rest of this list was built.
+/// Rows come from `sqlx::raw_sql`, i.e. Postgres's *simple* query protocol,
+/// where the server sends every value already formatted as text -- exactly
+/// what `psql` prints. That is the only way to show *every* type: the
+/// extended protocol `sqlx::query()` uses is binary, where each type needs
+/// its own typed decoder (there is no generic one), and an earlier version
+/// of this function listed the common ones and showed `NULL` for the rest
+/// -- indistinguishable from a real null, and wrong for `numeric` (money!),
+/// arrays, enums, `inet`, `interval`, `bytea`, ranges, PostGIS and so on.
+///
+/// Two small presentation choices over the raw text: a real SQL null is
+/// `NULL`, and booleans read `true`/`false` rather than `psql`'s `t`/`f`.
 fn stringify_column(row: &PgRow, index: usize) -> String {
     let raw = row.try_get_raw(index).expect("valid column index");
     if raw.is_null() {
         return "NULL".to_string();
     }
-    match raw.type_info().name() {
-        "INT2" => row.try_get::<i16, _>(index).map(|v| v.to_string()),
-        "INT4" => row.try_get::<i32, _>(index).map(|v| v.to_string()),
-        "INT8" => row.try_get::<i64, _>(index).map(|v| v.to_string()),
-        "FLOAT4" => row.try_get::<f32, _>(index).map(|v| v.to_string()),
-        "FLOAT8" | "NUMERIC" => row.try_get::<f64, _>(index).map(|v| v.to_string()),
-        "BOOL" => row.try_get::<bool, _>(index).map(|v| v.to_string()),
-        "UUID" => row
-            .try_get::<sqlx::types::Uuid, _>(index)
-            .map(|v| v.to_string()),
-        "JSON" | "JSONB" => row
-            .try_get::<sqlx::types::JsonValue, _>(index)
-            .map(|v| v.to_string()),
-        "TIMESTAMP" => row
-            .try_get::<sqlx::types::chrono::NaiveDateTime, _>(index)
-            .map(|v| v.to_string()),
-        "TIMESTAMPTZ" => row
-            .try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(index)
-            .map(|v| v.to_string()),
-        "DATE" => row
-            .try_get::<sqlx::types::chrono::NaiveDate, _>(index)
-            .map(|v| v.to_string()),
-        "TIME" => row
-            .try_get::<sqlx::types::chrono::NaiveTime, _>(index)
-            .map(|v| v.to_string()),
-        _ => row.try_get::<String, _>(index),
+    let text = match raw.as_bytes() {
+        Ok(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Err(_) => return "NULL".to_string(),
+    };
+    if raw.type_info().name() == "BOOL" {
+        return match text.as_str() {
+            "t" => "true".to_string(),
+            "f" => "false".to_string(),
+            _ => text,
+        };
     }
-    .unwrap_or_else(|_| "NULL".to_string())
+    text
 }
 
 const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
@@ -757,7 +735,8 @@ mod tests {
     /// `String` decode for anything it didn't special-case) fails outright
     /// for these types under sqlx's binary wire protocol -- and used to
     /// get swallowed into a plain "NULL", indistinguishable from an
-    /// actual null and wrong for every row that had one.
+    /// actual null and wrong for every row that had one. Now text protocol,
+    /// so JSON reads as Postgres formats it (`{"code": "ok"}`).
     #[tokio::test]
     async fn uuid_jsonb_and_timestamp_columns_decode_to_real_text_not_null() {
         let container = Postgres::default().start().await.unwrap();
@@ -796,7 +775,7 @@ mod tests {
         };
         let row = &rows[0];
         assert_eq!(row[0], "3fa85f64-5717-4562-b3fc-2c963f66afa6");
-        assert_eq!(row[1], "{\"code\":\"ok\"}");
+        assert_eq!(row[1], "{\"code\": \"ok\"}");
         assert_eq!(row[2], "2026-08-04 00:46:57");
         assert!(row[3].starts_with("2026-08-04 00:46:57"), "was: {}", row[3]);
         assert_eq!(row[4], "2026-08-04");
@@ -804,6 +783,52 @@ mod tests {
             row[5], "NULL",
             "an actual null must still say NULL, distinct from a decode failure"
         );
+    }
+
+    /// Found by running against a real server: `numeric` (the type money
+    /// lives in) and arrays showed `NULL` for every row, because the
+    /// binary-protocol decoder list never covered them. Every type must
+    /// show the text Postgres itself would print.
+    #[tokio::test]
+    async fn numeric_arrays_and_other_exotic_types_show_their_text_not_null() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        driver
+            .execute("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
+            .await
+            .unwrap();
+
+        let result = driver
+            .execute(
+                "SELECT 12.50::numeric(8,2) AS price, 7::numeric AS whole, \
+                 '{x,y}'::text[] AS tags, ARRAY[1,2,3] AS nums, \
+                 'happy'::mood AS feeling, '10.0.0.1'::inet AS ip, \
+                 '1 day 02:03:04'::interval AS span, '\\xdeadbeef'::bytea AS blob, \
+                 true AS yes, false AS no, NULL::numeric AS nothing, \
+                 int4range(1, 5) AS span_range",
+            )
+            .await
+            .unwrap();
+
+        let QueryResult::Table { rows, .. } = result else {
+            panic!("expected a Table result");
+        };
+        let row = &rows[0];
+        assert_eq!(row[0], "12.50");
+        assert_eq!(row[1], "7");
+        assert_eq!(row[2], "{x,y}");
+        assert_eq!(row[3], "{1,2,3}");
+        assert_eq!(row[4], "happy");
+        assert_eq!(row[5], "10.0.0.1");
+        assert_eq!(row[6], "1 day 02:03:04");
+        assert_eq!(row[7], "\\xdeadbeef");
+        assert_eq!(row[8], "true");
+        assert_eq!(row[9], "false");
+        assert_eq!(row[10], "NULL", "a real null still says NULL");
+        assert_eq!(row[11], "[1,5)");
     }
 
     #[tokio::test]

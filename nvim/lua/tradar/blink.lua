@@ -11,7 +11,7 @@ function source.new(opts)
 end
 
 function source:enabled()
-  return vim.bo.filetype == 'sql' and require('tradar').connection_for(0) ~= nil
+  return vim.b.tradar_attached == true and require('tradar').connection_for(0) ~= nil
 end
 
 function source:get_trigger_characters()

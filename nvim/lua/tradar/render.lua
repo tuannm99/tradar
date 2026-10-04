@@ -40,6 +40,50 @@ function M.table(columns, rows)
   return out, spans
 end
 
+--- Documents as a table: one column per field, nested objects flattened to
+--- dotted names (`address.city`) like the TUI's grid, arrays kept as compact
+--- JSON. `_id` first, the rest alphabetical -- Lua's JSON decode does not
+--- keep key order, and a stable order beats a random one. Absent fields are
+--- empty, real nulls are `NULL`.
+function M.flatten(items)
+  local seen, columns, rows = {}, {}, {}
+  local function scalar(v)
+    if v == nil or v == vim.NIL then return 'NULL' end
+    local t = type(v)
+    if t == 'string' then return v end
+    if t == 'number' or t == 'boolean' then return tostring(v) end
+    return vim.json.encode(v)
+  end
+  local function walk(prefix, value, out)
+    if type(value) == 'table' and not vim.islist(value) and next(value) ~= nil then
+      for k, child in pairs(value) do walk(prefix == '' and k or (prefix .. '.' .. k), child, out) end
+    else
+      out[prefix] = scalar(value)
+      if not seen[prefix] then
+        seen[prefix] = true
+        columns[#columns + 1] = prefix
+      end
+    end
+  end
+  local flat = {}
+  for i, item in ipairs(items) do
+    flat[i] = {}
+    if type(item) == 'table' and not vim.islist(item) then walk('', item, flat[i]) else flat[i]['value'] = scalar(item) end
+  end
+  if #items > 0 and #columns == 0 then columns = { 'value' } end
+  table.sort(columns, function(a, b)
+    if a == '_id' then return b ~= '_id' end
+    if b == '_id' then return false end
+    return a < b
+  end)
+  for i, row in ipairs(flat) do
+    local cells = {}
+    for j, name in ipairs(columns) do cells[j] = row[name] or '' end
+    rows[i] = cells
+  end
+  return columns, rows
+end
+
 --- One JSON document per line, so `/` search and `yy` work per document.
 function M.documents(items)
   local out = {}

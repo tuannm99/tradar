@@ -27,6 +27,18 @@ Connection lấy từ `~/.config/tradar/connections.toml` (cùng file với TUI)
 
 hoặc file `.tradar` (một dòng, tên connection) ở thư mục cha, hoặc `:TradarConnect`.
 
+### Mongo, Redis, Elasticsearch
+
+Dùng file `.mongo` (filetype `mongo`, tô màu như JavaScript), `.redis`, `.esq` (Elasticsearch, kiểu `GET /index/_search` + body JSON), hoặc **bất kỳ file nào** có dòng liên kết ở đầu — dấu comment tuỳ ngôn ngữ:
+
+```
+// tradar: tên-connection     (Mongo, JS)
+# tradar: tên-connection      (Redis / Elasticsearch)
+-- tradar: tên-connection     (SQL)
+```
+
+Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu hiện **bảng** (cột phẳng `address.city`) để dùng `i`/`dd`/`gyc`/export như SQL; `gT` đổi sang JSON. `<leader>re` (EXPLAIN) chỉ có cho SQL.
+
 | Phím (tiền tố `<leader>r`) | Việc |
 |---|---|
 | `rr` | chạy statement dưới con trỏ (visual: phần chọn) |
@@ -48,6 +60,7 @@ Hỏi xác nhận (mặc định là `Cancel`, nên `<CR>` phản xạ là đáp
 
 - `UPDATE`/`DELETE` **không có `WHERE`**, `DROP`, `TRUNCATE` — trên mọi connection.
 - **Mọi lệnh ghi** (`INSERT`/`UPDATE`/`DELETE`/DDL...) trên connection "protected" — tên chứa một trong `setup{ protected = {"prod"} }` (mặc định `{"prod"}`, không phân biệt hoa thường). Statusline hiện `⚠` bên cạnh.
+- Mongo: `drop()`, `dropDatabase()`, `deleteMany({})`/`updateMany({}, …)` (bộ lọc rỗng) luôn hỏi. Redis: `FLUSHALL`/`FLUSHDB`/`SHUTDOWN`. Elasticsearch: `DELETE …`, `_delete_by_query`. Trên connection protected: mọi lệnh ghi của ngôn ngữ đó.
 - `<leader>ra` chạy cả file chỉ hỏi **một lần** cho cả lô.
 - `setup{ confirm = false }` tắt hết.
 

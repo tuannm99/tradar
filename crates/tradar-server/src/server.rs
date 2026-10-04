@@ -445,7 +445,7 @@ fn skip_leading_comments(query: &str) -> &str {
 
 /// Whether `query` changes the schema, so completion has to be rebuilt:
 /// SQL's leading DDL verbs, plus the Mongo shell calls that add or drop a
-/// collection. A leading-keyword heuristic like `returns_rows`, not a
+/// collection (and, since an insert is what creates one, `insertOne/Many`). A leading-keyword heuristic like `returns_rows`, not a
 /// parser -- a miss only means the next `schema` call picks the change up.
 fn is_ddl(query: &str) -> bool {
     let lower = skip_leading_comments(query).to_ascii_lowercase();
@@ -453,6 +453,9 @@ fn is_ddl(query: &str) -> bool {
     matches!(first, "create" | "alter" | "drop" | "rename")
         || lower.contains(".createcollection(")
         || lower.contains(".drop(")
+        // An insert is how a Mongo collection (and new fields) come to exist.
+        || lower.contains(".insertone(")
+        || lower.contains(".insertmany(")
 }
 
 fn str_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
@@ -492,6 +495,8 @@ mod tests {
             "/* make it */ -- and more\n  ALTER TABLE t ADD c INT"
         ));
         assert!(is_ddl("db.createCollection('x')"));
+        assert!(is_ddl("db.users.insertMany([{a: 1}])"));
+        assert!(!is_ddl("db.users.find({})"));
         assert!(!is_ddl("-- CREATE is only mentioned here\nSELECT 1"));
         assert!(!is_ddl("SELECT 1"));
         assert!(!is_ddl("-- only a comment"));

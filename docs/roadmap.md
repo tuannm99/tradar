@@ -41,7 +41,10 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [ ] `gd` theo FK cho kết quả nhiều bảng (JOIN) — cần biết cột đến từ bảng nào, `QueryResult` chưa mang thông tin đó
 - [x] Chặn `UPDATE`/`DELETE` thiếu `WHERE`/`DROP`/`TRUNCATE` + connection "protected" hỏi mọi lệnh ghi + `⚠` trên statusline — xong (2026-10-04)
 - [x] Sửa ô / xoá dòng ngay trong kết quả (`i`/`dd`, hiện câu lệnh → xác nhận → làm mới) — xong (2026-10-04)
-- [ ] Filetype riêng cho Mongo/Elasticsearch/Redis trong Neovim (guard và `K`/`gd` hiện chỉ hiểu SQL; `edit.sql` phía server đã hỗ trợ Mongo/ES)
+- [x] Mongo/Elasticsearch/Redis trong Neovim (`.mongo`/`.redis`/`.esq`, guard theo ngôn ngữ, bảng tài liệu sửa được) — xong (2026-10-04), xem `docs/backlog/real-backend-fixes-2026-10-04.md`
+- [x] Sửa lỗi hiển thị kiểu dữ liệu Postgres/MySQL (`numeric`/`DECIMAL`/mảng... hiện `NULL`), `list_schema` MySQL, Mongo cú pháp mongosh + sửa dòng — xong (2026-10-04)
+- [ ] Chạy plugin với Elasticsearch và Cassandra thật (chưa kiểm chứng; mới có test đơn vị phía plugin)
+- [ ] Thứ tự cột theo thứ tự trường tài liệu (cần server trả thứ tự khoá, Lua decode mất thứ tự)
 - [ ] Huỷ thật sự phía database (Postgres `pg_cancel_request`, SQLite interrupt) — hiện chỉ bỏ phần chờ
 - [ ] Row-edit trong buffer results (`edit.sql` đã có, chưa có UI Lua)
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response

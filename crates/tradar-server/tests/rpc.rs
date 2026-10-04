@@ -243,7 +243,12 @@ async fn answers_over_a_real_unix_socket_with_owner_only_permissions() {
         .unwrap();
     let reply: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
     assert_eq!(reply["id"], 7);
-    assert_eq!(reply["result"], json!(["sqlite"]));
+    // Whatever the build includes -- this test only runs with sqlite on.
+    let connectors = reply["result"].as_array().unwrap();
+    assert!(connectors.contains(&json!("sqlite")), "{reply}");
+    let mut sorted = connectors.clone();
+    sorted.sort_by_key(|v| v.as_str().unwrap().to_string());
+    assert_eq!(&sorted, connectors, "connectors.list is sorted");
 
     write.write_all(b"not json\n").await.unwrap();
     let reply: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();

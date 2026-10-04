@@ -139,7 +139,7 @@ fn near_token_marker(message: &str, query: &str) -> Option<String> {
 /// The body of `execute`, generic over what it runs against -- the pool
 /// directly, or a held transaction when one is open. Identical either way
 /// from here down; only `execute` itself decides which `Executor` to pass.
-async fn run<'e, E>(executor: E, query: &str) -> anyhow::Result<QueryResult>
+async fn run<'e, E>(executor: E, query: &'e str) -> anyhow::Result<QueryResult>
 where
     E: Executor<'e, Database = MySql>,
 {
@@ -159,7 +159,11 @@ where
     // Streamed and capped rather than `fetch_all`: the point is to never
     // pull an unbounded result set into memory. One row past the cap is
     // read purely to know whether there were more.
-    let mut stream = sqlx::query(query).fetch(executor);
+    //
+    // `raw_sql`, not `query`: it uses MySQL's text protocol (`COM_QUERY`),
+    // so every value arrives as the server's own text -- see
+    // `stringify_column`.
+    let mut stream = sqlx::raw_sql(query).fetch(executor);
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut truncated = false;
@@ -233,6 +237,11 @@ impl QueryDriver for MySqlDriver {
 
     async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
         let pool = self.pool.as_ref().expect("connect() must be called first");
+        // Every string column is `CAST(.. AS CHAR)`: on recent MySQL the
+        // `information_schema` views report them as VARBINARY, which sqlx
+        // refuses to decode as `String` -- found by running against a real
+        // server (the schema browser and completion came back empty).
+        //
         // Tables/views and their columns in one round trip, ordered so the
         // grouping below can just walk the rows -- same join shape as
         // `tradar-connector-postgres`'s `list_schema`, grouped by (schema,
@@ -241,8 +250,9 @@ impl QueryDriver for MySqlDriver {
         // MySQL's `information_schema.columns` already carries
         // `column_key = 'PRI'` directly, no extra join needed.
         let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-            "SELECT c.table_schema, c.table_name, t.table_type, c.column_name, c.data_type, \
-                    c.column_key \
+            "SELECT CAST(c.table_schema AS CHAR), CAST(c.table_name AS CHAR), \
+                    CAST(t.table_type AS CHAR), CAST(c.column_name AS CHAR), \
+                    CAST(c.data_type AS CHAR), CAST(c.column_key AS CHAR) \
              FROM information_schema.columns c \
              JOIN information_schema.tables t \
                ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
@@ -260,8 +270,9 @@ impl QueryDriver for MySqlDriver {
         // a foreign-key entry from the primary/unique-key entries this same
         // view also lists.
         let fk_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT table_schema, table_name, column_name, \
-                    referenced_table_name, referenced_column_name \
+            "SELECT CAST(table_schema AS CHAR), CAST(table_name AS CHAR), \
+                    CAST(column_name AS CHAR), CAST(referenced_table_name AS CHAR), \
+                    CAST(referenced_column_name AS CHAR) \
              FROM information_schema.key_column_usage \
              WHERE referenced_table_name IS NOT NULL",
         )
@@ -317,7 +328,8 @@ impl QueryDriver for MySqlDriver {
         // unrelated round trip rather than trying to force them into the
         // tables/columns join above.
         let routines: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT routine_schema, routine_name, routine_type \
+            "SELECT CAST(routine_schema AS CHAR), CAST(routine_name AS CHAR), \
+                    CAST(routine_type AS CHAR) \
              FROM information_schema.routines \
              WHERE routine_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') \
              ORDER BY routine_schema, routine_name",
@@ -370,60 +382,41 @@ impl QueryDriver for MySqlDriver {
 }
 
 /// Renders one cell as text for the results grid. Same rationale as
-/// `tradar-connector-postgres`'s `stringify_column`: `sqlx::query()` (the
-/// dynamic, non-macro API this driver uses throughout, since it has to run
-/// arbitrary user-typed SQL) runs over the binary protocol via a prepared
-/// statement, so `String`'s `Decode` impl silently fails `try_get` for
-/// every column whose wire type isn't already text -- which would otherwise
-/// get swallowed into a plain "NULL", indistinguishable from an actual null
-/// value and wrong for every row. Each type below needs its own typed
-/// decode before it can be turned into text.
+/// `tradar-connector-postgres`'s `stringify_column`: rows come from
+/// `sqlx::raw_sql`, i.e. MySQL's text protocol, where the server sends every
+/// value already formatted as text -- what the `mysql` client prints. The
+/// binary protocol `sqlx::query()` uses needs a typed decoder per type, and
+/// an earlier version of this function listed the common ones and showed
+/// `NULL` for the rest -- indistinguishable from a real null, and wrong for
+/// `DECIMAL` (where money lives), `ENUM`, `SET`, `BLOB`/`BINARY`, `BIT`,
+/// `YEAR` and geometry types.
 ///
-/// Unlike Postgres, where `i16`/`i32`/`i64` each only accept their own exact
-/// wire width, sqlx-mysql's `int`/`uint` decode (`int_compatible`/
-/// `uint_compatible` in its `types::int`/`types::uint`) accepts *any*
-/// integer column type regardless of declared width -- so `i64`/`u64` alone
-/// cover `TINYINT` through `BIGINT` (signed/unsigned respectively), no
-/// per-width match needed; same story for `f64` across `FLOAT`/`DOUBLE`
-/// (sqlx-mysql's `f64::decode` handles both the 4- and 8-byte wire forms).
-///
-/// **Known gap**: `DECIMAL` is deliberately excluded -- sqlx-mysql's own
-/// float decode explicitly refuses it ("decoding DECIMAL as `f64` is not
-/// supported due to differing semantics"), and lossless decode needs the
-/// `bigdecimal`/`rust_decimal` sqlx feature this crate doesn't enable.
-/// `BLOB`/`BINARY`, `BIT`, `ENUM`, `SET`, `YEAR`, and geometry types also
-/// still fall through to the `String` attempt and show as `NULL` -- covers
-/// what a typical schema actually uses, not a claim of completeness. Extend
-/// this match arm by arm as a real gap turns up, same as the Postgres list
-/// was built.
+/// Presentation over the raw text: a real SQL null is `NULL`; `BOOLEAN`
+/// (`TINYINT(1)`) reads `true`/`false`; bytes that are not valid UTF-8
+/// (a `BLOB`, a `BINARY`) show as `0x<hex>` instead of mangled text.
 fn stringify_column(row: &MySqlRow, index: usize) -> String {
     let raw = row.try_get_raw(index).expect("valid column index");
     if raw.is_null() {
         return "NULL".to_string();
     }
-    match raw.type_info().name() {
-        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => {
-            row.try_get::<i64, _>(index).map(|v| v.to_string())
-        }
-        "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED"
-        | "BIGINT UNSIGNED" => row.try_get::<u64, _>(index).map(|v| v.to_string()),
-        "BOOLEAN" => row.try_get::<bool, _>(index).map(|v| v.to_string()),
-        "FLOAT" | "DOUBLE" => row.try_get::<f64, _>(index).map(|v| v.to_string()),
-        "JSON" => row
-            .try_get::<sqlx::types::JsonValue, _>(index)
-            .map(|v| v.to_string()),
-        "DATETIME" | "TIMESTAMP" => row
-            .try_get::<sqlx::types::chrono::NaiveDateTime, _>(index)
-            .map(|v| v.to_string()),
-        "DATE" => row
-            .try_get::<sqlx::types::chrono::NaiveDate, _>(index)
-            .map(|v| v.to_string()),
-        "TIME" => row
-            .try_get::<sqlx::types::chrono::NaiveTime, _>(index)
-            .map(|v| v.to_string()),
-        _ => row.try_get::<String, _>(index),
+    // `unchecked`: skip sqlx's "is this Rust type compatible with that
+    // column type" gate (which is exactly what rejected DECIMAL/ENUM/SET) --
+    // under the text protocol the bytes are the text, whatever the type.
+    let Ok(bytes) = row.try_get_unchecked::<&[u8], _>(index) else {
+        return "NULL".to_string();
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        return format!("0x{hex}");
+    };
+    if raw.type_info().name() == "BOOLEAN" {
+        return match text {
+            "1" => "true".to_string(),
+            "0" => "false".to_string(),
+            _ => text.to_string(),
+        };
     }
-    .unwrap_or_else(|_| "NULL".to_string())
+    text.to_string()
 }
 
 const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
@@ -696,13 +689,63 @@ mod tests {
             panic!("expected a Table result");
         };
         let row = &rows[0];
-        assert_eq!(row[0], "{\"code\":\"ok\"}");
+        assert_eq!(row[0], "{\"code\": \"ok\"}");
         assert_eq!(row[1], "2026-08-04 00:46:57");
         assert_eq!(row[2], "2026-08-04");
         assert_eq!(
             row[3], "NULL",
             "an actual null must still say NULL, distinct from a decode failure"
         );
+    }
+
+    /// Found by running against a real server: `DECIMAL` (the type money
+    /// lives in), `ENUM`, `SET` and `BLOB` showed `NULL` for every row,
+    /// because the binary-protocol decoder list never covered them.
+    #[tokio::test]
+    async fn decimal_enum_set_and_blob_columns_show_their_text_not_null() {
+        let container = Mysql::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+        let conn_string = format!("mysql://root@127.0.0.1:{port}/test");
+        let mut driver = MySqlDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        sqlx::query(
+            "CREATE TABLE exotic (
+                price DECIMAL(8,2) NOT NULL,
+                mood ENUM('sad','ok','happy') NOT NULL,
+                perms SET('r','w','x') NOT NULL,
+                blob_col BLOB NOT NULL,
+                text_blob BLOB NOT NULL,
+                flag BOOLEAN NOT NULL,
+                nothing DECIMAL(8,2)
+            )",
+        )
+        .execute(driver.pool.as_ref().unwrap())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO exotic VALUES
+             (12.50, 'happy', 'r,w', X'DEADBEEF', 'plain text', TRUE, NULL)",
+        )
+        .execute(driver.pool.as_ref().unwrap())
+        .await
+        .unwrap();
+
+        let result = driver
+            .execute("SELECT price, mood, perms, blob_col, text_blob, flag, nothing FROM exotic")
+            .await
+            .unwrap();
+
+        let QueryResult::Table { rows, .. } = result else {
+            panic!("expected a Table result");
+        };
+        let row = &rows[0];
+        assert_eq!(row[0], "12.50");
+        assert_eq!(row[1], "happy");
+        assert_eq!(row[2], "r,w");
+        assert_eq!(row[3], "0xdeadbeef");
+        assert_eq!(row[4], "plain text");
+        assert_eq!(row[5], "true");
+        assert_eq!(row[6], "NULL", "a real null still says NULL");
     }
 
     #[tokio::test]
