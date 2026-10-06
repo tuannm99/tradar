@@ -29,7 +29,14 @@ local state = {
   result = nil, -- the cursor currently shown in the results buffer
   results_buf = nil,
   schema_buf = nil,
-  schema_targets = {},
+  schema_entries = nil, -- cached so a fold toggle can re-render without another `schema` call
+  schema_nodes = {}, -- parallel to the schema buffer's lines, from the last render
+  -- Keyed by a node's own key (see `render.schema_tree`), not by connection
+  -- -- the schema buffer is shared across connections (same name, reused),
+  -- so switching connections can coincidentally show a same-named table
+  -- pre-expanded from a previous one. Cosmetic only, not worth a
+  -- per-connection key for.
+  schema_expanded = {},
   sql_buf = nil, -- buffer the navigator inserts into
   drivers = nil, -- connection name -> driver id (from connections.list)
   schema_cache = {}, -- name -> { at, entries }
@@ -743,18 +750,56 @@ function M.open_table(buf, entry)
   end)
 end
 
---- Navigator: tables and columns of the buffer's connection; <CR> inserts
---- the name under the cursor into the SQL buffer you came from.
+--- Whether `node` (a schema or table node from `render.schema_tree`) is
+--- currently open, by the exact same rule `schema_tree` itself uses to
+--- decide -- a schema folder defaults open, a table defaults closed (see
+--- `render.schema_tree`'s own doc comment for why).
+local function node_is_open(node)
+  local current = state.schema_expanded[node.key]
+  if current ~= nil then return current end
+  return node.kind == 'schema'
+end
+
+--- Navigator: a tree of schema/keyspace/database groups (when the driver
+--- has the concept), then tables, then columns. `<Tab>` expands/collapses
+--- the schema or table under the cursor; `<CR>` inserts a table/column
+--- name into the SQL buffer you came from, or -- on a schema header, which
+--- has no name worth inserting -- also toggles.
 function M.schema()
   M.schema_entries(function(entries, sql_buf)
-    local lines, targets = render.schema(entries)
     local buf = scratch('tradar://schema', state.schema_buf)
-    state.schema_buf, state.schema_targets, state.sql_buf = buf, targets, sql_buf
-    set_lines(buf, lines)
+    state.schema_buf, state.schema_entries, state.sql_buf = buf, entries, sql_buf
+
+    local function redraw()
+      local win = vim.fn.bufwinid(buf)
+      local cursor = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
+      local lines, nodes = render.schema_tree(state.schema_entries, state.schema_expanded)
+      state.schema_nodes = nodes
+      set_lines(buf, lines)
+      if cursor and win ~= -1 then
+        vim.api.nvim_win_set_cursor(win, { math.min(cursor[1], math.max(#lines, 1)), cursor[2] })
+      end
+    end
+    redraw()
+
+    local function node_at_cursor() return state.schema_nodes[vim.api.nvim_win_get_cursor(0)[1]] end
+    local function toggle(node)
+      state.schema_expanded[node.key] = not node_is_open(node)
+      redraw()
+    end
     vim.keymap.set('n', '<CR>', function()
-      local name = state.schema_targets[vim.api.nvim_win_get_cursor(0)[1]]
-      if name and state.sql_buf and vim.api.nvim_buf_is_valid(state.sql_buf) then M.insert_text(state.sql_buf, name) end
-    end, { buffer = buf, desc = 'tradar: insert name into the SQL buffer' })
+      local node = node_at_cursor()
+      if not node then return end
+      if node.insert then
+        if state.sql_buf and vim.api.nvim_buf_is_valid(state.sql_buf) then M.insert_text(state.sql_buf, node.insert) end
+      elseif node.key then
+        toggle(node)
+      end
+    end, { buffer = buf, desc = 'tradar: insert name into the SQL buffer, or toggle a schema folder' })
+    vim.keymap.set('n', '<Tab>', function()
+      local node = node_at_cursor()
+      if node and node.key then toggle(node) end
+    end, { buffer = buf, desc = 'tradar: expand/collapse the schema or table under the cursor' })
     vim.keymap.set('n', 'q', '<cmd>close<CR>', { buffer = buf, desc = 'close' })
     if vim.fn.bufwinid(buf) == -1 then
       vim.cmd('topleft 40vsplit')
