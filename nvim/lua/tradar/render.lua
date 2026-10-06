@@ -179,20 +179,75 @@ function M.entry(entry)
   return lines
 end
 
---- Flat navigator: [schema/kind] table, then its columns indented.
-function M.schema(entries)
-  local lines, targets = {}, {}
+--- Tree navigator: schema/keyspace/database groups, each holding its
+--- tables, each collapsible to hide its columns -- same two collapsible
+--- levels as the TUI navigator's own `flatten_outline`/`push_table`, minus
+--- the extra Tables/Views/Functions/Procedures grouping under a schema
+--- (not asked for here, and Neovim's panel is one connection at a time so
+--- there's no `[kind]` folder-count pressure the way a cross-connection
+--- tree would have).
+---
+--- Groups are bucketed by first-seen order, not sorted -- a schema list
+--- reordered here would disagree with whatever order the driver's own
+--- query already returned rows in (same reasoning as `flatten_outline`'s
+--- own comment). `entries` with no `schema` at all (SQLite, Elasticsearch,
+--- Redis) render with no folder, exactly like before.
+---
+--- `expanded` is the caller's toggle state, a plain set keyed by a node's
+--- own `key` (below) -- schema folders default *open* (just names, cheap
+--- to show), tables default *closed* (their columns are the actual bulk a
+--- big schema would otherwise dump all at once).
+---
+--- Returns `lines` and `nodes` (parallel array: `{kind, key, insert}` --
+--- `kind` is `"schema"`/`"table"`/`"column"`, `key` is what toggles a
+--- foldable node's entry in `expanded`, `insert` is the text `<CR>` should
+--- put into the SQL buffer, `nil` for a schema header since there's
+--- nothing meaningful to insert for a grouping folder).
+function M.schema_tree(entries, expanded)
+  expanded = expanded or {}
+  local groups, by_schema = {}, {}
   for _, entry in ipairs(entries) do
-    lines[#lines + 1] = M.qualified(entry) .. (entry.object_kind and ('  [' .. entry.object_kind .. ']') or '')
-    targets[#lines] = M.qualified(entry)
-    for _, col in ipairs(entry.columns or {}) do
-      local marks = (col.primary_key and ' pk' or '') .. (col.indexed and ' idx' or '')
-      local fk = col.foreign_key and (' → ' .. col.foreign_key.table .. '.' .. col.foreign_key.column) or ''
-      lines[#lines + 1] = '  ' .. col.name .. '  ' .. col.type .. marks .. fk
-      targets[#lines] = col.name
+    local schema = entry.schema
+    local group = by_schema[schema or '']
+    if not group then
+      group = { schema = schema, entries = {} }
+      by_schema[schema or ''] = group
+      groups[#groups + 1] = group
+    end
+    group.entries[#group.entries + 1] = entry
+  end
+
+  local lines, nodes = {}, {}
+  for _, group in ipairs(groups) do
+    local open = true
+    if group.schema then
+      local key = 'schema:' .. group.schema
+      open = expanded[key] ~= false
+      lines[#lines + 1] = (open and '▾ ' or '▸ ') .. group.schema
+      nodes[#lines] = { kind = 'schema', key = key }
+    end
+    if open then
+      local indent = group.schema and '  ' or ''
+      for _, entry in ipairs(group.entries) do
+        local qualified = M.qualified(entry)
+        local has_columns = #(entry.columns or {}) > 0
+        local table_open = has_columns and expanded[qualified] == true
+        local marker = not has_columns and '  ' or (table_open and '▾ ' or '▸ ')
+        local label = entry.name .. (entry.object_kind and ('  [' .. entry.object_kind .. ']') or '')
+        lines[#lines + 1] = indent .. marker .. label
+        nodes[#lines] = { kind = 'table', key = qualified, insert = qualified }
+        if table_open then
+          for _, col in ipairs(entry.columns) do
+            local marks = (col.primary_key and ' pk' or '') .. (col.indexed and ' idx' or '')
+            local fk = col.foreign_key and (' → ' .. col.foreign_key.table .. '.' .. col.foreign_key.column) or ''
+            lines[#lines + 1] = indent .. '    ' .. col.name .. '  ' .. col.type .. marks .. fk
+            nodes[#lines] = { kind = 'column', insert = col.name }
+          end
+        end
+      end
     end
   end
-  return lines, targets
+  return lines, nodes
 end
 
 return M
