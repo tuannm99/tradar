@@ -431,7 +431,25 @@ impl Server {
         let query = str_param(params, "query")?;
         let source = driver.edit_source(query);
         let keys = source.as_deref().and_then(|s| driver.edit_key_columns(s));
-        Ok(json!({"table": source, "key_columns": keys}))
+        // Only worth asking once the query isn't already one table -- a
+        // `JOIN`-only question, and the caller (the results grid) is the
+        // one place that already knows the result's own column names,
+        // which this doesn't otherwise have a reason to track server-side.
+        let column_sources = source.is_none().then(|| {
+            let columns: Vec<String> = params
+                .get("columns")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            driver.column_sources(query, &columns)
+        });
+        Ok(json!({
+            "table": source,
+            "key_columns": keys,
+            "column_sources": column_sources.flatten(),
+        }))
     }
 
     /// Only *builds* the statement; running it is the client's explicit

@@ -960,21 +960,33 @@ function M.goto_table()
 end
 
 --- In the results buffer, `gd` on a cell of a foreign-key column runs the
---- `SELECT` for the row it points at. Works for results of a single-table
---- query (the same limit the TUI's row edit has: the driver must be able
---- to say which table the rows came from).
+--- `SELECT` for the row it points at. Works for a single-table query (the
+--- same limit the TUI's row edit has: the driver must be able to say which
+--- table the rows come from) and, since this only needs to name *this one
+--- column*'s table rather than a whole row's, also for a `JOIN` result
+--- when that column was explicitly qualified in the SELECT list
+--- (`alias.column`/`table.column`) -- `edit.source`'s `column_sources`,
+--- parallel to `cols`, carries that per column when `src.table` alone
+--- can't answer for the whole query.
 function M.follow_fk()
   local r = state.result
   local row, col = cell_at()
   if not (r and r.conn and row) then return notify('put the cursor on a cell of a table result', vim.log.levels.WARN) end
   local cols, rows = tabular(r)
   local name, value = cols[col], rows[row][col]
-  call('edit.source', { connection = r.conn, query = r.query }, function(src)
-    if not src.table then
-      return notify('cannot tell which table these rows come from (only single-table SELECTs)', vim.log.levels.WARN)
+  call('edit.source', { connection = r.conn, query = r.query, columns = cols }, function(src)
+    local table_name = src.table
+    if not table_name and src.column_sources then
+      local source = src.column_sources[col]
+      if source ~= vim.NIL then table_name = source end
+    end
+    if not table_name then
+      return notify(
+        'cannot tell which table this column comes from (a single-table SELECT, or a JOIN with `alias.column` explicitly in the SELECT list)',
+        vim.log.levels.WARN)
     end
     get_schema(r.conn, function(entries)
-      local tbl = find_table(entries, src.table)
+      local tbl = find_table(entries, table_name)
       local column
       for _, c in ipairs(tbl and tbl.columns or {}) do
         if c.name:lower() == name:lower() then column = c break end

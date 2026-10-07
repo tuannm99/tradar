@@ -220,6 +220,10 @@ impl QueryDriver for MySqlDriver {
         query_driver::single_table_source(query)
     }
 
+    fn column_sources(&self, query: &str, columns: &[String]) -> Option<Vec<Option<String>>> {
+        Some(query_driver::joined_column_sources(query, columns))
+    }
+
     fn crud_snippet(
         &self,
         entry: &SchemaInfo,
