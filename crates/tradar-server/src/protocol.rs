@@ -196,6 +196,39 @@ impl StoredResult {
             Self::Documents { .. } => None,
         }
     }
+
+    /// One ordered list of top-level field names per document in the page
+    /// (`null` for a document that isn't a JSON object), `None` for a
+    /// `Table` -- it already has `columns()`, which says the same thing
+    /// once for the whole result rather than per row.
+    ///
+    /// Exists because the plugin's own JSON decode (`vim.json.decode`,
+    /// Neovim's Lua binding) can't recover this on its own: a decoded
+    /// object becomes a plain Lua table, and `pairs()` over a Lua table
+    /// has no defined order (`render.flatten`'s own doc comment already
+    /// notes this -- "Lua's JSON decode does not keep key order"). Sent as
+    /// a sibling field alongside the page rather than changing the shape
+    /// of the documents themselves, so a client that doesn't care (the
+    /// JSON view, `yank`/export, every other RPC caller) reads the exact
+    /// same `rows` it always has.
+    ///
+    /// Relies on `serde_json`'s `preserve_order` feature (see
+    /// `tradar-connector-mongo/Cargo.toml`) -- without it `Value::Object`
+    /// is a `BTreeMap` and this would just report alphabetical order back,
+    /// no better than a client re-deriving it.
+    pub fn field_order(&self, offset: usize, limit: usize) -> Option<Value> {
+        let Self::Documents { items, .. } = self else {
+            return None;
+        };
+        let end = offset.saturating_add(limit).min(items.len());
+        let start = offset.min(end);
+        Some(json!(
+            items[start..end]
+                .iter()
+                .map(|item| item.as_object().map(|map| map.keys().collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        ))
+    }
 }
 
 /// `{"table": "t", "key": {"id": "1"}, "change": {"set": {"column": "name", "value": "x"}}}`
@@ -262,5 +295,53 @@ mod tests {
     fn a_message_without_a_marker_has_no_position() {
         assert_eq!(error_position("connection refused"), None);
         assert_eq!(error_position("LINE x: nope\n  ^"), None);
+    }
+
+    #[test]
+    fn field_order_reports_each_document_s_own_top_level_keys_in_order() {
+        let stored = StoredResult::Documents {
+            items: vec![
+                json!({"b": 1, "a": 2, "_id": "x"}),
+                json!({"name": "ann", "age": 3}),
+            ],
+            truncated: false,
+        };
+
+        let order = stored.field_order(0, 10).unwrap();
+
+        assert_eq!(order, json!([["b", "a", "_id"], ["name", "age"]]));
+    }
+
+    #[test]
+    fn field_order_is_none_for_a_table_result() {
+        let stored = StoredResult::Table {
+            columns: vec!["id".to_string()],
+            rows: vec![vec!["1".to_string()]],
+            truncated: false,
+        };
+
+        assert_eq!(stored.field_order(0, 10), None);
+    }
+
+    #[test]
+    fn field_order_is_null_for_a_document_that_is_not_an_object() {
+        let stored = StoredResult::Documents {
+            items: vec![json!(42)],
+            truncated: false,
+        };
+
+        assert_eq!(stored.field_order(0, 10).unwrap(), json!([null]));
+    }
+
+    #[test]
+    fn field_order_respects_the_same_offset_and_limit_window_as_page() {
+        let stored = StoredResult::Documents {
+            items: vec![json!({"a": 1}), json!({"b": 2}), json!({"c": 3})],
+            truncated: false,
+        };
+
+        let order = stored.field_order(1, 1).unwrap();
+
+        assert_eq!(order, json!([["b"]]));
     }
 }

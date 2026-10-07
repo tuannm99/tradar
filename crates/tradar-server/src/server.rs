@@ -264,13 +264,16 @@ impl Server {
         };
 
         let first_page = stored.page(0, page_size);
-        let response = json!({
+        let mut response = json!({
             "kind": stored.kind(),
             "columns": stored.columns(),
             "total": stored.total(),
             "truncated": stored.truncated(),
             "rows": first_page,
         });
+        if let Some(field_order) = stored.field_order(0, page_size) {
+            response["field_order"] = field_order;
+        }
         let mut state = self.state.lock().unwrap();
         state.next_cursor += 1;
         let cursor = state.next_cursor;
@@ -281,7 +284,6 @@ impl Server {
                 state.cursors.remove(&oldest);
             }
         }
-        let mut response = response;
         response["cursor"] = json!(cursor);
         Ok(response)
     }
@@ -352,7 +354,15 @@ impl Server {
             .cursors
             .get(&cursor)
             .ok_or_else(|| RpcError::app(format!("cursor {cursor} is gone (closed or evicted)")))?;
-        Ok(json!({"offset": offset, "total": stored.total(), "rows": stored.page(offset, limit)}))
+        let mut response = json!({
+            "offset": offset,
+            "total": stored.total(),
+            "rows": stored.page(offset, limit),
+        });
+        if let Some(field_order) = stored.field_order(offset, limit) {
+            response["field_order"] = field_order;
+        }
+        Ok(response)
     }
 
     fn close_cursor(&self, params: &Value) -> Result<Value, RpcError> {
