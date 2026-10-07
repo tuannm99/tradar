@@ -2609,6 +2609,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_find_preserves_the_document_s_own_field_order() {
+        // BSON documents are themselves ordered; `serde_json::Value::Object`
+        // is a `BTreeMap` (alphabetical) unless `preserve_order` is on (see
+        // the comment on this crate's `serde_json` dependency) -- without
+        // it, `into_relaxed_extjson()` would silently resort `z`/`a`/`m`
+        // into `a`/`m`/`z` before `tradar-server` ever gets a chance to
+        // report field order back to a client.
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"z": 1, "a": 2, "m": 3})"#)
+            .await
+            .unwrap();
+
+        let result = driver.execute(r#"db.users.find({})"#).await.unwrap();
+
+        let QueryResult::Documents { items: docs, .. } = result else {
+            panic!("expected Documents");
+        };
+        let keys: Vec<&str> = docs[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["_id", "z", "a", "m"],
+            "insertion order must survive, not come back alphabetical"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_find_chained_sort_limit_skip_orders_and_paginates() {
         let container = Mongo::new().start().await.unwrap();
         let port = container.get_host_port_ipv4(27017).await.unwrap();

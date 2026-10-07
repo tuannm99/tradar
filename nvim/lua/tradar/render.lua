@@ -51,11 +51,31 @@ end
 
 --- Documents as a table: one column per field, nested objects flattened to
 --- dotted names (`address.city`) like the TUI's grid, arrays kept as compact
---- JSON. `_id` first, the rest alphabetical -- Lua's JSON decode does not
---- keep key order, and a stable order beats a random one. Absent fields are
---- empty, real nulls are `NULL`.
-function M.flatten(items)
-  local seen, columns, rows = {}, {}, {}
+--- JSON. Absent fields are empty, real nulls are `NULL`.
+---
+--- `order` (optional) is the server's own `field_order` for this page
+--- (`tradar.protocol.StoredResult::field_order`, one array of top-level key
+--- names per document, in insertion order) -- when given, a document's
+--- own top-level fields become columns in that order; without it (no
+--- server hint, an older server, a non-Mongo driver that never sends one),
+--- top-level fields fall back to alphabetical, same as before this
+--- existed. A column introduced by a *later* document that an earlier
+--- one's `order` never mentioned is appended after, in the position that
+--- later document's own order gives it -- `order[i]` only ever lists
+--- document `i`'s own fields, not the union every document in the page
+--- might end up contributing to `columns`.
+---
+--- Nested dotted paths are **not** covered by `order` (it is top-level
+--- only) and always sort alphabetically, as a block *after* every
+--- top-level column -- `pairs()` over a decoded nested object has no
+--- order to begin with, and grouping "real" fields before drilled-down
+--- ones reads better than interleaving them alphabetically ever did.
+--- `_id` sorts first among top-level columns when there is no `order` to
+--- say otherwise; an `order` that already puts `_id` first (true for
+--- every real MongoDB document -- a server-generated `_id` is always
+--- inserted first) keeps it there for free.
+function M.flatten(items, order)
+  local seen, top_columns, nested_columns, rows = {}, {}, {}, {}
   local function scalar(v)
     if v == nil or v == vim.NIL then return 'NULL' end
     local t = type(v)
@@ -63,28 +83,63 @@ function M.flatten(items)
     if t == 'number' or t == 'boolean' then return tostring(v) end
     return vim.json.encode(v)
   end
-  local function walk(prefix, value, out)
+  local function record(name, bucket)
+    if not seen[name] then
+      seen[name] = true
+      bucket[#bucket + 1] = name
+    end
+  end
+  --- A nested value's own sub-tree, one level or deeper below a top-level
+  --- field -- always alphabetical, there is no `order` for this depth.
+  local function walk_nested(prefix, value, out)
     if type(value) == 'table' and not vim.islist(value) and next(value) ~= nil then
-      for k, child in pairs(value) do walk(prefix == '' and k or (prefix .. '.' .. k), child, out) end
+      for k, child in pairs(value) do walk_nested(prefix .. '.' .. k, child, out) end
     else
       out[prefix] = scalar(value)
-      if not seen[prefix] then
-        seen[prefix] = true
-        columns[#columns + 1] = prefix
-      end
+      record(prefix, nested_columns)
     end
   end
   local flat = {}
   for i, item in ipairs(items) do
     flat[i] = {}
-    if type(item) == 'table' and not vim.islist(item) then walk('', item, flat[i]) else flat[i]['value'] = scalar(item) end
+    if type(item) == 'table' and not vim.islist(item) then
+      -- `vim.NIL` (not plain Lua `nil`), when this document wasn't a JSON
+      -- object server-side -- `rpc.lua`'s decode only nils out an
+      -- *object's* null values, never an array element, since removing
+      -- one would shift every index after it.
+      local keys = order and order[i]
+      if keys == vim.NIL then keys = nil end
+      if not keys then
+        keys = {}
+        for k in pairs(item) do keys[#keys + 1] = k end
+      end
+      for _, k in ipairs(keys) do
+        local value = item[k]
+        if value ~= nil then
+          if type(value) == 'table' and not vim.islist(value) and next(value) ~= nil then
+            walk_nested(k, value, flat[i])
+          else
+            flat[i][k] = scalar(value)
+            record(k, top_columns)
+          end
+        end
+      end
+    else
+      flat[i].value = scalar(item)
+      record('value', top_columns)
+    end
   end
-  if #items > 0 and #columns == 0 then columns = { 'value' } end
-  table.sort(columns, function(a, b)
-    if a == '_id' then return b ~= '_id' end
-    if b == '_id' then return false end
-    return a < b
-  end)
+  if not order then
+    table.sort(top_columns, function(a, b)
+      if a == '_id' then return b ~= '_id' end
+      if b == '_id' then return false end
+      return a < b
+    end)
+  end
+  table.sort(nested_columns)
+  local columns = {}
+  for _, c in ipairs(top_columns) do columns[#columns + 1] = c end
+  for _, c in ipairs(nested_columns) do columns[#columns + 1] = c end
   for i, row in ipairs(flat) do
     local cells = {}
     for j, name in ipairs(columns) do cells[j] = row[name] or '' end

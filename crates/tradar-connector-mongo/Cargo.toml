@@ -13,7 +13,17 @@ anyhow = "1"
 mongodb = { version = "3", features = ["bson-3"] }
 bson = { version = "3.1", features = ["serde_json-1"] }
 futures-util = "0.3"
-serde_json = "1"
+# `preserve_order`: BSON documents are themselves ordered (field order as
+# inserted), but `serde_json::Value::Object` is a `BTreeMap` (alphabetical)
+# by default -- without this, `into_relaxed_extjson()` loses that order
+# before `QueryResult::Documents` ever leaves this crate, no later fix
+# downstream can recover it. Cargo feature unification means every crate
+# in this workspace that touches `serde_json::Value` now iterates/
+# serializes object keys in insertion order, not alphabetical -- a
+# behavior change with no type-signature changes anywhere, verified by the
+# full test suite rather than by inspecting every call site by hand. See
+# `docs/backlog/` for the day this was turned on.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

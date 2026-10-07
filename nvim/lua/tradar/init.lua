@@ -282,7 +282,7 @@ local function paint_results()
   if r.kind == 'table' then
     lines, r.spans = render.table(r.columns, r.rows)
   elseif r.view == 'table' then
-    r.tcols, r.trows = render.flatten(r.rows)
+    r.tcols, r.trows = render.flatten(r.rows, r.field_order)
     lines, r.spans = render.table(r.tcols, r.trows)
   else
     lines = render.documents(r.rows)
@@ -328,6 +328,11 @@ local function show_result(r, meta)
   state.result = {
     id = r.cursor, total = r.total, shown = #r.rows, kind = r.kind,
     columns = r.columns, rows = r.rows, truncated = r.truncated, fetching = false,
+    -- One entry per row in `rows`, parallel to it (see `M.more`, which
+    -- extends both in lockstep as pages load) -- `render.flatten`'s own
+    -- `order` parameter, `nil` for anything but a `documents` result from
+    -- a server new enough to send it.
+    field_order = r.field_order,
     view = r.kind == 'documents' and default_view(r.rows) or nil,
     conn = meta and meta.conn, query = meta and meta.query,
   }
@@ -358,6 +363,7 @@ function M.more(cb)
     r.fetching = false
     if state.result ~= r then return end
     vim.list_extend(r.rows, page.rows)
+    if r.field_order and page.field_order then vim.list_extend(r.field_order, page.field_order) end
     r.shown = #r.rows
     paint_results()
     if cb then cb() end
@@ -401,7 +407,7 @@ local function export_text(fmt, r)
     -- Documents keep their real structure as JSON; the flat formats use the
     -- same flattened columns as the table view.
     if fmt == 'json' then return vim.json.encode(r.rows) .. '\n' end
-    columns, rows = render.flatten(r.rows)
+    columns, rows = render.flatten(r.rows, r.field_order)
   end
   if fmt == 'csv' then return render.csv(columns, rows) end
   if fmt == 'json' then return render.json(columns, rows) end

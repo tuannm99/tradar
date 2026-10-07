@@ -62,7 +62,7 @@ Other standing principles from the design spec:
 - `tree-sitter-highlight` + `tree-sitter-sequel` — SQL syntax highlighting in the query editor (`tradar-query-workbench`'s `sql_highlight.rs`), Postgres/SQLite only
 - `toml` — saved-connections/session/config/snippets/saved-HTTP-requests file format (`tradar-core` only)
 - `directories` — platform-appropriate config path for the saved-connections/session/config files (`tradar-core` only)
-- `serde` / `serde_json` — serialization
+- `serde` / `serde_json` — serialization; `tradar-connector-mongo` enables `serde_json`'s `preserve_order` feature (added 2026-10-07, `docs/backlog/mongo-field-order-2026-10-07.md`) so a BSON document's own field order survives `into_relaxed_extjson()` instead of `Value::Object` silently resorting it alphabetically (`BTreeMap`'s default) -- Cargo's feature unification means every crate touching `serde_json::Value` now iterates/serializes object keys in insertion order, not just this one
 - `anyhow` — error handling
 - `base64` — encodes yanked text for the OSC52 clipboard escape sequence (`tradar-core`'s `ui::yank_to_clipboard`, called from both `tradar-query-workbench` and `tradar-connector-http`)
 - `arboard` (`default-features = false`, text only — no `image`/`image-data`) — reads the OS clipboard for middle-click paste (`tradar-core`'s `ui::paste_from_clipboard`); OSC52 is copy-only and has no read side a terminal can answer, hence a real clipboard library for this direction

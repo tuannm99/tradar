@@ -12,7 +12,7 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét, 
 
 1. **Dùng thật vài ngày trên database của chính mình** (người dùng làm, không phải việc code): để ý tên bảng kèm schema, kiểu dữ liệu lạ, độ chậm khi schema lớn (`K`/completion lần đầu). Mọi lỗi gặp được vào đây rồi sửa trước tính năng mới — bài học 2026-10-04: smoke test chỉ trên SQLite che mất cả một nhóm lỗi hiển thị kiểu dữ liệu, xem `docs/backlog/real-backend-fixes-2026-10-04.md`.
 2. ~~Chạy plugin với Elasticsearch và Cassandra thật~~ — xong (2026-10-04), tìm ra và sửa 3 lỗi; còn hai giới hạn của Cassandra ở checklist bên dưới.
-3. **Mục nhỏ**: thứ tự cột tài liệu Mongo theo thứ tự trường; `gd` theo FK cho kết quả `JOIN`; ~~navigator dạng cây~~ — xong (2026-10-06), xem `docs/backlog/nvim-schema-tree-2026-10-06.md`; huỷ query thật sự phía database.
+3. **Mục nhỏ**: ~~thứ tự cột tài liệu Mongo theo thứ tự trường~~ — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`; `gd` theo FK cho kết quả `JOIN`; ~~navigator dạng cây~~ — xong (2026-10-06), xem `docs/backlog/nvim-schema-tree-2026-10-06.md`; huỷ query thật sự phía database.
 4. **Quyết định cuối về TUI** (giữ đóng băng hay bỏ hẳn) — sau mục 1.
 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước, vì hiện bảo mật dựa vào quyền `0600` của unix socket; chỉ đáng khi server chạy ở máy khác hoặc dùng chung); Kafka/RabbitMQ/HTTP/Socket qua server (cần kênh đẩy từ server); Windows named pipe.
@@ -61,7 +61,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Chạy plugin với Elasticsearch 8 và Cassandra 5 thật — xong (2026-10-04): sửa Cassandra hiện `Debug` thay vì giá trị thật, ES sửa dòng không thấy ngay (`?refresh=true`), plugin hiện `demo.demo.users`; xem "Đợt 2" trong `docs/backlog/real-backend-fixes-2026-10-04.md`
 - [ ] Cassandra: sửa/xoá dòng (driver cần nhớ kiểu cột từ `list_schema` để sinh literal CQL đúng kiểu: uuid/số không nháy)
 - [ ] Completion sau `keyspace.`/`schema.` (Cassandra: tên bảng là `demo.users` nhưng từ đang gõ chỉ là `us`)
-- [ ] Thứ tự cột theo thứ tự trường tài liệu (cần server trả thứ tự khoá, Lua decode mất thứ tự)
+- [x] Thứ tự cột theo thứ tự trường tài liệu — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`
 - [ ] Huỷ thật sự phía database (Postgres `pg_cancel_request`, SQLite interrupt) — hiện chỉ bỏ phần chờ
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response
 - [x] TUI đóng băng (chỉ sửa lỗi) — chốt 2026-10-04, xem "Hướng đi hiện tại" ở đầu file
