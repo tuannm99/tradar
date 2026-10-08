@@ -852,6 +852,99 @@ pub fn single_table_source(sql: &str) -> Option<String> {
     }
 }
 
+/// For a query against more than one table (a `JOIN`), which table each
+/// result column came from -- `columns[i]` is that column's own name
+/// (`QueryResult::Table::columns`, so this never has to touch
+/// `QueryResult` itself to answer the question), `sources[i]` is `None`
+/// unless the SELECT list named it explicitly as `alias.column` (or
+/// `table.column`), resolved through the same FROM/JOIN alias table
+/// `resolve_alias` already builds for completion.
+///
+/// Deliberately conservative, same reasoning as `single_table_source`: a
+/// bare unqualified name is ambiguous across the joined tables without
+/// the connected schema (which this function doesn't have, same as every
+/// other helper in this file -- see `completion_context`'s own doc
+/// comment), an expression/computed column has no one table to point at,
+/// and a `*`/`alias.*` anywhere in the SELECT list makes the whole call
+/// bail (`None` for every column) since it expands to a number of columns
+/// this can't predict from the query text alone, which would silently
+/// misalign every source after it. Call this only once
+/// `single_table_source` has already returned `None` -- a query against
+/// exactly one table is answered more precisely (and more cheaply) by
+/// that, without needing `columns` at all.
+pub fn joined_column_sources(sql: &str, columns: &[String]) -> Vec<Option<String>> {
+    let none = || vec![None; columns.len()];
+    let tokens = sql_tokens(strip_leading_comments(sql));
+    let Some(first) = tokens.first() else {
+        return none();
+    };
+    if !first.word.eq_ignore_ascii_case("select") {
+        return none();
+    }
+    // A second `select` anywhere -- a subquery or a set operation -- means
+    // the column list isn't as simple as it looks; same unconditional
+    // check `single_table_source` uses for the same reason.
+    if tokens
+        .iter()
+        .skip(1)
+        .any(|t| t.word.eq_ignore_ascii_case("select"))
+    {
+        return none();
+    }
+    let Some(from) = tokens
+        .iter()
+        .position(|t| t.depth == 0 && t.word.eq_ignore_ascii_case("from"))
+    else {
+        return none();
+    };
+    let select_list = &tokens[1..from];
+
+    let mut items: Vec<&[SqlToken]> = Vec::new();
+    let mut start = 0;
+    for (i, token) in select_list.iter().enumerate() {
+        if token.depth == 0 && token.word == "," {
+            items.push(&select_list[start..i]);
+            start = i + 1;
+        }
+    }
+    items.push(&select_list[start..]);
+
+    let mut sources = Vec::with_capacity(items.len());
+    for item in &items {
+        let Some(first) = item.first() else {
+            sources.push(None);
+            continue;
+        };
+        // A bare `*` select-list item tokenizes as just "*"; `alias.*` as
+        // "alias." (the tokenizer's identifier run stops at the `*`, which
+        // isn't an identifier character) followed by a separate "*" token.
+        // Checked only at the item's own front, not anywhere inside it, so
+        // a `*` that's really a function argument (`count(*)`) isn't
+        // mistaken for one -- it expands server-side to a number of
+        // columns this can't know from the query text, so finding one
+        // bails entirely rather than misaligning everything after it.
+        let is_star = first.word == "*"
+            || (first.word.ends_with('.') && item.get(1).is_some_and(|t| t.word == "*"));
+        if is_star {
+            return none();
+        }
+        sources.push(
+            first
+                .word
+                .rsplit_once('.')
+                .and_then(|(alias, _)| resolve_alias(&tokens, alias)),
+        );
+    }
+
+    if sources.len() != columns.len() {
+        // The SELECT list didn't split into as many items as the result
+        // actually has columns (a syntax this hasn't been taught to read) --
+        // safer to say nothing than to misalign every answer after it.
+        return none();
+    }
+    sources
+}
+
 /// What the cursor is positioned to complete, read from the SQL typed so
 /// far -- deliberately schema-agnostic, the same split of responsibility
 /// `single_table_source` uses: this file answers "what does the query
@@ -1337,6 +1430,20 @@ pub trait QueryDriver: Send + Sync {
     /// mapping would ever include, so there'd be nothing in `list_schema`'s
     /// output to mark `primary_key` on in the first place.
     fn edit_key_columns(&self, _source: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Parallel to a `Table` result's own `columns` -- which table each one
+    /// came from, for `gd`-style foreign-key follow on a `JOIN` result,
+    /// where `edit_source` (needing exactly one table) has already answered
+    /// `None`. `None` -- the default -- means this driver hasn't been
+    /// taught the question at all, as opposed to `Some(vec![None; ...])`
+    /// (asked, nothing resolved -- an unqualified column, an expression, a
+    /// `*`). SQL connectors with FK data in their own schema (Postgres,
+    /// MySQL, SQLite) delegate to `query_driver::joined_column_sources`;
+    /// ClickHouse/Cassandra have no FK concept to follow to, so there is
+    /// nothing this would let `gd` do for them even if they answered it.
+    fn column_sources(&self, _query: &str, _columns: &[String]) -> Option<Vec<Option<String>>> {
         None
     }
 
@@ -2007,6 +2114,83 @@ mod tests {
             single_table_source("SELECT coalesce(name, 'x') FROM users WHERE id = 1"),
             Some("users".to_string())
         );
+    }
+
+    #[test]
+    fn joined_column_sources_resolves_explicitly_qualified_columns() {
+        let columns = ["id".to_string(), "total".to_string(), "name".to_string()];
+        assert_eq!(
+            joined_column_sources(
+                "SELECT o.id, o.total, u.name FROM orders o JOIN users u ON u.id = o.user_id",
+                &columns,
+            ),
+            vec![
+                Some("orders".to_string()),
+                Some("orders".to_string()),
+                Some("users".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn joined_column_sources_leaves_unqualified_or_computed_columns_unresolved() {
+        let columns = ["id".to_string(), "cnt".to_string()];
+        assert_eq!(
+            joined_column_sources(
+                "SELECT id, count(*) AS cnt FROM orders o JOIN users u ON u.id = o.user_id",
+                &columns,
+            ),
+            vec![None, None],
+            "a bare name is ambiguous across joined tables without the schema, \
+             and an expression has no one table to point at"
+        );
+    }
+
+    #[test]
+    fn joined_column_sources_does_not_mistake_count_star_for_a_select_star() {
+        let columns = ["id".to_string(), "cnt".to_string()];
+        assert_eq!(
+            joined_column_sources(
+                "SELECT o.id, count(*) AS cnt FROM orders o JOIN users u ON u.id = o.user_id",
+                &columns,
+            ),
+            vec![Some("orders".to_string()), None],
+            "the `*` is count's argument, not a select-list star expansion"
+        );
+    }
+
+    #[test]
+    fn joined_column_sources_bails_entirely_on_a_star() {
+        let columns = ["id".to_string(), "name".to_string()];
+        assert_eq!(
+            joined_column_sources(
+                "SELECT o.*, u.name FROM orders o JOIN users u ON u.id = o.user_id",
+                &columns,
+            ),
+            vec![None, None],
+            "`*` expands to a number of columns this can't predict from the query text"
+        );
+    }
+
+    #[test]
+    fn joined_column_sources_is_empty_for_a_single_table_query() {
+        let columns = ["id".to_string()];
+        assert_eq!(
+            joined_column_sources("SELECT id FROM users", &columns),
+            vec![None],
+            "not wrong, just not this function's job -- single_table_source answers this"
+        );
+    }
+
+    #[test]
+    fn joined_column_sources_gives_up_on_a_subquery_or_union() {
+        let columns = ["id".to_string()];
+        for sql in [
+            "SELECT o.id FROM orders o WHERE o.id IN (SELECT user_id FROM users)",
+            "SELECT o.id FROM orders o UNION SELECT u.id FROM users u",
+        ] {
+            assert_eq!(joined_column_sources(sql, &columns), vec![None], "{sql}");
+        }
     }
 
     #[test]

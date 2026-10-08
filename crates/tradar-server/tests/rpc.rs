@@ -173,6 +173,48 @@ async fn edit_builds_a_statement_without_running_it() {
 }
 
 #[tokio::test]
+async fn edit_source_resolves_explicitly_qualified_columns_of_a_join() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+    let q = |sql: &str| json!({"connection": "local", "query": sql});
+    ok(&call(
+        &server,
+        "execute",
+        q("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"),
+    )
+    .await);
+    ok(&call(
+        &server,
+        "execute",
+        q("CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER, total TEXT)"),
+    )
+    .await);
+
+    let join = "SELECT o.id, o.total, u.name FROM orders o JOIN users u ON u.id = o.user_id";
+    // Not one table, so `edit.source` alone can't name it -- `gd` on a row
+    // this query returns would otherwise have nothing to go on at all.
+    let bare = call(&server, "edit.source", q(join)).await;
+    assert_eq!(ok(&bare)["table"], Value::Null);
+    assert_eq!(
+        ok(&bare)["column_sources"],
+        json!([]),
+        "no columns given to resolve against"
+    );
+
+    let source = call(
+        &server,
+        "edit.source",
+        json!({"connection": "local", "query": join, "columns": ["id", "total", "name"]}),
+    )
+    .await;
+    assert_eq!(ok(&source)["table"], Value::Null);
+    assert_eq!(
+        ok(&source)["column_sources"],
+        json!(["orders", "orders", "users"])
+    );
+}
+
+#[tokio::test]
 async fn split_uses_the_drivers_own_statement_rules() {
     let dir = tempfile::tempdir().unwrap();
     let server = connected(dir.path()).await;

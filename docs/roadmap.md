@@ -12,7 +12,7 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét, 
 
 1. **Dùng thật vài ngày trên database của chính mình** (người dùng làm, không phải việc code): để ý tên bảng kèm schema, kiểu dữ liệu lạ, độ chậm khi schema lớn (`K`/completion lần đầu). Mọi lỗi gặp được vào đây rồi sửa trước tính năng mới — bài học 2026-10-04: smoke test chỉ trên SQLite che mất cả một nhóm lỗi hiển thị kiểu dữ liệu, xem `docs/backlog/real-backend-fixes-2026-10-04.md`.
 2. ~~Chạy plugin với Elasticsearch và Cassandra thật~~ — xong (2026-10-04), tìm ra và sửa 3 lỗi; còn hai giới hạn của Cassandra ở checklist bên dưới.
-3. **Mục nhỏ**: ~~thứ tự cột tài liệu Mongo theo thứ tự trường~~ — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`; `gd` theo FK cho kết quả `JOIN`; ~~navigator dạng cây~~ — xong (2026-10-06), xem `docs/backlog/nvim-schema-tree-2026-10-06.md`; huỷ query thật sự phía database.
+3. **Mục nhỏ**: ~~thứ tự cột tài liệu Mongo theo thứ tự trường~~ — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`; ~~`gd` theo FK cho kết quả `JOIN`~~ — xong (2026-10-07), xem `docs/backlog/gd-fk-join-2026-10-07.md`; ~~navigator dạng cây~~ — xong (2026-10-06), xem `docs/backlog/nvim-schema-tree-2026-10-06.md`; huỷ query thật sự phía database.
 4. **Quyết định cuối về TUI** (giữ đóng băng hay bỏ hẳn) — sau mục 1.
 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước, vì hiện bảo mật dựa vào quyền `0600` của unix socket; chỉ đáng khi server chạy ở máy khác hoặc dùng chung); Kafka/RabbitMQ/HTTP/Socket qua server (cần kênh đẩy từ server); Windows named pipe.
@@ -53,7 +53,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Giai đoạn A của plugin (gắn connection theo file, async, kết quả yank/export, statusline, blink source, picker telescope, history, `:checkhealth`) — xong (2026-10-04)
 - [x] Giai đoạn B (trừ navigator cây): `K` hover, `gd` trên tên bảng, `gd` theo FK trong kết quả, `EXPLAIN` một phím — xong (2026-10-04)
 - [x] Navigator dạng cây (`connection → schema → bảng → cột`) trong Neovim — xong (2026-10-06), xem `docs/backlog/nvim-schema-tree-2026-10-06.md`
-- [ ] `gd` theo FK cho kết quả nhiều bảng (JOIN) — cần biết cột đến từ bảng nào, `QueryResult` chưa mang thông tin đó
+- [x] `gd` theo FK cho kết quả nhiều bảng (JOIN) — xong (2026-10-07), xem `docs/backlog/gd-fk-join-2026-10-07.md`. Giải quyết đúng chỗ roadmap từng nêu ("`QueryResult` chưa mang thông tin đó") bằng cách không cần `QueryResult` mang gì cả — `query_driver::joined_column_sources` suy ra bảng nguồn của một cột `alias.column` thuần từ text câu SELECT, cùng cách `single_table_source` đã làm cho trường hợp một bảng. Chỉ cột viết alias tường minh mới nhảy được; cột trần hoặc biểu thức để sau (cần schema để gỡ mơ hồ).
 - [x] Chặn `UPDATE`/`DELETE` thiếu `WHERE`/`DROP`/`TRUNCATE` + connection "protected" hỏi mọi lệnh ghi + `⚠` trên statusline — xong (2026-10-04)
 - [x] Sửa ô / xoá dòng ngay trong kết quả (`i`/`dd`, hiện câu lệnh → xác nhận → làm mới) — xong (2026-10-04)
 - [x] Mongo/Elasticsearch/Redis trong Neovim (`.mongo`/`.redis`/`.esq`, guard theo ngôn ngữ, bảng tài liệu sửa được) — xong (2026-10-04), xem `docs/backlog/real-backend-fixes-2026-10-04.md`
