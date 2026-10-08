@@ -41,8 +41,12 @@ struct State {
     cursor_order: VecDeque<u64>,
     next_cursor: u64,
     /// In-flight `execute`s that a client named with `query_id`, so a
-    /// `cancel` from the same (or another) connection can reach them.
-    running: HashMap<String, Arc<Notify>>,
+    /// `cancel` from the same (or another) connection can reach them --
+    /// the `Notify` to drop the client's own wait, plus the driver to fire
+    /// a real DB-side `cancel_query` against (`cancel` needs both: which
+    /// future to stop waiting on, and which connection to tell the
+    /// database about).
+    running: HashMap<String, (Arc<Notify>, Arc<dyn QueryDriver>)>,
 }
 
 pub struct Server {
@@ -102,7 +106,7 @@ impl Server {
             "status" => self.status(params).await,
             "schema" => self.schema(params).await,
             "execute" => self.execute(params).await,
-            "cancel" => self.cancel(params),
+            "cancel" => self.cancel(params).await,
             "shutdown" => {
                 self.shutdown.notify_one();
                 Ok(json!({"ok": true}))
@@ -232,9 +236,8 @@ impl Server {
 
         // The lock is not held across this await: a slow query on one
         // connection must not block another client's `fetch`. A `cancel`
-        // for this `query_id` drops the in-flight future -- the same thing
-        // the TUI's `cancel()` does by aborting its task, with the same
-        // limit: the database may still finish the statement on its side.
+        // for this `query_id` drops the in-flight future *and* fires the
+        // driver's own `cancel_query` -- see `cancel` below.
         let query_id = params.get("query_id").and_then(Value::as_str);
         let cancel = Arc::new(Notify::new());
         if let Some(id) = query_id {
@@ -242,7 +245,7 @@ impl Server {
                 .lock()
                 .unwrap()
                 .running
-                .insert(id.to_string(), Arc::clone(&cancel));
+                .insert(id.to_string(), (Arc::clone(&cancel), Arc::clone(&driver)));
         }
         let outcome = tokio::select! {
             result = driver.execute(query) => Some(result),
@@ -320,13 +323,18 @@ impl Server {
         Ok(json!({"text": driver.crud_snippet(entry, op, &columns)}))
     }
 
-    fn cancel(&self, params: &Value) -> Result<Value, RpcError> {
+    async fn cancel(&self, params: &Value) -> Result<Value, RpcError> {
         let id = str_param(params, "query_id")?;
         let target = self.state.lock().unwrap().running.get(id).cloned();
-        if let Some(notify) = &target {
-            notify.notify_one();
-        }
-        Ok(json!({"cancelled": target.is_some()}))
+        let Some((notify, driver)) = target else {
+            return Ok(json!({"cancelled": false}));
+        };
+        notify.notify_one();
+        // Best-effort; the client already got `cancelled: true` either
+        // way -- see `QueryDriver::cancel_query`'s own doc comment for why
+        // this never promises the statement actually stopped.
+        let _ = driver.cancel_query().await;
+        Ok(json!({"cancelled": true}))
     }
 
     /// Rebuilds a connection's completion source from the live schema. A

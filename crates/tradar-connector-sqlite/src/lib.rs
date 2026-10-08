@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Column, Executor, Row, Sqlite, SqlitePool, Transaction, TypeInfo, ValueRef};
 use tokio::sync::Mutex;
 
@@ -18,6 +18,30 @@ use tradar_query_workbench::query_driver::{
     self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
+
+/// A raw SQLite connection handle, cached once right after connecting (see
+/// `connect()`) so `cancel_query` can call `sqlite3_interrupt` on it
+/// directly later -- going around sqlx's own `lock_handle()`, which would
+/// have to round-trip through this same connection's dedicated worker
+/// thread, and so can't be served while that thread is itself blocked
+/// inside the one `sqlite3_step()` call a slow query is stuck in, which is
+/// exactly when a cancel is needed. `sqlite3_interrupt` is documented safe
+/// to call from any thread at any time against a connection that hasn't
+/// been closed, which is why going around sqlx's lock here is sound.
+///
+/// Valid only as long as the one pooled connection it came from stays
+/// open -- this driver forces `max_connections(1)` for exactly this
+/// reason (see `connect()`): with more than one physical connection in the
+/// pool, a cached handle from just one of them wouldn't reliably be the
+/// connection a later query actually runs on.
+struct RawHandle(*mut libsqlite3_sys::sqlite3);
+
+// SAFETY: the pointer is read only by passing it straight to
+// `libsqlite3_sys::sqlite3_interrupt`, which SQLite's own documentation
+// says is safe to call concurrently from any thread against a handle that
+// is still open -- see `RawHandle`'s own doc comment.
+unsafe impl Send for RawHandle {}
+unsafe impl Sync for RawHandle {}
 
 struct SqliteDriver {
     path: String,
@@ -33,6 +57,8 @@ struct SqliteDriver {
     /// would mean either blocking the draw or making the call async for
     /// every other driver's sake.
     in_transaction: AtomicBool,
+    /// Set once by `connect()`, read by `cancel_query` -- see `RawHandle`.
+    handle: Option<RawHandle>,
 }
 
 impl SqliteDriver {
@@ -42,6 +68,7 @@ impl SqliteDriver {
             pool: None,
             transaction: Mutex::new(None),
             in_transaction: AtomicBool::new(false),
+            handle: None,
         }
     }
 
@@ -185,7 +212,20 @@ impl QueryDriver for SqliteDriver {
         let options = SqliteConnectOptions::new()
             .filename(&self.path)
             .create_if_missing(true);
-        self.pool = Some(SqlitePool::connect_with(options).await?);
+        // One connection, not sqlx's own default pool of several -- see
+        // `RawHandle`'s doc comment for why `cancel_query` needs every
+        // query to land on the exact connection whose raw handle was
+        // cached below.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        {
+            let mut conn = pool.acquire().await?;
+            let mut locked = conn.lock_handle().await?;
+            self.handle = Some(RawHandle(locked.as_raw_handle().as_ptr()));
+        }
+        self.pool = Some(pool);
         Ok(())
     }
 
@@ -310,6 +350,16 @@ impl QueryDriver for SqliteDriver {
 
     fn in_transaction(&self) -> bool {
         self.in_transaction.load(Ordering::Relaxed)
+    }
+
+    async fn cancel_query(&self) -> anyhow::Result<()> {
+        if let Some(handle) = &self.handle {
+            // SAFETY: `handle.0` came from this same (still-open, single)
+            // connection's own `as_raw_handle()`; `sqlite3_interrupt` is
+            // documented safe to call concurrently from any thread.
+            unsafe { libsqlite3_sys::sqlite3_interrupt(handle.0) };
+        }
+        Ok(())
     }
 }
 
@@ -966,6 +1016,45 @@ mod tests {
                 rows: vec![vec!["1".to_string()]],
                 truncated: false,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_query_really_stops_a_running_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let mut driver = SqliteDriver::new(path.to_str().unwrap());
+        driver.connect().await.unwrap();
+        let driver = std::sync::Arc::new(driver);
+
+        // Unbounded (no `LIMIT`), and the final `count(*)` means SQLite
+        // evaluates the whole thing inside one blocking `sqlite3_step()`
+        // call with no row-by-row yield in between -- the exact case
+        // `RawHandle` exists for: a cancel that only worked between rows
+        // would hang here, since there is only one row, ever.
+        let slow = std::sync::Arc::clone(&driver);
+        let handle = tokio::spawn(async move {
+            slow.execute(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) \
+                 SELECT count(*) FROM c",
+            )
+            .await
+        });
+
+        // Give the query time to actually start running before cancelling
+        // it -- cancelling too early would race against the worker thread
+        // even starting `sqlite3_step()`.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        driver.cancel_query().await.unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("cancel_query should stop the runaway recursive CTE well under 10s, not hang")
+            .unwrap();
+
+        assert!(
+            result.is_err(),
+            "an interrupted query should report an error, not a result"
         );
     }
 }

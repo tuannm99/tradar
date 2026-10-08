@@ -450,6 +450,56 @@ async fn cancel_stops_a_running_query_and_other_requests_are_not_blocked() {
 }
 
 #[tokio::test]
+async fn cancel_really_stops_the_statement_db_side_not_just_the_clients_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(connected(dir.path()).await);
+    // Unbounded, and SQLite's own pool for this connection holds exactly
+    // one physical connection (`SqlitePoolOptions::max_connections(1)`,
+    // see `RawHandle` in `tradar-connector-sqlite`) -- so as long as this
+    // keeps running DB-side, it alone occupies that one connection and a
+    // second query on the same connection can't even start, let alone
+    // finish. If `cancel` only dropped the client's own wait (the old
+    // behavior), the probe query below would hang until this reaches its
+    // own timeout, which it never does.
+    let slow =
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c";
+
+    let running = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            call(
+                &server,
+                "execute",
+                json!({"connection": "local", "query": slow, "query_id": "q1"}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let cancelled = call(&server, "cancel", json!({"query_id": "q1"})).await;
+    assert_eq!(ok(&cancelled)["cancelled"], true);
+    tokio::time::timeout(std::time::Duration::from_secs(5), running)
+        .await
+        .expect("the cancelled execute's own client-side wait should drop promptly")
+        .unwrap();
+
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        call(
+            &server,
+            "execute",
+            json!({"connection": "local", "query": "SELECT 1"}),
+        ),
+    )
+    .await
+    .expect(
+        "a second query on the same connection should get the connection back promptly -- \
+         it would hang here if the recursive CTE were still actually running DB-side",
+    );
+    assert_eq!(ok(&probe)["rows"], json!([["1"]]));
+}
+
+#[tokio::test]
 async fn one_connection_runs_requests_concurrently() {
     let dir = tempfile::tempdir().unwrap();
     let server = Arc::new(server_with_sqlite(dir.path()));

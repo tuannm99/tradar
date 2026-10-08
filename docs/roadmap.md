@@ -12,7 +12,7 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét, 
 
 1. **Dùng thật vài ngày trên database của chính mình** (người dùng làm, không phải việc code): để ý tên bảng kèm schema, kiểu dữ liệu lạ, độ chậm khi schema lớn (`K`/completion lần đầu). Mọi lỗi gặp được vào đây rồi sửa trước tính năng mới — bài học 2026-10-04: smoke test chỉ trên SQLite che mất cả một nhóm lỗi hiển thị kiểu dữ liệu, xem `docs/backlog/real-backend-fixes-2026-10-04.md`.
 2. ~~Chạy plugin với Elasticsearch và Cassandra thật~~ — xong (2026-10-04), tìm ra và sửa 3 lỗi; còn hai giới hạn của Cassandra ở checklist bên dưới.
-3. **Mục nhỏ**: ~~thứ tự cột tài liệu Mongo theo thứ tự trường~~ — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`; ~~`gd` theo FK cho kết quả `JOIN`~~ — xong (2026-10-07), xem `docs/backlog/gd-fk-join-2026-10-07.md`; ~~navigator dạng cây~~ — xong (2026-10-06), xem `docs/backlog/nvim-schema-tree-2026-10-06.md`; huỷ query thật sự phía database.
+3. **Mục nhỏ** — **cả 4 mục đã xong**: ~~thứ tự cột tài liệu Mongo theo thứ tự trường~~ — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`; ~~`gd` theo FK cho kết quả `JOIN`~~ — xong (2026-10-07), xem `docs/backlog/gd-fk-join-2026-10-07.md`; ~~navigator dạng cây~~ — xong (2026-10-06), xem `docs/backlog/nvim-schema-tree-2026-10-06.md`; ~~huỷ query thật sự phía database~~ — xong (2026-10-08) cho Postgres/SQLite, xem `docs/backlog/real-cancel-2026-10-08.md`.
 4. **Quyết định cuối về TUI** (giữ đóng băng hay bỏ hẳn) — sau mục 1.
 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước, vì hiện bảo mật dựa vào quyền `0600` của unix socket; chỉ đáng khi server chạy ở máy khác hoặc dùng chung); Kafka/RabbitMQ/HTTP/Socket qua server (cần kênh đẩy từ server); Windows named pipe.
@@ -62,7 +62,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [ ] Cassandra: sửa/xoá dòng (driver cần nhớ kiểu cột từ `list_schema` để sinh literal CQL đúng kiểu: uuid/số không nháy)
 - [ ] Completion sau `keyspace.`/`schema.` (Cassandra: tên bảng là `demo.users` nhưng từ đang gõ chỉ là `us`)
 - [x] Thứ tự cột theo thứ tự trường tài liệu — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`
-- [ ] Huỷ thật sự phía database (Postgres `pg_cancel_request`, SQLite interrupt) — hiện chỉ bỏ phần chờ
+- [x] Huỷ thật sự phía database — xong (2026-10-08) cho Postgres (`pg_cancel_backend` qua connection khác trong pool, không phải `CancelRequest` wire-protocol vì `sqlx` không lộ `process_id`/`secret_key`) và SQLite (`sqlite3_interrupt` qua `libsqlite3-sys` trực tiếp trên raw handle cache lúc connect), xem `docs/backlog/real-cancel-2026-10-08.md`. Driver khác vẫn chỉ bỏ phần chờ như trước.
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response
 - [x] TUI đóng băng (chỉ sửa lỗi) — chốt 2026-10-04, xem "Hướng đi hiện tại" ở đầu file
 - [ ] Quyết định cuối: bỏ hẳn TUI hay giữ đóng băng — sau vài tuần dùng Neovim trên database thật
