@@ -12,6 +12,11 @@ async-trait = "0.1"
 anyhow = "1"
 futures-util = "0.3"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# Same instance `sqlx-sqlite` itself depends on (Cargo unifies by semver
+# range, confirmed against Cargo.lock) -- needed to call `sqlite3_interrupt`
+# directly for `cancel_query`, which sqlx's own safe API can't reach while
+# the connection is busy; see the doc comment on `RawHandle` in `lib.rs`.
+libsqlite3-sys = "0.30"
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]

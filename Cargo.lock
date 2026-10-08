@@ -5196,6 +5196,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures-util",
+ "libsqlite3-sys",
  "sqlx",
  "tempfile",
  "tokio",

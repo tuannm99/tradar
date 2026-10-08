@@ -1458,6 +1458,25 @@ pub trait QueryDriver: Send + Sync {
         Ok(())
     }
 
+    /// Best-effort real cancel of whatever this driver has running right
+    /// now, DB-side -- not just abandoning the caller's own wait on it,
+    /// which every caller (TUI's `QueryEngine::cancel`, the server's
+    /// `cancel` RPC) already does by aborting/dropping the future around
+    /// `execute`. `Ok(())`, including this default no-op, never means
+    /// "confirmed stopped": the statement may finish naturally before the
+    /// cancel reaches it, or this driver may not have been taught a real
+    /// mid-flight cancel at all -- every driver but Postgres/SQLite keeps
+    /// this default, same behavior as before this existed. Scoped to
+    /// "whatever is running on this driver instance right now" rather
+    /// than one specific `execute` call -- correct for how every actual
+    /// caller in this codebase uses it today (one `execute` in flight per
+    /// connection at a time); it is not guaranteed to target the right
+    /// one of several truly concurrent calls on the same connection, a
+    /// case nothing here currently produces.
+    async fn cancel_query(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Whether a transaction opened by a `BEGIN` (see `transaction_control`)
     /// is still open -- what `auto-commit: ON/OFF` in the UI shows, derived
     /// rather than tracked as separate mode: "off" just means "there is an

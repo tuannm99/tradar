@@ -3,11 +3,11 @@
 //! else in this crate is `pub`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use sqlx::postgres::{PgPoolOptions, PgRow};
+use sqlx::postgres::{PgConnection, PgPoolOptions, PgRow};
 use sqlx::{Column, Executor, PgPool, Postgres, Row, Transaction, TypeInfo, ValueRef};
 use tokio::sync::Mutex;
 
@@ -33,6 +33,16 @@ struct PostgresDriver {
     /// would mean either blocking the draw or making the call async for
     /// every other driver's sake.
     in_transaction: AtomicBool,
+    /// The backend pid of whatever `execute` call is running right now
+    /// (`SELECT pg_backend_pid()`, fetched on the exact same connection the
+    /// real query then runs on -- see `run_tracked`), plus a token unique
+    /// to that call so a slower call's cleanup can never clobber a newer
+    /// call's entry after it's already started (checked, not just
+    /// overwritten, when clearing). `None` whenever nothing is running.
+    current: std::sync::Mutex<Option<(u64, i32)>>,
+    /// Source of the tokens `current` uses -- just needs to be unique per
+    /// call, never reset, ordering between calls doesn't matter.
+    next_token: AtomicU64,
 }
 
 impl PostgresDriver {
@@ -42,7 +52,37 @@ impl PostgresDriver {
             pool: None,
             transaction: Mutex::new(None),
             in_transaction: AtomicBool::new(false),
+            current: std::sync::Mutex::new(None),
+            next_token: AtomicU64::new(0),
         }
+    }
+
+    /// Runs `query` against `conn`, with `self.current` tracking its own
+    /// backend pid for the duration -- see `current`'s own doc comment for
+    /// why this has to be the exact connection the query itself runs on,
+    /// not a separate one from the pool. The `SELECT pg_backend_pid()`
+    /// lookup failing (never observed, but it's one more fallible round
+    /// trip) just means this one call can't be real-cancelled; it still
+    /// runs normally.
+    async fn run_tracked(
+        &self,
+        conn: &mut PgConnection,
+        query: &str,
+    ) -> anyhow::Result<QueryResult> {
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        if let Ok(pid) = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conn)
+            .await
+        {
+            *self.current.lock().unwrap() = Some((token, pid));
+        }
+        let result = run(&mut *conn, query).await;
+        let mut current = self.current.lock().unwrap();
+        if matches!(*current, Some((t, _)) if t == token) {
+            *current = None;
+        }
+        drop(current);
+        result
     }
 
     /// Handles a `BEGIN`/`COMMIT`/`ROLLBACK` statement by driving the held
@@ -375,15 +415,28 @@ impl QueryDriver for PostgresDriver {
         // same as before transactions existed.
         let mut guard = self.transaction.lock().await;
         if let Some(tx) = guard.as_mut() {
-            return run(&mut **tx, query).await;
+            return self.run_tracked(tx, query).await;
         }
         drop(guard);
         let pool = self.pool.as_ref().expect("connect() must be called first");
-        run(pool, query).await
+        let mut conn = pool.acquire().await?;
+        self.run_tracked(&mut conn, query).await
     }
 
     fn in_transaction(&self) -> bool {
         self.in_transaction.load(Ordering::Relaxed)
+    }
+
+    async fn cancel_query(&self) -> anyhow::Result<()> {
+        let Some((_, pid)) = *self.current.lock().unwrap() else {
+            return Ok(());
+        };
+        let pool = self.pool.as_ref().expect("connect() must be called first");
+        sqlx::query("SELECT pg_cancel_backend($1)")
+            .bind(pid)
+            .execute(pool)
+            .await?;
+        Ok(())
     }
 }
 
@@ -965,5 +1018,37 @@ mod tests {
             .to_string();
 
         assert!(error.contains("DETAIL:"), "error was: {error}");
+    }
+
+    #[tokio::test]
+    async fn cancel_query_really_stops_a_running_statement() {
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_string = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut driver = PostgresDriver::new(&conn_string);
+        driver.connect().await.unwrap();
+        let driver = Arc::new(driver);
+
+        let slow = Arc::clone(&driver);
+        let handle = tokio::spawn(async move { slow.execute("SELECT pg_sleep(30)").await });
+
+        // Give the query time to actually reach the server and start
+        // running before cancelling it -- cancelling before `current` is
+        // even set would be a no-op, not a real test of the real path.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        driver.cancel_query().await.unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect(
+                "cancel_query should make pg_sleep(30) return in well under its own 30s, not hang",
+            )
+            .unwrap();
+
+        let error = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            error.contains("cancel"),
+            "expected a cancel-related error from Postgres, got: {error}"
+        );
     }
 }

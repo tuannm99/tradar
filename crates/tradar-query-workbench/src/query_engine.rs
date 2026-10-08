@@ -326,14 +326,25 @@ impl QueryEngine {
     }
 
     /// Abandons the running query, if any. Aborting the task drops the
-    /// driver future, which is what closes the statement on the backend for
-    /// a driver that supports it; the epoch bump means a reply that was
-    /// already in flight is ignored rather than landing after the fact.
+    /// driver future -- on its own, not a reliable cancel (dropping a
+    /// connection mid-query doesn't make most databases stop running it
+    /// quickly; Postgres in particular keeps going until it next tries to
+    /// write to the socket). Also fires `QueryDriver::cancel_query` --
+    /// best-effort, driver-specific, fire-and-forget since this method is
+    /// sync -- for the drivers that can reach into the database and really
+    /// stop it (Postgres, SQLite); every other driver's default no-op
+    /// leaves behavior exactly as before this existed. The epoch bump means
+    /// a reply that was already in flight is ignored rather than landing
+    /// after the fact.
     pub fn cancel(&mut self) -> bool {
         let Some(handle) = self.running.take() else {
             return false;
         };
         handle.abort();
+        let driver = Arc::clone(&self.driver);
+        tokio::spawn(async move {
+            let _ = driver.cancel_query().await;
+        });
         self.epoch += 1;
         self.pending = false;
         self.running_since = None;
