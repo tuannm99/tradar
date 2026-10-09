@@ -3,6 +3,7 @@
 local rpc = require('tradar.rpc')
 local render = require('tradar.render')
 local guard = require('tradar.guard')
+local blocks = require('tradar.blocks')
 local uv = vim.uv or vim.loop
 
 local M = {}
@@ -95,6 +96,25 @@ function M.connection_for(buf)
   return vim.b[buf].tradar_connection or modeline(buf) or project_file(buf) or state.default
 end
 
+--- The fenced block (see `tradar.blocks`) 1-based `row` falls inside, for
+--- a `.tdb` buffer -- `nil` for every other filetype (block syntax is
+--- `.tdb`-only) and for a `.tdb` row that isn't inside any block.
+function M.block_at(buf, row)
+  buf = resolve_buf(buf)
+  if vim.bo[buf].filetype ~= 'tdb' then return nil end
+  return blocks.at(vim.api.nvim_buf_get_lines(buf, 0, -1, false), row)
+end
+
+--- `M.connection_for(buf)`, except a `.tdb` block that names its own
+--- connection in its opening fence (` ```sql pg-local `) wins over the
+--- buffer-wide one -- each block in a `.tdb` file can talk to a different
+--- connection. Falls back to `M.connection_for(buf)` for a block with no
+--- connection of its own, same as every other filetype.
+function M.block_connection(buf, row)
+  local block = M.block_at(buf, row)
+  return (block and block.conn) or M.connection_for(buf)
+end
+
 --- `cb(driver_id)` for a connection ("sqlite", "postgres", ...); cached.
 local function driver_of(conn, cb)
   if state.drivers then return cb(state.drivers[conn]) end
@@ -148,7 +168,7 @@ end
 function M.status()
   local in_tradar = vim.b.tradar_attached or vim.api.nvim_buf_get_name(0):find('^tradar://') ~= nil
   if not in_tradar and not state.running then return '' end
-  local conn = (state.running and state.running.conn) or M.connection_for(0)
+  local conn = (state.running and state.running.conn) or M.block_connection(0, vim.api.nvim_win_get_cursor(0)[1])
   if not conn then return '' end
   local parts = { 'db ' .. conn .. (M.is_protected(conn) and ' ⚠' or '') }
   if state.alive[conn] == false then parts[1] = parts[1] .. ' ✗' end
@@ -542,7 +562,9 @@ local function run_text(buf, text, base_row, base_col, flags)
   if state.running then
     return notify('a query is already running — cancel it with <leader>rx', vim.log.levels.WARN)
   end
-  local conn = M.connection_for(buf)
+  -- `base_row` is 0-based (it is a buffer line offset, used below for
+  -- diagnostics positions); `block_connection`/`blocks.at` want 1-based.
+  local conn = M.block_connection(buf, base_row + 1)
   if not conn then
     return M.connect(nil, function() run_text(buf, text, base_row, base_col) end)
   end
@@ -614,11 +636,34 @@ function M.run(range_start, range_end, all, transform)
     local lines = vim.api.nvim_buf_get_lines(buf, range_start - 1, range_end, false)
     return run_text(buf, table.concat(lines, '\n'), range_start - 1, 0)
   end
-  local conn = M.connection_for(buf)
+
+  -- `.tdb`: scoped to the fenced block under the cursor, not the whole
+  -- buffer -- a buffer can mix dialects (one block SQL, the next Mongo),
+  -- and sending that mix through one driver's own `split` would be
+  -- nonsense. `base_row` (0-based) is where the block's own `lines`
+  -- starts within the real buffer, for turning a block-relative position
+  -- back into a real one before it reaches `run_text`/diagnostics, both
+  -- of which only know real buffer coordinates.
+  local base_row = 0
+  local lines
+  if vim.bo[buf].filetype == 'tdb' then
+    local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
+    local block = M.block_at(buf, cursor_row)
+    if not block then
+      return notify('cursor is not inside a ```sql/```mongo/```redis block', vim.log.levels.WARN)
+    end
+    base_row = block.start - 1
+    local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    lines = {}
+    for i = block.start, block.finish do lines[#lines + 1] = all_lines[i] end
+  else
+    lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  end
+
+  local conn = M.block_connection(buf, base_row + 1)
   if not conn then
     return M.connect(nil, function() M.run(nil, nil, all) end)
   end
-  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local text = table.concat(lines, '\n')
   ensure_connected(conn, function()
     call('split', { connection = conn, text = text }, function(statements)
@@ -628,7 +673,7 @@ function M.run(range_start, range_end, all, transform)
       if #statements == 0 then return notify('nothing to run', vim.log.levels.WARN) end
       local function position(s)
         local row, col = offset_to_pos(lines, s.start)
-        return row, col
+        return row + base_row, col
       end
       if all then
         local function go()
@@ -671,6 +716,7 @@ function M.run(range_start, range_end, all, transform)
         return
       end
       local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+      row = row - base_row
       local offset = col
       for r = 1, row - 1 do offset = offset + #lines[r] + 1 end
       local chosen
@@ -908,7 +954,7 @@ end
 --- `K`: what the schema knows about the table or column under the cursor,
 --- in a float. Falls back to the LSP's own hover when it knows nothing.
 function M.hover()
-  local conn = M.connection_for(0)
+  local conn = M.block_connection(0, vim.api.nvim_win_get_cursor(0)[1])
   local word, qualifier = word_under_cursor()
   if not (conn and word) then return fallback('hover') end
   get_schema(conn, function(entries)
@@ -950,7 +996,7 @@ end
 --- `gd` on a table name: show its rows. Anything else: the LSP's own.
 function M.goto_table()
   local buf = vim.api.nvim_get_current_buf()
-  local conn = M.connection_for(buf)
+  local conn = M.block_connection(buf, vim.api.nvim_win_get_cursor(0)[1])
   local word = word_under_cursor()
   if not (conn and word) then return fallback('definition') end
   get_schema(conn, function(entries)
@@ -1116,7 +1162,8 @@ end
 --- Plans the statement under the cursor (`EXPLAIN`, or SQLite's
 --- `EXPLAIN QUERY PLAN`). Never `ANALYZE`: that would *execute* it.
 function M.explain()
-  local conn = M.connection_for(0)
+  local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
+  local conn = M.block_connection(0, cursor_row)
   if not conn then return M.connect(nil, M.explain) end
   driver_of(conn, function(driver)
     -- `EXPLAIN <statement>` is SQL; Mongo/Redis/Elasticsearch have no such prefix.
@@ -1133,10 +1180,33 @@ end
 
 -- ── completion ───────────────────────────────────────────────────────────
 
+--- The text to send `complete`/`split` for "everything before the cursor
+--- at (1-based) `row`, (0-based) `col`" -- the whole buffer up to there,
+--- except for `.tdb`, where it is only the enclosing block's own lines up
+--- to there: a block's dialect can differ from the one before/after it,
+--- so including that other text would feed the wrong grammar into the
+--- server's completion/split logic. `nil` for a `.tdb` row outside any
+--- block -- nothing sensible to complete there.
+function M.text_before_cursor(buf, row, col)
+  buf = resolve_buf(buf)
+  local from = 0
+  if vim.bo[buf].filetype == 'tdb' then
+    local block = M.block_at(buf, row)
+    if not block then return nil end
+    from = block.start - 1
+  end
+  local lines = vim.api.nvim_buf_get_lines(buf, from, row, false)
+  lines[#lines] = lines[#lines]:sub(1, col)
+  return table.concat(lines, '\n')
+end
+
 --- `cb(items)` with `{text, kind}` for the text before the cursor. Used by
---- the blink.cmp source; async, so typing never waits on it.
-function M.complete(buf, text, cb)
-  local conn = M.connection_for(buf)
+--- the blink.cmp source; async, so typing never waits on it. `row`
+--- (1-based, defaults to the cursor's) picks which `.tdb` block's own
+--- connection to use -- see `M.block_connection`; irrelevant otherwise.
+function M.complete(buf, text, cb, row)
+  row = row or vim.api.nvim_win_get_cursor(0)[1]
+  local conn = M.block_connection(buf, row)
   if not conn or not state.connected[conn] then return cb({}) end
   rpc.request('complete', { connection = conn, text = text }, function(err, result)
     cb((not err and result) and result.items or {})
@@ -1150,11 +1220,11 @@ function M.omnifunc(findstart, base)
     local line = vim.api.nvim_get_current_line():sub(1, col)
     return col - #line:match('[%w_$]*$')
   end
-  local conn = M.connection_for(0)
+  local conn = M.block_connection(0, row)
   if not conn or not state.connected[conn] then return {} end
-  local lines = vim.api.nvim_buf_get_lines(0, 0, row, false)
-  lines[#lines] = lines[#lines]:sub(1, col)
-  local err, result = rpc.request_sync('complete', { connection = conn, text = table.concat(lines, '\n') })
+  local text = M.text_before_cursor(0, row, col)
+  if not text then return {} end
+  local err, result = rpc.request_sync('complete', { connection = conn, text = text })
   if err or not result then return {} end
   local out = {}
   for _, item in ipairs(result.items) do out[#out + 1] = { word = item.text, menu = '[' .. item.kind .. ']' } end

@@ -11,7 +11,10 @@ function source.new(opts)
 end
 
 function source:enabled()
-  return vim.b.tradar_attached == true and require('tradar').connection_for(0) ~= nil
+  if vim.b.tradar_attached ~= true then return false end
+  local tradar = require('tradar')
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  return tradar.block_connection(0, row) ~= nil
 end
 
 function source:get_trigger_characters()
@@ -19,13 +22,14 @@ function source:get_trigger_characters()
 end
 
 function source:get_completions(ctx, callback)
+  local tradar = require('tradar')
   local buf = ctx.bufnr or vim.api.nvim_get_current_buf()
   local row, col = ctx.cursor[1], ctx.cursor[2]
-  local lines = vim.api.nvim_buf_get_lines(buf, 0, row, false)
-  lines[#lines] = lines[#lines]:sub(1, col)
+  local text = tradar.text_before_cursor(buf, row, col)
+  if not text then return callback({ items = {}, is_incomplete_backward = false, is_incomplete_forward = false }) end
 
   local cancelled = false
-  require('tradar').complete(buf, table.concat(lines, '\n'), function(items)
+  tradar.complete(buf, text, function(items)
     if cancelled then return end
     local out = {}
     for i, item in ipairs(items) do
