@@ -56,6 +56,30 @@ Dùng file `.mongo` (filetype `mongo`, tô màu như JavaScript), `.redis`, `.es
 
 Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu hiện **bảng** (cột phẳng `address.city`) để dùng `i`/`dd`/`gyc`/export như SQL; `gT` đổi sang JSON. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 
+### Định dạng `.tdb` (nhiều dialect, nhiều connection, một file)
+
+Thay vì chia theo filetype (`.sql`/`.mongo`/`.redis`/`.esq`) — bất tiện khi muốn so sánh/ghi chú nhiều truy vấn khác dialect cạnh nhau — một file `.tdb` gồm nhiều block kiểu fenced code của Markdown, mỗi block tự chọn dialect và (tuỳ chọn) connection riêng:
+
+````
+# ghi chú thoải mái ở ngoài block, không chạy được
+
+```sql pg-local
+SELECT * FROM users LIMIT 10;
+```
+
+```mongo atlas-dev
+db.users.find({active: true})
+```
+
+```redis
+GET session:123
+```
+````
+
+Dòng mở fence là `` ```<dialect> [connection] `` — thiếu `connection` thì block đó rơi về connection của buffer (modeline `-- tradar: name`/`.tradar`/`:TradarConnect`, giống file thường). `<leader>rr`/`K`/`gd`/`<leader>re`/completion đều áp dụng cho **block đang chứa con trỏ**, không phải cả buffer — đặt con trỏ ngoài mọi block thì `<leader>rr` báo rõ "không ở trong block nào" thay vì chạy nhầm. `<leader>ra` (chạy cả file)/`<leader>rx` (huỷ)/visual-mode `<leader>rr` chưa áp dụng cách này — vẫn theo connection của buffer như trước.
+
+Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block tự inject theo tag — `sql` là grammar thật nên tô đúng cú pháp SQL; `mongo`/`esq` tô theo JavaScript/JSON qua cùng alias plugin đã đăng ký cho filetype `.mongo`/`.esq` riêng; `redis` không có grammar nào khớp nên hiện plain, giống hệt file `.redis` hiện tại). Suggestion (completion bảng/cột) theo đúng dialect của block, không phải LSP thật — LSP thật theo từng block (qua [otter.nvim](https://github.com/jmbuhr/otter.nvim)) để dành cho sau.
+
 | Phím (tiền tố `<leader>r`) | Việc |
 |---|---|
 | `rr` | chạy statement dưới con trỏ (visual: phần chọn) |
