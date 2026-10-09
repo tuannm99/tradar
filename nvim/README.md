@@ -8,12 +8,29 @@ Chạy query trên database ngay trong Neovim. Editor là buffer Neovim bình th
 cargo build --release -p tradar-server        # trong repo tradar
 ```
 
-Với `lazy.nvim`:
+**Đang dev tradar (khuyên dùng lúc này)** — `dir =` trỏ thẳng vào checkout, Lua và `tradar-server` luôn khớp vì cùng một checkout; sửa gì chỉ cần restart Neovim (hoặc `:TradarRestart` riêng cho server), không qua bước git nào:
 
 ```lua
-{ dir = "~/dev/local/tradar/nvim", ft = "sql", dependencies = { "nvim-telescope/telescope.nvim" },
+{ dir = "~/dev/local/tradar/nvim", name = "tradar.nvim", lazy = false,
+  dependencies = { "nvim-telescope/telescope.nvim" },
   config = function() require("tradar").setup {} end }
 ```
+
+`lazy = false`, không phải `ft = "sql"` — `.mongo`/`.redis`/`.esq` chỉ trở thành filetype thật sau khi `plugin/tradar.lua` tự nó chạy (`vim.filetype.add`), nên lazy.nvim's `ft` trigger không bao giờ nhận ra 3 filetype đó để mà load trước (gà-và-trứng); `dir=` với một plugin nhẹ (chỉ đăng ký autocmd/command, không có gì nặng lúc startup) thì `lazy = false` không đáng lo.
+
+**Khi tradar ổn định hơn (chưa đến lúc này)** — cài như một plugin GitHub bình thường, `nvim/` vẫn là thư mục con của repo Rust nên cần `build` để compile server và `config` để trỏ `rtp` vào đúng `nvim/`:
+
+```lua
+{ "tuannm99/tradar", name = "tradar.nvim", lazy = false,
+  build = "cargo build --release -p tradar-server",
+  dependencies = { "nvim-telescope/telescope.nvim" },
+  config = function(plugin)
+    vim.opt.rtp:prepend(plugin.dir .. "/nvim")
+    require("tradar").setup {}
+  end }
+```
+
+Đánh đổi so với `dir=`: mỗi lần sửa tradar phải `git push` rồi `:Lazy update` mới thấy, không còn vòng lặp sửa-restart-thử ngay — chỉ đáng khi code đã đứng, không còn sửa mỗi ngày.
 
 `:checkhealth tradar` kiểm tra binary, server, connection đã lưu. Server chạy nền và giữ nguyên bản binary cũ cho tới khi dừng: sau khi build lại, chạy `:TradarRestart` (lệnh kế tiếp tự khởi động bản mới).
 
