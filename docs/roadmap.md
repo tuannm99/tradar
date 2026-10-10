@@ -63,6 +63,7 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [ ] Completion sau `keyspace.`/`schema.` (Cassandra: tên bảng là `demo.users` nhưng từ đang gõ chỉ là `us`)
 - [x] Thứ tự cột theo thứ tự trường tài liệu — xong (2026-10-07), xem `docs/backlog/mongo-field-order-2026-10-07.md`
 - [x] Huỷ thật sự phía database — xong (2026-10-08) cho Postgres (`pg_cancel_backend` qua connection khác trong pool, không phải `CancelRequest` wire-protocol vì `sqlx` không lộ `process_id`/`secret_key`) và SQLite (`sqlite3_interrupt` qua `libsqlite3-sys` trực tiếp trên raw handle cache lúc connect), xem `docs/backlog/real-cancel-2026-10-08.md`. Driver khác vẫn chỉ bỏ phần chờ như trước.
+- [x] Định dạng `.tdb` (nhiều dialect/connection trong một file, thay cho chia theo filetype) — xong (2026-10-09), xem `docs/backlog/tdb-format-2026-10-09.md`. Ý người dùng đề xuất sau vài ngày dùng thật, không phải mục roadmap đã lên kế hoạch trước. LSP thật theo block (otter.nvim) cân nhắc rồi **bỏ qua chủ đích** (2026-10-10) — giá trị thật thấp so với công sức: hover/go-to-definition của LSP chung vô dụng so với bản tradar tự làm đã biết schema thật, còn LSP JavaScript thật gắn vào block Mongo sẽ báo lỗi sai vì không hiểu `db` là gì.
 - [ ] Kafka/RabbitMQ/HTTP/Socket qua server — cần kênh notification đẩy từ server (tail realtime), không khớp mô hình request/response
 - [x] TUI đóng băng (chỉ sửa lỗi) — chốt 2026-10-04, xem "Hướng đi hiện tại" ở đầu file
 - [ ] Quyết định cuối: bỏ hẳn TUI hay giữ đóng băng — sau vài tuần dùng Neovim trên database thật
