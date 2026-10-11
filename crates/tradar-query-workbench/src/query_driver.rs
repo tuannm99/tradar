@@ -972,6 +972,22 @@ pub enum CompletionContext {
     /// only *re-ranks* `matches`' flat list, this one narrows it to
     /// `CandidateKind::Keyword` alone.
     MongoMethod,
+    /// Cursor is right after `<schema>.`, optionally with a partial table
+    /// name already typed after the dot -- `schema` is read straight from
+    /// the token, not yet resolved against anything (same split of
+    /// responsibility `TableColumns` uses). This is what a `SchemaInfo`
+    /// whose own `name` is always `<schema>.<table>` needs: Cassandra's
+    /// `list_schema` names every entry `<keyspace>.<table>` (no bare-name
+    /// case the way Postgres only qualifies on a cross-schema collision --
+    /// see `qualify_colliding_names`), so the flat candidate list's
+    /// `text.starts_with(prefix)` check never matches a bare table name
+    /// typed after the keyspace, even though the keyspace itself was typed
+    /// correctly. Produced only when the dotted token's alias part did
+    /// *not* resolve as a `FROM`/`JOIN` alias (`TableColumns` already
+    /// covers the case where it did) -- a real schema/keyspace name versus
+    /// an unknown alias isn't told apart here; the caller with schema
+    /// access finds out by trying to match it.
+    SchemaQualifiedTable { schema: String },
 }
 
 /// A table named in a FROM/JOIN clause, and the alias it was given (if
@@ -1059,9 +1075,18 @@ pub fn completion_context(text_before_cursor: &str) -> CompletionContext {
             return CompletionContext::MongoMethod;
         }
         let alias = &last.word[..dot];
-        return match (!alias.is_empty()).then(|| resolve_alias(&tokens, alias)) {
-            Some(Some(table)) => CompletionContext::TableColumns { table },
-            _ => CompletionContext::None,
+        if alias.is_empty() {
+            return CompletionContext::None;
+        }
+        return match resolve_alias(&tokens, alias) {
+            Some(table) => CompletionContext::TableColumns { table },
+            // Not a `FROM`/`JOIN` alias -- try it as a schema/keyspace
+            // name instead (`SchemaQualifiedTable`'s own doc comment).
+            // The caller with schema access is the one that finds out
+            // whether it really is one.
+            None => CompletionContext::SchemaQualifiedTable {
+                schema: alias.to_string(),
+            },
         };
     }
     // The index of the triggering `JOIN` keyword itself -- either the last
@@ -2260,10 +2285,44 @@ mod tests {
     }
 
     #[test]
-    fn dot_on_an_unknown_alias_is_not_a_special_context() {
+    fn dot_on_an_unknown_alias_is_tried_as_a_schema_name_instead() {
+        // `x` isn't a `FROM`/`JOIN` alias in this query -- but this
+        // function has no schema to check `x` against either way, so it
+        // reports the weaker `SchemaQualifiedTable` context rather than
+        // giving up; `matches_in_context` is the one with schema access,
+        // and falls back to the flat list itself if `x` isn't a real
+        // schema/keyspace name.
         assert_eq!(
             completion_context("SELECT * FROM users u WHERE x."),
-            CompletionContext::None
+            CompletionContext::SchemaQualifiedTable {
+                schema: "x".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn dot_after_a_schema_name_reports_it_for_schema_qualified_lookup() {
+        assert_eq!(
+            completion_context("SELECT * FROM demo.us"),
+            CompletionContext::SchemaQualifiedTable {
+                schema: "demo".to_string()
+            }
+        );
+        assert_eq!(
+            completion_context("SELECT * FROM demo."),
+            CompletionContext::SchemaQualifiedTable {
+                schema: "demo".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn dot_after_a_resolvable_alias_still_wins_over_schema_qualified() {
+        assert_eq!(
+            completion_context("SELECT * FROM users u WHERE u."),
+            CompletionContext::TableColumns {
+                table: "users".to_string()
+            }
         );
     }
 
@@ -2348,9 +2407,19 @@ mod tests {
         // Only one dot so far -- `resolve_alias` finds nothing for `db`
         // (no FROM/JOIN exists for Mongo text), same as always; collection
         // names are already ranked correctly in the flat list (they're
-        // `CandidateKind::Table`), so this intentionally stays `None`
-        // rather than being narrowed to methods.
-        assert_eq!(completion_context("db.ord"), CompletionContext::None);
+        // `CandidateKind::Table`), so this must not narrow to methods.
+        // `SchemaQualifiedTable` rather than `None` since that failed
+        // alias lookup is now tried as a schema name too -- `db` almost
+        // never matches a real Mongo database name, so
+        // `matches_in_context` falls back to the exact same flat list
+        // `None` would have given; it is the fallback inside that context,
+        // not this function, telling the two apart.
+        assert_eq!(
+            completion_context("db.ord"),
+            CompletionContext::SchemaQualifiedTable {
+                schema: "db".to_string()
+            }
+        );
     }
 
     #[test]

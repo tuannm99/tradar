@@ -200,6 +200,31 @@ impl CompletionSource {
                 matches.sort_by(|a, b| a.text_lower.cmp(&b.text_lower));
                 matches
             }
+            query_driver::CompletionContext::SchemaQualifiedTable { schema } => {
+                let mut matches: Vec<Candidate> = self
+                    .schema
+                    .iter()
+                    .filter_map(|e| {
+                        let (entry_schema, table) = e.name.split_once('.')?;
+                        if !entry_schema.eq_ignore_ascii_case(schema) {
+                            return None;
+                        }
+                        let lower = table.to_ascii_lowercase();
+                        (lower.starts_with(&needle) && lower != needle)
+                            .then(|| Candidate::new(table, CandidateKind::Table))
+                    })
+                    .collect();
+                // `schema` didn't resolve against any connected entry's own
+                // qualifier (an unknown keyspace, or this driver doesn't
+                // qualify names at all) -- same "nothing more specific to
+                // offer than the flat list" fallback every other context
+                // here uses.
+                if matches.is_empty() {
+                    return self.matches(prefix);
+                }
+                matches.sort_by(|a, b| a.text_lower.cmp(&b.text_lower));
+                matches
+            }
             query_driver::CompletionContext::None => self.matches(prefix),
         }
     }
@@ -604,6 +629,85 @@ mod tests {
         assert_eq!(
             source_with_fk().matches_in_context("u", &query_driver::CompletionContext::None),
             source_with_fk().matches("u")
+        );
+    }
+
+    /// Cassandra-shaped: `list_schema` always names an entry
+    /// `<keyspace>.<table>`, never bare, unlike Postgres's own
+    /// `qualify_colliding_names` (bare unless two schemas collide).
+    fn keyspace_qualified_source() -> CompletionSource {
+        CompletionSource::new(
+            &[],
+            &[
+                SchemaInfo {
+                    name: "demo.users".to_string(),
+                    columns: vec![ColumnInfo::new("id", "uuid")],
+                    kind: None,
+                    ttl: None,
+                    schema: Some("demo".to_string()),
+                    object_kind: None,
+                },
+                SchemaInfo {
+                    name: "demo.usage_log".to_string(),
+                    columns: vec![],
+                    kind: None,
+                    ttl: None,
+                    schema: Some("demo".to_string()),
+                    object_kind: None,
+                },
+                SchemaInfo {
+                    name: "other.users".to_string(),
+                    columns: vec![],
+                    kind: None,
+                    ttl: None,
+                    schema: Some("other".to_string()),
+                    object_kind: None,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn schema_qualified_table_context_offers_unqualified_names_within_that_schema() {
+        let matches = keyspace_qualified_source().matches_in_context(
+            "us",
+            &query_driver::CompletionContext::SchemaQualifiedTable {
+                schema: "demo".to_string(),
+            },
+        );
+
+        // Unqualified -- `demo.` is already typed, so the candidate must
+        // be just what replaces "us", not the whole qualified name again.
+        let names: Vec<&str> = matches.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(names, vec!["usage_log", "users"]);
+        assert!(matches.iter().all(|c| c.kind == CandidateKind::Table));
+    }
+
+    #[test]
+    fn schema_qualified_table_context_is_case_insensitive_on_the_schema_name() {
+        let matches = keyspace_qualified_source().matches_in_context(
+            "us",
+            &query_driver::CompletionContext::SchemaQualifiedTable {
+                schema: "DEMO".to_string(),
+            },
+        );
+
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn schema_qualified_table_context_falls_back_to_the_flat_list_for_an_unknown_schema() {
+        let matches = keyspace_qualified_source().matches_in_context(
+            "us",
+            &query_driver::CompletionContext::SchemaQualifiedTable {
+                schema: "nope".to_string(),
+            },
+        );
+
+        assert_eq!(
+            matches,
+            keyspace_qualified_source().matches("us"),
+            "no entry qualified by an unknown schema -- same answer as no context at all"
         );
     }
 
