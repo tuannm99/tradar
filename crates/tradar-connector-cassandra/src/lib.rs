@@ -317,6 +317,93 @@ fn kind_rank(kind: &str) -> u8 {
     }
 }
 
+/// Whether `value`'s own text reads as a CQL identifier/UUID literal --
+/// the hyphenated hex shape (`8-4-4-4-12`) CQL accepts unquoted for both
+/// `uuid` and `timeuuid` columns alike (textually identical; which of the
+/// two doesn't change how it's written).
+fn looks_like_cql_uuid(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    [8, 4, 4, 4, 12]
+        == groups
+            .iter()
+            .map(|g| g.len())
+            .collect::<Vec<_>>()
+            .as_slice()
+        && groups
+            .iter()
+            .all(|g| g.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// A `RowEdit` value, written the way CQL's own literal grammar needs --
+/// unlike SQL, CQL does **not** coerce a quoted string to a number/uuid/
+/// boolean for comparison (`query_driver::build_sql_edit`'s own doc
+/// comment explains why SQL gets away with always quoting); CQL's parser
+/// instead rejects the statement outright (`Invalid STRING constant ...
+/// for int`). There is no schema to consult here either -- a column's
+/// declared CQL type isn't available to this sync method without a round
+/// trip -- so, same reason `tradar-connector-mongo`'s `mongo_value_literal`
+/// and Elasticsearch's own `edit_sql` already infer from the value's own
+/// text instead of a schema lookup, this does too: a bare `true`/`false`,
+/// something that parses as a number, or a UUID-shaped string are written
+/// unquoted; everything else -- including a collection literal
+/// (`list<...>`/`set<...>`/`map<...>`), which CQL forbids inside a
+/// `PRIMARY KEY` anyway, so a key column is never one -- is quoted as a
+/// plain CQL string. Narrow, known miss: literally typing the text `NaN`/
+/// `inf`/`infinity` into a text column's edit prompt is written unquoted
+/// (`str::parse::<f64>` itself accepts those spellings) -- valid CQL for
+/// `float`/`double`, a type error for `text`; same class of edge case
+/// `mongo_value_literal` already has for the literal text `null`.
+fn cql_value_literal(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") {
+        return trimmed.to_ascii_lowercase();
+    }
+    if trimmed.parse::<f64>().is_ok() || looks_like_cql_uuid(trimmed) {
+        return trimmed.to_string();
+    }
+    format!("'{}'", trimmed.replace('\'', "''"))
+}
+
+/// `query_driver::build_sql_edit`, with CQL's own literal rules
+/// (`cql_value_literal`) in place of SQL's always-quote-it shortcut --
+/// otherwise the identical `UPDATE ... SET ... WHERE ...`/`DELETE FROM
+/// ... WHERE ...` shape, since CQL's DML syntax is close enough to SQL to
+/// share it (same reason this driver already reuses
+/// `SQL_KEYWORDS`/`split_sql_statements`). A `WHERE` built from equality
+/// on every key column (`edit.key`, which is every `partition_key`/
+/// `clustering` column together -- see `list_schema`'s own comment on
+/// `ColumnInfo::primary_key`) is valid CQL for addressing exactly one
+/// row; the composite-key tuple syntax (`(a, b) = (...)`) is only needed
+/// for `IN`/range queries, not plain equality.
+fn build_cql_edit(edit: &query_driver::RowEdit) -> String {
+    let table = query_driver::quote_identifier(&edit.table);
+    let where_clause = edit
+        .key
+        .iter()
+        .map(|(column, value)| {
+            if value == "NULL" {
+                format!("{} IS NULL", query_driver::quote_identifier(column))
+            } else {
+                format!(
+                    "{} = {}",
+                    query_driver::quote_identifier(column),
+                    cql_value_literal(value)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    match &edit.change {
+        query_driver::RowChange::SetValue { column, value } => format!(
+            "UPDATE {table} SET {} = {} WHERE {where_clause}",
+            query_driver::quote_identifier(column),
+            cql_value_literal(value)
+        ),
+        query_driver::RowChange::DeleteRow => format!("DELETE FROM {table} WHERE {where_clause}"),
+    }
+}
+
 #[async_trait]
 impl QueryDriver for CassandraDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -350,6 +437,14 @@ impl QueryDriver for CassandraDriver {
         columns: &[String],
     ) -> Option<String> {
         Some(query_driver::build_crud_snippet(entry, op, columns))
+    }
+
+    fn edit_source(&self, query: &str) -> Option<String> {
+        query_driver::single_table_source(query)
+    }
+
+    fn edit_sql(&self, edit: &query_driver::RowEdit) -> Option<String> {
+        Some(build_cql_edit(edit))
     }
 
     async fn ping(&self) -> anyhow::Result<()> {
@@ -688,6 +783,103 @@ mod tests {
     }
 
     #[test]
+    fn edit_source_delegates_to_the_shared_single_table_check() {
+        let driver = CassandraDriver::new("127.0.0.1:9042");
+
+        assert_eq!(
+            driver.edit_source("SELECT * FROM demo.events"),
+            Some("demo.events".to_string())
+        );
+        assert_eq!(
+            driver.edit_source("SELECT * FROM demo.events JOIN demo.other ON true"),
+            None
+        );
+    }
+
+    #[test]
+    fn cql_value_literal_leaves_numbers_booleans_and_uuids_unquoted() {
+        assert_eq!(cql_value_literal("42"), "42");
+        assert_eq!(cql_value_literal("-3.5"), "-3.5");
+        assert_eq!(cql_value_literal("true"), "true");
+        assert_eq!(cql_value_literal("FALSE"), "false");
+        assert_eq!(
+            cql_value_literal("123e4567-e89b-12d3-a456-426614174000"),
+            "123e4567-e89b-12d3-a456-426614174000"
+        );
+    }
+
+    #[test]
+    fn cql_value_literal_quotes_everything_else() {
+        assert_eq!(cql_value_literal("hello"), "'hello'");
+        assert_eq!(cql_value_literal("it's"), "'it''s'");
+        // Not uuid-shaped (wrong group lengths) -- quoted, not passed
+        // through as if it were one.
+        assert_eq!(cql_value_literal("1234-56-78"), "'1234-56-78'");
+    }
+
+    #[test]
+    fn edit_sql_builds_an_update_with_cql_typed_literals() {
+        let driver = CassandraDriver::new("127.0.0.1:9042");
+        let edit = query_driver::RowEdit {
+            table: "demo.events".to_string(),
+            key: vec![(
+                "id".to_string(),
+                "123e4567-e89b-12d3-a456-426614174000".to_string(),
+            )],
+            change: query_driver::RowChange::SetValue {
+                column: "count".to_string(),
+                value: "7".to_string(),
+            },
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some(
+                "UPDATE \"demo\".\"events\" SET \"count\" = 7 WHERE \"id\" = \
+                 123e4567-e89b-12d3-a456-426614174000"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn edit_sql_builds_a_delete_with_a_composite_key_and_quotes_a_text_value() {
+        let driver = CassandraDriver::new("127.0.0.1:9042");
+        let edit = query_driver::RowEdit {
+            table: "demo.events".to_string(),
+            key: vec![
+                ("user_id".to_string(), "u1".to_string()),
+                ("created_at".to_string(), "100".to_string()),
+            ],
+            change: query_driver::RowChange::DeleteRow,
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some(
+                "DELETE FROM \"demo\".\"events\" WHERE \"user_id\" = 'u1' \
+                 AND \"created_at\" = 100"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn edit_sql_writes_a_null_key_column_without_turning_it_into_a_literal() {
+        let driver = CassandraDriver::new("127.0.0.1:9042");
+        let edit = query_driver::RowEdit {
+            table: "demo.events".to_string(),
+            key: vec![("id".to_string(), "NULL".to_string())],
+            change: query_driver::RowChange::DeleteRow,
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some("DELETE FROM \"demo\".\"events\" WHERE \"id\" IS NULL".to_string())
+        );
+    }
+
+    #[test]
     fn crud_snippet_forwards_a_column_selection_to_the_shared_sql_builder() {
         let driver = CassandraDriver::new("127.0.0.1:9042");
         let entry = SchemaInfo {
@@ -905,6 +1097,64 @@ mod tests {
                 }
                 other => panic!("expected a table, got {other:?}"),
             }
+
+            // `edit_sql` against the real cluster: both key columns are
+            // `int` (unquoted per `cql_value_literal`) -- if either were
+            // quoted, CQL would reject the statement outright
+            // ("Invalid STRING constant ... for int") rather than
+            // silently matching nothing, so running it is the real test,
+            // not just the generated text.
+            let edit = query_driver::RowEdit {
+                table: "demo.memberships".to_string(),
+                key: vec![
+                    ("user_id".to_string(), "1".to_string()),
+                    ("group_id".to_string(), "2".to_string()),
+                ],
+                change: query_driver::RowChange::SetValue {
+                    column: "role".to_string(),
+                    value: "owner".to_string(),
+                },
+            };
+            let update_sql = driver.edit_sql(&edit).expect("Cassandra supports edit_sql");
+            driver.execute(&update_sql).await.unwrap();
+            let after_update = driver
+                .execute("SELECT role FROM demo.memberships WHERE user_id = 1 AND group_id = 2")
+                .await
+                .unwrap();
+            assert_eq!(
+                after_update,
+                QueryResult::Table {
+                    columns: vec!["role".to_string()],
+                    rows: vec![vec!["owner".to_string()]],
+                    truncated: false,
+                }
+            );
+
+            let delete = query_driver::RowEdit {
+                table: "demo.memberships".to_string(),
+                key: vec![
+                    ("user_id".to_string(), "1".to_string()),
+                    ("group_id".to_string(), "2".to_string()),
+                ],
+                change: query_driver::RowChange::DeleteRow,
+            };
+            let delete_sql = driver
+                .edit_sql(&delete)
+                .expect("Cassandra supports edit_sql");
+            driver.execute(&delete_sql).await.unwrap();
+            let after_delete = driver
+                .execute("SELECT role FROM demo.memberships WHERE user_id = 1 AND group_id = 2")
+                .await
+                .unwrap();
+            assert_eq!(
+                after_delete,
+                QueryResult::Table {
+                    columns: vec![],
+                    rows: vec![],
+                    truncated: false,
+                },
+                "the row must actually be gone after DELETE"
+            );
         }
     }
 }

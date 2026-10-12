@@ -770,8 +770,12 @@ pub fn same_table(query_name: &str, schema_name: &str) -> bool {
 
 /// Double-quotes an identifier, one dotted part at a time so a
 /// schema-qualified `public.users` stays two identifiers rather than
-/// becoming one strangely named table.
-fn quote_identifier(name: &str) -> String {
+/// becoming one strangely named table. `pub`: CQL's own identifier
+/// quoting is the same ANSI double-quote convention, so
+/// `tradar-connector-cassandra`'s own edit-statement builder reuses this
+/// directly instead of keeping a second copy (connector crates can't
+/// depend on each other, but every one already depends on this crate).
+pub fn quote_identifier(name: &str) -> String {
     name.split('.')
         .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
         .collect::<Vec<_>>()
