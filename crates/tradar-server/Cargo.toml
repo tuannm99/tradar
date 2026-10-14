@@ -28,15 +28,33 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 serde_json = "1"
 anyhow = "1"
 
+# gRPC -- not a `Connector`/`QueryDriver` (no query language, no TUI screen;
+# see docs/architecture.md's "Chốt lại scope v1" under gRPC), so it bypasses
+# `registry`/`State::drivers` entirely and lives in its own `grpc` module
+# instead of a `tradar-connector-grpc` crate -- that trait contract exists
+# to feed the TUI's registry, which gRPC deliberately does not target.
+tonic = { version = "0.12", optional = true }
+tonic-reflection = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+prost-reflect = { version = "0.14", optional = true, features = ["serde"] }
+protox = { version = "0.7", optional = true }
+tokio-stream = { version = "0.1", optional = true, features = ["net"] }
+bytes = { version = "1", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+tonic-build = "0.12"
+protox = "0.7"
+prost = "0.13"
 
 # Only the connectors that speak a query language -- the ones with a
 # `QueryDriver` a headless client can drive. Kafka/RabbitMQ/HTTP/Socket
 # have bespoke TUI screens and no driver to expose yet, see "Server
 # headless" in docs/architecture.md. Feature names match `tradar-app`'s.
 [features]
-default = ["postgres", "mysql", "sqlite", "mongo", "elasticsearch", "redis", "cassandra", "clickhouse"]
+default = ["postgres", "mysql", "sqlite", "mongo", "elasticsearch", "redis", "cassandra", "clickhouse", "grpc"]
 postgres = ["dep:tradar-connector-postgres"]
 mysql = ["dep:tradar-connector-mysql"]
 sqlite = ["dep:tradar-connector-sqlite"]
@@ -45,3 +63,4 @@ elasticsearch = ["dep:tradar-connector-elasticsearch"]
 redis = ["dep:tradar-connector-redis"]
 cassandra = ["dep:tradar-connector-cassandra"]
 clickhouse = ["dep:tradar-connector-clickhouse"]
+grpc = ["dep:tonic", "dep:tonic-reflection", "dep:prost", "dep:prost-reflect", "dep:protox", "dep:tokio-stream", "dep:bytes"]

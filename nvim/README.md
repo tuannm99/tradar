@@ -56,6 +56,10 @@ Dùng file `.mongo` (filetype `mongo`, tô màu như JavaScript), `.redis`, `.es
 
 Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu hiện **bảng** (cột phẳng `address.city`) để dùng `i`/`dd`/`gyc`/export như SQL; `gT` đổi sang JSON. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 
+### gRPC
+
+Khác hẳn SQL/Mongo/Redis/Elasticsearch: không có buffer nguồn nào gắn connection — một connection gRPC chỉ là `driver = "grpc"` trong `connections.toml` (`target` = `host:port` trần hoặc URL đầy đủ, plaintext). `:TradarGrpcConnect [tên]` (bỏ trống thì chọn qua picker), rồi `:TradarGrpcServices` liệt kê service đã biết (qua server reflection thật, hoặc rỗng nếu server không hỗ trợ — nạp `.proto` tay bằng `:TradarGrpcLoadProto <đường-dẫn>`). Chọn service rồi method mở một buffer JSON mới (tab mới) với nội dung `{}` — gõ request vào đó, `<leader>rr` hoặc `:TradarGrpcSend` gọi thật, response hiện ở một split riêng. Chỉ **unary** cho v1 (xem `docs/architecture.md`, "Chốt lại scope v1" mục gRPC) — chưa có skeleton tự sinh theo shape message, chưa streaming, chưa metadata/header.
+
 ### Định dạng `.tdb` (nhiều dialect, nhiều connection, một file)
 
 Thay vì chia theo filetype (`.sql`/`.mongo`/`.redis`/`.esq`) — bất tiện khi muốn so sánh/ghi chú nhiều truy vấn khác dialect cạnh nhau — một file `.tdb` gồm nhiều block kiểu fenced code của Markdown, mỗi block tự chọn dialect và (tuỳ chọn) connection riêng:

@@ -80,6 +80,20 @@ pub fn error_position(message: &str) -> Option<(usize, usize)> {
     None
 }
 
+#[cfg(feature = "grpc")]
+impl From<crate::grpc::GrpcError> for RpcError {
+    /// `data.grpc_code` carries the numeric `tonic::Code` so a client can
+    /// branch on it (e.g. `NOT_FOUND` vs `INVALID_ARGUMENT`) without parsing
+    /// the message -- same idea as `from_query_error`'s `{line, column}`.
+    fn from(error: crate::grpc::GrpcError) -> Self {
+        Self {
+            code: APP_ERROR,
+            message: error.message,
+            data: Some(json!({"grpc_code": error.code})),
+        }
+    }
+}
+
 impl From<anyhow::Error> for RpcError {
     fn from(error: anyhow::Error) -> Self {
         Self::app(error.to_string())

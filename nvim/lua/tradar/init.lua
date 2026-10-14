@@ -1294,4 +1294,10 @@ function M.setup(user)
   M.maybe_attach(0)
 end
 
+--- The `setup{}` table (socket path, `server_cmd`, ...), so other modules
+--- that talk to the same `tradar-server` (currently just `tradar.grpc`)
+--- connect to the same socket instead of falling back to `rpc.ensure`'s
+--- own defaults.
+function M.rpc_opts() return opts end
+
 return M

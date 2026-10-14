@@ -47,6 +47,12 @@ struct State {
     /// future to stop waiting on, and which connection to tell the
     /// database about).
     running: HashMap<String, (Arc<Notify>, Arc<dyn QueryDriver>)>,
+    /// gRPC connections, kept apart from `drivers` -- gRPC has no
+    /// `QueryDriver` to serve (see `grpc.rs`'s doc comment), so it needs its
+    /// own channel + schema state instead of fitting the `Arc<dyn
+    /// QueryDriver>` shape every other connection here uses.
+    #[cfg(feature = "grpc")]
+    grpc: HashMap<String, crate::grpc::GrpcConnection>,
 }
 
 pub struct Server {
@@ -119,6 +125,18 @@ impl Server {
             "complete" => self.complete(params),
             "edit.source" => self.edit_source(params),
             "edit.sql" => self.edit_sql(params),
+            #[cfg(feature = "grpc")]
+            "grpc.connect" => self.grpc_connect(params).await,
+            #[cfg(feature = "grpc")]
+            "grpc.disconnect" => self.grpc_disconnect(params),
+            #[cfg(feature = "grpc")]
+            "grpc.services" => self.grpc_services(params),
+            #[cfg(feature = "grpc")]
+            "grpc.load_proto" => self.grpc_load_proto(params),
+            #[cfg(feature = "grpc")]
+            "grpc.methods" => self.grpc_methods(params),
+            #[cfg(feature = "grpc")]
+            "grpc.invoke" => self.grpc_invoke(params).await,
             _ => Err(RpcError {
                 code: METHOD_NOT_FOUND,
                 message: format!("unknown method `{method}`"),
@@ -150,12 +168,20 @@ impl Server {
                     "name": c.name,
                     "driver": c.driver,
                     "target": c.target,
-                    "connected": connected.drivers.contains_key(&c.name),
-                    "supported": self.registry.contains_key(&c.driver),
+                    "connected": connected.drivers.contains_key(&c.name)
+                        || connected_grpc(&connected, &c.name),
+                    "supported": self.is_supported(&c.driver),
                 })
             })
             .collect();
         Ok(json!(list))
+    }
+
+    /// Whether this server build can serve `driver` at all -- through the
+    /// `Connector`/`QueryDriver` registry, or (gRPC only) through its own
+    /// `grpc.*` methods instead.
+    fn is_supported(&self, driver: &str) -> bool {
+        self.registry.contains_key(driver) || (driver == "grpc" && cfg!(feature = "grpc"))
     }
 
     fn driver(&self, params: &Value) -> Result<Arc<dyn QueryDriver>, RpcError> {
@@ -468,6 +494,115 @@ impl Server {
         let edit = parse_row_edit(params)?;
         Ok(json!({"sql": driver.edit_sql(&edit)}))
     }
+
+    /// Opens the channel and tries server reflection; a server that
+    /// doesn't implement it still connects (`grpc.services` just comes
+    /// back empty until `grpc.load_proto` fills the pool by hand).
+    #[cfg(feature = "grpc")]
+    async fn grpc_connect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        if self.state.lock().unwrap().grpc.contains_key(name) {
+            return Ok(json!({"connected": true, "already": true}));
+        }
+        let saved = self
+            .saved()?
+            .into_iter()
+            .find(|c| c.name == name && c.driver == "grpc")
+            .ok_or_else(|| RpcError::app(format!("no saved gRPC connection named `{name}`")))?;
+        let channel = crate::grpc::connect(&saved.target).await.map_err(|e| {
+            RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+        })?;
+        let pool = crate::grpc::discover_via_reflection(channel.clone())
+            .await
+            .unwrap_or_default();
+        self.state.lock().unwrap().grpc.insert(
+            name.to_string(),
+            crate::grpc::GrpcConnection { channel, pool },
+        );
+        Ok(json!({"connected": true, "already": false}))
+    }
+
+    #[cfg(feature = "grpc")]
+    fn grpc_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let removed = self.state.lock().unwrap().grpc.remove(name).is_some();
+        Ok(json!({"disconnected": removed}))
+    }
+
+    #[cfg(feature = "grpc")]
+    fn grpc_services(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let state = self.state.lock().unwrap();
+        let conn = state.grpc.get(name).ok_or_else(|| {
+            RpcError::app(format!(
+                "`{name}` is not connected -- call `grpc.connect` first"
+            ))
+        })?;
+        Ok(json!(crate::grpc::list_services(&conn.pool)))
+    }
+
+    /// Fallback discovery for a server without reflection: parse a
+    /// `.proto` file on disk and merge it into the connection's pool.
+    #[cfg(feature = "grpc")]
+    fn grpc_load_proto(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let path = str_param(params, "path")?;
+        let mut state = self.state.lock().unwrap();
+        let conn = state.grpc.get_mut(name).ok_or_else(|| {
+            RpcError::app(format!(
+                "`{name}` is not connected -- call `grpc.connect` first"
+            ))
+        })?;
+        let added = crate::grpc::load_proto(&mut conn.pool, path)
+            .map_err(|e| RpcError::app(format!("không parse được `{path}`: {e}")))?;
+        Ok(json!({"added": added}))
+    }
+
+    #[cfg(feature = "grpc")]
+    fn grpc_methods(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let service = str_param(params, "service")?;
+        let state = self.state.lock().unwrap();
+        let conn = state.grpc.get(name).ok_or_else(|| {
+            RpcError::app(format!(
+                "`{name}` is not connected -- call `grpc.connect` first"
+            ))
+        })?;
+        let methods = crate::grpc::list_methods(&conn.pool, service)
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!(
+            methods
+                .iter()
+                .map(|m| json!({"name": m.name, "input": m.input, "output": m.output}))
+                .collect::<Vec<_>>()
+        ))
+    }
+
+    /// Only *invokes*; unlike `edit.sql` there is nothing to show-then-run
+    /// here (a gRPC call isn't a statement the client could choose to run
+    /// later) -- the "show it, run it only after `y`" rule is specific to
+    /// row-edit's generated write statements, not to RPCs in general.
+    #[cfg(feature = "grpc")]
+    async fn grpc_invoke(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let service = str_param(params, "service")?;
+        let method = str_param(params, "method")?;
+        let request = params.get("request").cloned().unwrap_or(json!({}));
+        let (channel, pool) = {
+            let state = self.state.lock().unwrap();
+            let conn = state.grpc.get(name).ok_or_else(|| {
+                RpcError::app(format!(
+                    "`{name}` is not connected -- call `grpc.connect` first"
+                ))
+            })?;
+            (conn.channel.clone(), conn.pool.clone())
+        };
+        let outcome = crate::grpc::invoke(channel, &pool, service, method, request).await?;
+        match outcome {
+            Ok(response) => Ok(json!({"response": response})),
+            Err(status) => Err(status.into()),
+        }
+    }
 }
 
 /// `query` without the `--` line comments and `/* */` blocks that precede
@@ -505,6 +640,16 @@ fn is_ddl(query: &str) -> bool {
         // An insert is how a Mongo collection (and new fields) come to exist.
         || lower.contains(".insertone(")
         || lower.contains(".insertmany(")
+}
+
+#[cfg(feature = "grpc")]
+fn connected_grpc(state: &State, name: &str) -> bool {
+    state.grpc.contains_key(name)
+}
+
+#[cfg(not(feature = "grpc"))]
+fn connected_grpc(_state: &State, _name: &str) -> bool {
+    false
 }
 
 fn str_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
