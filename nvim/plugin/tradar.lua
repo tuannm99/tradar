@@ -19,6 +19,16 @@ vim.api.nvim_create_user_command('TradarExport', function(a)
   t().export(fmt, path)
 end, { nargs = '*', complete = function() return { 'csv', 'json', 'md', 'tsv' } end })
 
+-- gRPC: unary-only v1 (docs/architecture.md, "Chốt lại scope v1" under
+-- gRPC) -- a connection, not a buffer's filetype, so these have no `attach`
+-- autocmd the way sql/mongo/redis/esq do; run them from anywhere.
+vim.api.nvim_create_user_command('TradarGrpcConnect', function(a) require('tradar.grpc').connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarGrpcServices', function() require('tradar.grpc').services() end, {})
+vim.api.nvim_create_user_command('TradarGrpcMethods', function(a) require('tradar.grpc').methods(nil, a.args) end, { nargs = 1 })
+vim.api.nvim_create_user_command('TradarGrpcLoadProto', function(a)
+  require('tradar.grpc').load_proto(nil, a.args)
+end, { nargs = 1, complete = 'file' })
+
 -- Query files for the non-SQL connectors. Highlighting borrows a real
 -- grammar where one fits (`.mongo` is JavaScript) -- see README.
 vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq' } })
