@@ -4,6 +4,8 @@
 
 #[cfg(feature = "grpc")]
 mod grpc;
+#[cfg(feature = "kafka")]
+mod kafka;
 mod protocol;
 mod server;
 mod transport;
@@ -12,7 +14,7 @@ use std::collections::HashMap;
 
 use tradar_connector_spi::Connector;
 
-pub use server::Server;
+pub use server::{ClientConnection, Server};
 pub use transport::{bind, default_socket_path, serve};
 
 /// Every query-language connector compiled into this binary -- same

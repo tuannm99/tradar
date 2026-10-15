@@ -4,9 +4,10 @@
 //! is the thin unix-socket shell around it.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 use serde_json::{Value, json};
 
@@ -60,6 +61,69 @@ struct State {
     /// ceiling `QueryDriver::cancel_query` already has for most drivers).
     #[cfg(feature = "grpc")]
     grpc_running: HashMap<String, Arc<Notify>>,
+    /// Kafka tail subscriptions (`kafka.tail.start`/`kafka.tail.stop`),
+    /// keyed by the subscription id the client named. See `kafka.rs`'s
+    /// doc comment for why this doesn't go through `drivers` either.
+    #[cfg(feature = "kafka")]
+    kafka: HashMap<String, crate::kafka::KafkaConnection>,
+    /// `(owning client id, the two tasks)` -- the id is what lets
+    /// `kafka_tail_stop`/`kafka_forget_client` also remove this
+    /// subscription from `kafka_tails_by_client` without a linear scan.
+    #[cfg(feature = "kafka")]
+    kafka_tails: HashMap<String, (u64, crate::kafka::TailHandle)>,
+    /// Which subscription ids belong to which `ClientConnection` -- the
+    /// only reason `ClientConnection::id` exists at all: when that socket
+    /// closes, every tail it started (and forgot to `kafka.tail.stop`)
+    /// must be aborted too, or an orphaned consumer runs forever for a
+    /// client nobody is listening on anymore.
+    #[cfg(feature = "kafka")]
+    kafka_tails_by_client: HashMap<u64, Vec<String>>,
+    #[cfg(feature = "kafka")]
+    next_kafka_subscription: u64,
+}
+
+/// One live client socket (`transport.rs`'s `serve_connection`) -- *not* a
+/// saved database connection (`connect`'s own `connection` param); the two
+/// are unrelated concepts that happen to share the English word. Exists so
+/// a background push subscription (Kafka tail, and whatever reuses the
+/// same mechanism later -- Socket, see
+/// `docs/backlog/push-channel-design-2026-10-14.md`) started by one client
+/// can push notification lines onto *that* client's own socket, and be
+/// torn down when *that* client disconnects, without touching another
+/// client's subscriptions on the same server.
+// No push-capable connector is compiled in without `kafka` (Socket tail
+// is designed, per docs/backlog/push-channel-design-2026-10-14.md, but not
+// yet built) -- `id`/`outbox`/`notify` go unused in that build, same as any
+// other build with every push connector's feature off. Still part of the
+// public shape: `new_client`/`client_disconnected` take/use `ClientConnection`
+// unconditionally so the generic plumbing doesn't itself need feature gates.
+#[cfg_attr(not(feature = "kafka"), allow(dead_code))]
+#[derive(Clone)]
+pub struct ClientConnection {
+    id: u64,
+    /// A notification is a JSON-RPC object with no `id` -- same framing,
+    /// same per-connection channel `transport.rs` already had for replies,
+    /// just sent without a request ever asking for it.
+    outbox: mpsc::UnboundedSender<String>,
+}
+
+impl ClientConnection {
+    /// A connection with nowhere to push notifications -- for a caller
+    /// (every existing test, or anything else driving `Server::handle`
+    /// without a real socket behind it) that never starts a subscription.
+    /// Pushes sent to it are silently dropped (the receiver is dropped
+    /// immediately); `id` is shared across every detached connection,
+    /// which is fine since nothing here ever disconnects one by id.
+    pub fn detached() -> Self {
+        let (outbox, _unused) = mpsc::unbounded_channel();
+        Self { id: 0, outbox }
+    }
+
+    #[cfg_attr(not(feature = "kafka"), allow(dead_code))]
+    pub(crate) fn notify(&self, method: &str, params: Value) {
+        let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
+        let _ = self.outbox.send(format!("{line}\n"));
+    }
 }
 
 pub struct Server {
@@ -68,6 +132,7 @@ pub struct Server {
     state: Mutex<State>,
     /// Fired by the `shutdown` method; `main` waits on it next to Ctrl-C.
     shutdown: Arc<Notify>,
+    next_client_id: AtomicU64,
 }
 
 impl Server {
@@ -80,6 +145,7 @@ impl Server {
             store,
             state: Mutex::new(State::default()),
             shutdown: Arc::new(Notify::new()),
+            next_client_id: AtomicU64::new(1),
         }
     }
 
@@ -89,15 +155,32 @@ impl Server {
         Arc::clone(&self.shutdown)
     }
 
+    /// One `ClientConnection` per accepted socket (`transport.rs`'s
+    /// `serve_connection`) -- `outbox` is that connection's own reply
+    /// channel, reused here so a push notification interleaves with
+    /// ordinary replies on the same line stream.
+    pub fn new_client(&self, outbox: mpsc::UnboundedSender<String>) -> ClientConnection {
+        let id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
+        ClientConnection { id, outbox }
+    }
+
+    /// Call when a client's socket closes: aborts and forgets every
+    /// background subscription it started and never explicitly stopped.
+    #[cfg_attr(not(feature = "kafka"), allow(unused_variables))]
+    pub fn client_disconnected(&self, client: &ClientConnection) {
+        #[cfg(feature = "kafka")]
+        self.kafka_forget_client(client.id);
+    }
+
     /// One request object in, one response object out (JSON-RPC 2.0, minus
     /// batches and notifications -- every call here wants an answer).
-    pub async fn handle(&self, request: Value) -> Value {
+    pub async fn handle(&self, request: Value, client: &ClientConnection) -> Value {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let outcome = match request.get("method").and_then(Value::as_str) {
             None => Err(RpcError::invalid("missing `method`")),
             Some(method) => {
                 let params = request.get("params").cloned().unwrap_or(Value::Null);
-                self.dispatch(method, &params).await
+                self.dispatch(method, &params, client).await
             }
         };
         match outcome {
@@ -110,7 +193,13 @@ impl Server {
         }
     }
 
-    async fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+    #[cfg_attr(not(feature = "kafka"), allow(unused_variables))]
+    async fn dispatch(
+        &self,
+        method: &str,
+        params: &Value,
+        client: &ClientConnection,
+    ) -> Result<Value, RpcError> {
         match method {
             "connectors.list" => Ok(self.connectors()),
             "connections.list" => self.connections(),
@@ -144,6 +233,16 @@ impl Server {
             "grpc.methods" => self.grpc_methods(params),
             #[cfg(feature = "grpc")]
             "grpc.invoke" => self.grpc_invoke(params).await,
+            #[cfg(feature = "kafka")]
+            "kafka.connect" => self.kafka_connect(params).await,
+            #[cfg(feature = "kafka")]
+            "kafka.disconnect" => self.kafka_disconnect(params),
+            #[cfg(feature = "kafka")]
+            "kafka.topics" => self.kafka_topics(params).await,
+            #[cfg(feature = "kafka")]
+            "kafka.tail.start" => self.kafka_tail_start(params, client),
+            #[cfg(feature = "kafka")]
+            "kafka.tail.stop" => self.kafka_tail_stop(params),
             _ => Err(RpcError {
                 code: METHOD_NOT_FOUND,
                 message: format!("unknown method `{method}`"),
@@ -176,7 +275,8 @@ impl Server {
                     "driver": c.driver,
                     "target": c.target,
                     "connected": connected.drivers.contains_key(&c.name)
-                        || connected_grpc(&connected, &c.name),
+                        || connected_grpc(&connected, &c.name)
+                        || connected_kafka(&connected, &c.name),
                     "supported": self.is_supported(&c.driver),
                 })
             })
@@ -185,10 +285,12 @@ impl Server {
     }
 
     /// Whether this server build can serve `driver` at all -- through the
-    /// `Connector`/`QueryDriver` registry, or (gRPC only) through its own
-    /// `grpc.*` methods instead.
+    /// `Connector`/`QueryDriver` registry, or (gRPC/Kafka) through their
+    /// own `grpc.*`/`kafka.*` methods instead.
     fn is_supported(&self, driver: &str) -> bool {
-        self.registry.contains_key(driver) || (driver == "grpc" && cfg!(feature = "grpc"))
+        self.registry.contains_key(driver)
+            || (driver == "grpc" && cfg!(feature = "grpc"))
+            || (driver == "kafka" && cfg!(feature = "kafka"))
     }
 
     fn driver(&self, params: &Value) -> Result<Arc<dyn QueryDriver>, RpcError> {
@@ -642,6 +744,153 @@ impl Server {
             None => Err(RpcError::app("invoke cancelled")),
         }
     }
+
+    /// Opens the Kafka client and probes the broker's metadata once (fails
+    /// loudly here, like `grpc.connect`'s channel dial, rather than
+    /// silently connecting then only finding out on the first
+    /// `kafka.topics`/`kafka.tail.start`).
+    #[cfg(feature = "kafka")]
+    async fn kafka_connect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        if self.state.lock().unwrap().kafka.contains_key(name) {
+            return Ok(json!({"connected": true, "already": true}));
+        }
+        let saved = self
+            .saved()?
+            .into_iter()
+            .find(|c| c.name == name && c.driver == "kafka")
+            .ok_or_else(|| RpcError::app(format!("no saved kafka connection named `{name}`")))?;
+        let conn = crate::kafka::connect(&saved.target).await.map_err(|e| {
+            RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+        })?;
+        self.state
+            .lock()
+            .unwrap()
+            .kafka
+            .insert(name.to_string(), conn);
+        Ok(json!({"connected": true, "already": false}))
+    }
+
+    #[cfg(feature = "kafka")]
+    fn kafka_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let removed = self.state.lock().unwrap().kafka.remove(name).is_some();
+        Ok(json!({"disconnected": removed}))
+    }
+
+    #[cfg(feature = "kafka")]
+    async fn kafka_topics(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let brokers = {
+            let state = self.state.lock().unwrap();
+            state
+                .kafka
+                .get(name)
+                .ok_or_else(|| {
+                    RpcError::app(format!(
+                        "`{name}` is not connected -- call `kafka.connect` first"
+                    ))
+                })?
+                .brokers
+                .clone()
+        };
+        let topics = crate::kafka::list_topics(&brokers)
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!(topics))
+    }
+
+    /// Starts a tail: one background subscription per call, never shared
+    /// with another client tailing the same topic (see
+    /// `docs/backlog/push-channel-design-2026-10-14.md`'s "mỗi subscription
+    /// một task nền độc lập"). Returns immediately with a `subscription`
+    /// id; messages arrive later as `kafka.tail.message` notifications on
+    /// `client`'s own socket, not as part of this reply.
+    #[cfg(feature = "kafka")]
+    fn kafka_tail_start(
+        &self,
+        params: &Value,
+        client: &ClientConnection,
+    ) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let topic = str_param(params, "topic")?.to_string();
+        let from_beginning = params.get("from").and_then(Value::as_str) == Some("earliest");
+
+        let brokers = {
+            let state = self.state.lock().unwrap();
+            state
+                .kafka
+                .get(name)
+                .ok_or_else(|| {
+                    RpcError::app(format!(
+                        "`{name}` is not connected -- call `kafka.connect` first"
+                    ))
+                })?
+                .brokers
+                .clone()
+        };
+
+        let subscription = {
+            let mut state = self.state.lock().unwrap();
+            state.next_kafka_subscription += 1;
+            format!("kafka-{}", state.next_kafka_subscription)
+        };
+
+        let client_id = client.id;
+        let push_client = client.clone();
+        let handle = crate::kafka::start_tail(
+            brokers,
+            topic,
+            from_beginning,
+            subscription.clone(),
+            move |item| push_client.notify("kafka.tail.message", item),
+        );
+
+        let mut state = self.state.lock().unwrap();
+        state
+            .kafka_tails
+            .insert(subscription.clone(), (client_id, handle));
+        state
+            .kafka_tails_by_client
+            .entry(client_id)
+            .or_default()
+            .push(subscription.clone());
+        Ok(json!({"subscription": subscription}))
+    }
+
+    #[cfg(feature = "kafka")]
+    fn kafka_tail_stop(&self, params: &Value) -> Result<Value, RpcError> {
+        let subscription = str_param(params, "subscription")?;
+        let mut state = self.state.lock().unwrap();
+        let Some((client_id, handle)) = state.kafka_tails.remove(subscription) else {
+            return Ok(json!({"stopped": false}));
+        };
+        if let Some(list) = state.kafka_tails_by_client.get_mut(&client_id) {
+            list.retain(|s| s != subscription);
+        }
+        drop(state);
+        handle.stop();
+        Ok(json!({"stopped": true}))
+    }
+
+    /// Aborts and forgets every tail `client_id` started and never
+    /// explicitly `kafka.tail.stop`ped -- called from
+    /// `client_disconnected` when that socket closes.
+    #[cfg(feature = "kafka")]
+    fn kafka_forget_client(&self, client_id: u64) {
+        let mut state = self.state.lock().unwrap();
+        let Some(subs) = state.kafka_tails_by_client.remove(&client_id) else {
+            return;
+        };
+        let handles: Vec<_> = subs
+            .iter()
+            .filter_map(|s| state.kafka_tails.remove(s))
+            .collect();
+        drop(state);
+        for (_, handle) in handles {
+            handle.stop();
+        }
+    }
 }
 
 /// `query` without the `--` line comments and `/* */` blocks that precede
@@ -688,6 +937,16 @@ fn connected_grpc(state: &State, name: &str) -> bool {
 
 #[cfg(not(feature = "grpc"))]
 fn connected_grpc(_state: &State, _name: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "kafka")]
+fn connected_kafka(state: &State, name: &str) -> bool {
+    state.kafka.contains_key(name)
+}
+
+#[cfg(not(feature = "kafka"))]
+fn connected_kafka(_state: &State, _name: &str) -> bool {
     false
 }
 

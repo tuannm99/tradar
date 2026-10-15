@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tradar_core::storage::{ConnectionStore, SavedConnection};
-use tradar_server::{Server, bind, registry, serve};
+use tradar_server::{ClientConnection, Server, bind, registry, serve};
 
 fn server_with_sqlite(dir: &std::path::Path) -> Server {
     let store = ConnectionStore::at(dir.join("connections.toml"));
@@ -24,7 +24,10 @@ fn server_with_sqlite(dir: &std::path::Path) -> Server {
 
 async fn call(server: &Server, method: &str, params: Value) -> Value {
     server
-        .handle(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+        .handle(
+            json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
+            &ClientConnection::detached(),
+        )
         .await
 }
 

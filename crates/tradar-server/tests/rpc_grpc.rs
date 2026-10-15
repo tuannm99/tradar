@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 use tonic::transport::Server as TonicServer;
 use tradar_core::storage::{ConnectionStore, SavedConnection};
-use tradar_server::{Server, registry};
+use tradar_server::{ClientConnection, Server, registry};
 
 pub mod greeter {
     include!(concat!(env!("OUT_DIR"), "/greeter.rs"));
@@ -76,7 +76,10 @@ fn server_with_grpc(dir: &std::path::Path, target: &str) -> Server {
 
 async fn call(server: &Server, method: &str, params: Value) -> Value {
     server
-        .handle(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+        .handle(
+            json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
+            &ClientConnection::detached(),
+        )
         .await
 }
 

@@ -5645,9 +5645,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "futures-util",
  "prost",
  "prost-reflect",
  "protox",
+ "rdkafka",
  "serde_json",
  "tempfile",
  "tokio",
