@@ -14,6 +14,30 @@ pub const INVALID_PARAMS: i64 = -32602;
 /// message is the same text the TUI would have shown.
 pub const APP_ERROR: i64 = -32000;
 
+/// `(major, minor)` of the JSON-RPC surface this build speaks, exposed via
+/// the `version` method (`server.rs`) -- advisory, not a hard gate: the
+/// server and the Neovim plugin normally ship from the same commit (one
+/// monorepo), so this exists for the one case that isn't true -- a
+/// `tradar-server` on `$PATH` built from a different checkout than the
+/// plugin that auto-started it (see `rpc.lua`'s `M.server_cmd`, which looks
+/// on `$PATH` before a repo-local build). `rpc.lua` calls `version` once
+/// per connection and warns (never blocks) on a `major` mismatch; a method
+/// *not found* answer means a pre-versioning server (major 0, implicit --
+/// no build ever shipped a `version` method before this field existed).
+///
+/// Bump **major** for anything an already-written client could get wrong
+/// by trusting the old shape: a method removed, a required param added or
+/// retyped, a result field removed or retyped, or an error's meaning
+/// changing. Bump **minor** for anything additive and safe to ignore: a
+/// new method, a new optional param or result field, a behavior change
+/// that doesn't require the client to change anything to keep working.
+/// Every method added so far (`grpc.*`/`kafka.*`/`socket.*`/`rabbitmq.*`/
+/// `http.*`, `truncated`/`field_order` on results, ...) would have been a
+/// minor bump had this scheme existed from the start -- this is the first
+/// breaking-change-shaped line in the wire surface's history, which is
+/// exactly why it's `(1, 0)` and not `(0, 1)`.
+pub const PROTOCOL_VERSION: (u32, u32) = (1, 0);
+
 pub struct RpcError {
     pub code: i64,
     pub message: String,

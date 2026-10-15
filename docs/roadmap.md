@@ -73,7 +73,8 @@ Nhìn nhanh trạng thái — chi tiết/lý do đầy đủ vẫn nằm ở cá
 - [x] Rà soát UI/UX plugin Neovim — xong (2026-10-15), xem `docs/backlog/nvim-ux-review-2026-10-15.md`. `gT` (đè phím mặc định Neovim) → `<leader>rv`; `g?` (cheat-sheet nổi) + `K` (xem trọn giá trị ô) mới trong buffer kết quả; `render.lua` tách đo-độ-rộng/dựng-dòng để tải thêm trang không còn vẽ lại toàn bộ kết quả đã có (chỉ cho `table`/SQL); cap cột 40 ký tự + truncate `…` (giống TUI); gRPC thêm `q`, tái dùng tab theo method, huỷ invoke đang chạy. Chủ đích không port sort/filter theo cột — có editor SQL thật ngay cạnh.
 - [x] TUI đóng băng (chỉ sửa lỗi) — chốt 2026-10-04, xem "Hướng đi hiện tại" ở đầu file
 - [ ] Quyết định cuối: bỏ hẳn TUI hay giữ đóng băng — sau vài tuần dùng Neovim trên database thật
-- [ ] Đóng gói: đường dẫn socket dài hơn ~108 byte, Windows named pipe, phiên bản hoá protocol
+- [x] Phiên bản hoá protocol — xong (2026-10-18): `protocol::PROTOCOL_VERSION: (u32, u32)` (major, minor; bắt đầu `(1, 0)`), method mới `version` không sau feature gate nào. Chỉ cảnh báo (`vim.notify`/`:checkhealth`), không chặn lời gọi nào — lệch version là trường hợp hiếm (server/plugin thường cùng commit), không phải chuyện cần version-gate cứng như API công khai nhiều client. Xem `docs/backlog/protocol-versioning-2026-10-18.md`.
+- [ ] Đóng gói: đường dẫn socket dài hơn ~108 byte, Windows named pipe
 
 **`tradar` CLI: import/export** — chưa scope, tier thấp
 

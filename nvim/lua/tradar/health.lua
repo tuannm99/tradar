@@ -19,6 +19,26 @@ function M.check()
   vim.wait(500, function() return ok_rpc or err ~= nil end, 10)
   if ok_rpc then
     vim.health.ok('server reachable')
+    local ve, vresult, vcode = rpc.request_sync('version', nil, 1000)
+    if ve then
+      -- -32601 (method not found): a pre-versioning server, built before
+      -- this `version` method existed at all -- implicit major 0.
+      local server_major = vcode == -32601 and 0 or nil
+      if server_major then
+        vim.health.warn(('tradar-server predates protocol versioning (expects major %d)'):format(rpc.CLIENT_PROTOCOL_MAJOR), {
+          'rebuild tradar-server: cargo build --release -p tradar-server (in the tradar repo)',
+        })
+      else
+        vim.health.warn('version check failed: ' .. ve)
+      end
+    elseif vresult.major ~= rpc.CLIENT_PROTOCOL_MAJOR then
+      vim.health.warn(('protocol mismatch: server speaks major %d, plugin expects %d'):format(vresult.major, rpc.CLIENT_PROTOCOL_MAJOR), {
+        'rebuild tradar-server or update the plugin so both match',
+      })
+    else
+      vim.health.ok(('protocol v%d.%d'):format(vresult.major, vresult.minor))
+    end
+
     local e, list = rpc.request_sync('connections.list', nil, 1000)
     if e then
       vim.health.warn('connections.list failed: ' .. e)

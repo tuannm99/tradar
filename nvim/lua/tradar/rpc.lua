@@ -11,6 +11,17 @@ local pipe, buffer, pending, next_id = nil, '', {}, 0
 --- a request this client made -- `kafka.tail.message` today.
 local notification_handlers = {}
 
+--- Kept in sync by hand with `tradar_server::protocol::PROTOCOL_VERSION.0`
+--- -- see that constant's own doc comment for the bump convention and why
+--- a mismatch only warns, never blocks (docs/backlog/protocol-versioning-2026-10-18.md).
+local CLIENT_PROTOCOL_MAJOR = 1
+M.CLIENT_PROTOCOL_MAJOR = CLIENT_PROTOCOL_MAJOR
+--- Copy of `tradar_server::protocol::METHOD_NOT_FOUND` -- a `version` call
+--- answering this code means a pre-versioning server (implicit major 0,
+--- since no build ever shipped a `version` method before this existed).
+local METHOD_NOT_FOUND = -32601
+local warned_version = false
+
 local function default_socket()
   local base = vim.env.XDG_RUNTIME_DIR or vim.fn.fnamemodify(vim.fn.tempname(), ':h')
   return base .. '/tradar/server.sock'
@@ -45,7 +56,14 @@ local function on_line(line)
   local cb = pending[msg.id]
   pending[msg.id] = nil
   if cb then
-    vim.schedule(function() cb(msg.error and msg.error.message or nil, msg.result, msg.error and msg.error.data or nil) end)
+    vim.schedule(function()
+      cb(
+        msg.error and msg.error.message or nil,
+        msg.result,
+        msg.error and msg.error.data or nil,
+        msg.error and msg.error.code or nil
+      )
+    end)
   end
 end
 
@@ -54,7 +72,7 @@ local function on_data(err, chunk)
     -- Server went away: fail whatever was waiting rather than hang forever.
     local waiting = pending
     if pipe then pipe:close() end
-    pending, pipe, buffer = {}, nil, ''
+    pending, pipe, buffer, warned_version = {}, nil, '', false
     for _, cb in pairs(waiting) do
       vim.schedule(function() cb('tradar-server closed the connection') end)
     end
@@ -68,6 +86,29 @@ local function on_data(err, chunk)
     buffer = buffer:sub(nl + 1)
     if line ~= '' then on_line(line) end
   end
+end
+
+--- Fired once per freshly-opened connection, never on every request --
+--- advisory only (see `CLIENT_PROTOCOL_MAJOR`'s doc comment): warns and
+--- moves on, doesn't hold up or fail the connection it's checking.
+local function check_version()
+  if warned_version then return end
+  M.request('version', nil, function(err, result, _data, code)
+    if warned_version then return end
+    local server_major = nil
+    if err then
+      if code == METHOD_NOT_FOUND then server_major = 0 end
+    elseif result.major ~= CLIENT_PROTOCOL_MAJOR then
+      server_major = result.major
+    end
+    if server_major ~= nil then
+      warned_version = true
+      vim.notify(
+        ('tradar: tradar-server speaks protocol v%d, this plugin expects v%d -- rebuild tradar-server or update the plugin so both match'):format(server_major, CLIENT_PROTOCOL_MAJOR),
+        vim.log.levels.WARN
+      )
+    end
+  end)
 end
 
 --- Connects to the socket, starting the server once if nothing answers.
@@ -86,6 +127,7 @@ function M.ensure(opts, done)
       end
       pipe = p
       p:read_start(on_data)
+      check_version()
       cb(nil)
     end))
   end
@@ -124,10 +166,10 @@ end
 --- Blocking variant for callers that must answer synchronously. Bounded,
 --- and only ever talks to a local socket; returns `err, result`.
 function M.request_sync(method, params, timeout_ms)
-  local done, err, result = false, nil, nil
-  M.request(method, params, function(e, r) done, err, result = true, e, r end)
+  local done, err, result, code = false, nil, nil, nil
+  M.request(method, params, function(e, r, _d, c) done, err, result, code = true, e, r, c end)
   if not vim.wait(timeout_ms or 500, function() return done end, 5) then return 'timeout' end
-  return err, result
+  return err, result, code
 end
 
 --- Subscribes `cb(params)` to every pushed notification for `method`
@@ -153,7 +195,7 @@ function M.connected() return pipe ~= nil end
 
 function M.close()
   if pipe then pipe:close() end
-  pipe, buffer, pending = nil, '', {}
+  pipe, buffer, pending, warned_version = nil, '', {}, false
 end
 
 return M
