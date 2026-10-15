@@ -4,6 +4,8 @@
 
 #[cfg(feature = "grpc")]
 mod grpc;
+#[cfg(feature = "http")]
+mod http;
 #[cfg(feature = "kafka")]
 mod kafka;
 mod protocol;

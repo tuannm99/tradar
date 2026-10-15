@@ -51,6 +51,11 @@ vim.api.nvim_create_user_command('TradarRabbitmqBindings', function(a)
 end, { nargs = '*' })
 vim.api.nvim_create_user_command('TradarRabbitmqPublish', function(a) require('tradar.rabbitmq').publish(a.args) end, { nargs = '?' })
 
+-- HTTP: same reasoning as RabbitMQ above -- no push channel, plain
+-- request/response, see docs/backlog/http-server-2026-10-17.md.
+vim.api.nvim_create_user_command('TradarHttpConnect', function(a) require('tradar.http').connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarHttpSend', function(a) require('tradar.http').send(a.args) end, { nargs = '?' })
+
 -- Query files for the non-SQL connectors. Highlighting borrows a real
 -- grammar where one fits (`.mongo` is JavaScript) -- see README.
 vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq' } })
