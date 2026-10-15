@@ -8,6 +8,8 @@ mod grpc;
 mod kafka;
 mod protocol;
 mod server;
+#[cfg(feature = "socket")]
+mod socket;
 mod transport;
 
 use std::collections::HashMap;

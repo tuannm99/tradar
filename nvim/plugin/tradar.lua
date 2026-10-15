@@ -36,6 +36,10 @@ vim.api.nvim_create_user_command('TradarKafkaTail', function(a)
   require('tradar.kafka').tail(a.fargs[1], a.fargs[2])
 end, { nargs = '*' })
 
+-- Socket tail: same push-channel, two-way (typing a line sends it) --
+-- see docs/backlog/socket-tail-server-2026-10-15.md.
+vim.api.nvim_create_user_command('TradarSocketTail', function(a) require('tradar.socket').tail(a.args) end, { nargs = '?' })
+
 -- Query files for the non-SQL connectors. Highlighting borrows a real
 -- grammar where one fits (`.mongo` is JavaScript) -- see README.
 vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq' } })
