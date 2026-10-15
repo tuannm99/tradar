@@ -19,7 +19,8 @@ use tradar_query_workbench::query_driver::{QueryDriver, completion_context};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 use crate::protocol::{
-    METHOD_NOT_FOUND, RpcError, StoredResult, parse_row_edit, schema_json, statement_json,
+    METHOD_NOT_FOUND, PROTOCOL_VERSION, RpcError, StoredResult, parse_row_edit, schema_json,
+    statement_json,
 };
 
 /// Rows returned inline by `execute` -- enough to fill a screen, so the
@@ -233,6 +234,7 @@ impl Server {
         client: &ClientConnection,
     ) -> Result<Value, RpcError> {
         match method {
+            "version" => Ok(self.version()),
             "connectors.list" => Ok(self.connectors()),
             "connections.list" => self.connections(),
             "connect" => self.connect(params).await,
@@ -307,6 +309,15 @@ impl Server {
                 data: None,
             }),
         }
+    }
+
+    /// `{major, minor}` of `protocol::PROTOCOL_VERSION` -- never behind a
+    /// connector feature gate (unlike almost every other method here), so
+    /// even the most trimmed build still answers it. See that constant's
+    /// own doc comment for what a mismatch means and why this never blocks
+    /// a call.
+    fn version(&self) -> Value {
+        json!({"major": PROTOCOL_VERSION.0, "minor": PROTOCOL_VERSION.1})
     }
 
     fn connectors(&self) -> Value {
@@ -1393,5 +1404,23 @@ mod tests {
         assert!(!is_ddl("-- CREATE is only mentioned here\nSELECT 1"));
         assert!(!is_ddl("SELECT 1"));
         assert!(!is_ddl("-- only a comment"));
+    }
+
+    /// No connector feature needed -- `version` is one of the handful of
+    /// methods (`connectors.list`, `shutdown`, ...) that answer regardless
+    /// of which connectors this build compiled in.
+    #[tokio::test]
+    async fn version_reports_the_compiled_in_protocol_version() {
+        let server = Server::new(HashMap::new(), None);
+
+        let response = server
+            .handle(
+                json!({"jsonrpc": "2.0", "id": 1, "method": "version"}),
+                &ClientConnection::detached(),
+            )
+            .await;
+
+        assert_eq!(response["result"]["major"], PROTOCOL_VERSION.0);
+        assert_eq!(response["result"]["minor"], PROTOCOL_VERSION.1);
     }
 }
