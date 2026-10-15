@@ -249,16 +249,17 @@ function M.open_request(connection, service, method)
   vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcCancel', function() M.cancel(buf) end, {})
   vim.keymap.set('n', '<leader>rr', function() M.send(buf) end, { buffer = buf, desc = 'tradar: send gRPC request' })
   vim.keymap.set('n', '<leader>rx', function() M.cancel(buf) end, { buffer = buf, desc = 'tradar: cancel gRPC request' })
-  -- Closes the whole tab, response split included -- unlike the response
-  -- buffer's own `q`, there is no reason to keep an empty request buffer
-  -- around once the user is done with it.
-  vim.keymap.set('n', 'q', function() pcall(vim.cmd.tabclose) end, { buffer = buf, desc = 'tradar: close gRPC request' })
+  -- No `q` here: unlike the response split/results buffer (both
+  -- `modifiable = false`, where `q` shadowing vim's own macro-record is
+  -- free), this buffer is a real editable JSON buffer -- stealing `q`
+  -- would cost a genuinely useful binding for a UX nicety. `:q`/`:tabclose`
+  -- already work fine (the buffer always lives in its own tab).
   vim.keymap.set('n', 'g?', function()
     vim.lsp.util.open_floating_preview({
       '# tradar: gRPC request buffer',
       '- `<leader>rr` / `:TradarGrpcSend` send this request',
       '- `<leader>rx` / `:TradarGrpcCancel` cancel if still running',
-      '- `q` close (the response split too)',
+      '- `:q`/`:tabclose` close (this buffer is editable -- `q` is left as vim\'s own macro-record)',
     }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
   end, { buffer = buf, desc = 'tradar: show keymap help' })
   vim.cmd.tabnew()
