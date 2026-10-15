@@ -7,6 +7,8 @@ mod grpc;
 #[cfg(feature = "kafka")]
 mod kafka;
 mod protocol;
+#[cfg(feature = "rabbitmq")]
+mod rabbitmq;
 mod server;
 #[cfg(feature = "socket")]
 mod socket;

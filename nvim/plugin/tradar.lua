@@ -40,6 +40,17 @@ end, { nargs = '*' })
 -- see docs/backlog/socket-tail-server-2026-10-15.md.
 vim.api.nvim_create_user_command('TradarSocketTail', function(a) require('tradar.socket').tail(a.args) end, { nargs = '?' })
 
+-- RabbitMQ: no push channel needed (Management HTTP API has no streaming
+-- endpoint) -- plain request/response, see docs/backlog/rabbitmq-server-2026-10-16.md.
+vim.api.nvim_create_user_command('TradarRabbitmqConnect', function(a) require('tradar.rabbitmq').connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarRabbitmqPeek', function(a)
+  require('tradar.rabbitmq').peek(a.fargs[1], a.fargs[2])
+end, { nargs = '*' })
+vim.api.nvim_create_user_command('TradarRabbitmqBindings', function(a)
+  require('tradar.rabbitmq').bindings(a.fargs[1], a.fargs[2])
+end, { nargs = '*' })
+vim.api.nvim_create_user_command('TradarRabbitmqPublish', function(a) require('tradar.rabbitmq').publish(a.args) end, { nargs = '?' })
+
 -- Query files for the non-SQL connectors. Highlighting borrows a real
 -- grammar where one fits (`.mongo` is JavaScript) -- see README.
 vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq' } })

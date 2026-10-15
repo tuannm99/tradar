@@ -92,6 +92,13 @@ struct State {
     socket_tails_by_client: HashMap<u64, Vec<String>>,
     #[cfg(feature = "socket")]
     next_socket_subscription: u64,
+    /// RabbitMQ connections, kept apart from `drivers` for the same reason
+    /// gRPC's own `grpc` map is -- no `QueryDriver` to serve (see
+    /// `rabbitmq.rs`'s doc comment). No push state at all (unlike
+    /// Kafka/Socket): every RabbitMQ operation is a plain request/response
+    /// against the Management HTTP API, same shape as gRPC.
+    #[cfg(feature = "rabbitmq")]
+    rabbitmq: HashMap<String, crate::rabbitmq::RabbitConnection>,
 }
 
 /// One live client socket (`transport.rs`'s `serve_connection`) -- *not* a
@@ -269,6 +276,20 @@ impl Server {
             "socket.send" => self.socket_send(params, client).await,
             #[cfg(feature = "socket")]
             "socket.tail.stop" => self.socket_tail_stop(params),
+            #[cfg(feature = "rabbitmq")]
+            "rabbitmq.connect" => self.rabbitmq_connect(params).await,
+            #[cfg(feature = "rabbitmq")]
+            "rabbitmq.disconnect" => self.rabbitmq_disconnect(params),
+            #[cfg(feature = "rabbitmq")]
+            "rabbitmq.queues" => self.rabbitmq_queues(params).await,
+            #[cfg(feature = "rabbitmq")]
+            "rabbitmq.exchanges" => self.rabbitmq_exchanges(params).await,
+            #[cfg(feature = "rabbitmq")]
+            "rabbitmq.bindings" => self.rabbitmq_bindings(params).await,
+            #[cfg(feature = "rabbitmq")]
+            "rabbitmq.peek" => self.rabbitmq_peek(params).await,
+            #[cfg(feature = "rabbitmq")]
+            "rabbitmq.publish" => self.rabbitmq_publish(params).await,
             _ => Err(RpcError {
                 code: METHOD_NOT_FOUND,
                 message: format!("unknown method `{method}`"),
@@ -303,7 +324,8 @@ impl Server {
                     "connected": connected.drivers.contains_key(&c.name)
                         || connected_grpc(&connected, &c.name)
                         || connected_kafka(&connected, &c.name)
-                        || connected_socket(&connected, &c.name),
+                        || connected_socket(&connected, &c.name)
+                        || connected_rabbitmq(&connected, &c.name),
                     "supported": self.is_supported(&c.driver),
                 })
             })
@@ -312,13 +334,15 @@ impl Server {
     }
 
     /// Whether this server build can serve `driver` at all -- through the
-    /// `Connector`/`QueryDriver` registry, or (gRPC/Kafka/Socket) through
-    /// their own `grpc.*`/`kafka.*`/`socket.*` methods instead.
+    /// `Connector`/`QueryDriver` registry, or (gRPC/Kafka/Socket/RabbitMQ)
+    /// through their own `grpc.*`/`kafka.*`/`socket.*`/`rabbitmq.*` methods
+    /// instead.
     fn is_supported(&self, driver: &str) -> bool {
         self.registry.contains_key(driver)
             || (driver == "grpc" && cfg!(feature = "grpc"))
             || (driver == "kafka" && cfg!(feature = "kafka"))
             || (driver == "socket" && cfg!(feature = "socket"))
+            || (driver == "rabbitmq" && cfg!(feature = "rabbitmq"))
     }
 
     fn driver(&self, params: &Value) -> Result<Arc<dyn QueryDriver>, RpcError> {
@@ -1054,6 +1078,116 @@ impl Server {
             handle.stop();
         }
     }
+
+    #[cfg(feature = "rabbitmq")]
+    async fn rabbitmq_connect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        if self.state.lock().unwrap().rabbitmq.contains_key(name) {
+            return Ok(json!({"connected": true, "already": true}));
+        }
+        let saved = self
+            .saved()?
+            .into_iter()
+            .find(|c| c.name == name && c.driver == "rabbitmq")
+            .ok_or_else(|| RpcError::app(format!("no saved rabbitmq connection named `{name}`")))?;
+        let conn = crate::rabbitmq::connect(&saved.target).await.map_err(|e| {
+            RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+        })?;
+        self.state
+            .lock()
+            .unwrap()
+            .rabbitmq
+            .insert(name.to_string(), conn);
+        Ok(json!({"connected": true, "already": false}))
+    }
+
+    #[cfg(feature = "rabbitmq")]
+    fn rabbitmq_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let removed = self.state.lock().unwrap().rabbitmq.remove(name).is_some();
+        Ok(json!({"disconnected": removed}))
+    }
+
+    /// A clone of the named, already-connected RabbitMQ connection -- the
+    /// shared "look it up or fail with the same message every
+    /// `rabbitmq.*` method wants" step. Cloned (not borrowed) because the
+    /// `std::sync::MutexGuard` locking `self.state` can't itself live
+    /// across the `.await` every real call below needs to make.
+    #[cfg(feature = "rabbitmq")]
+    fn rabbitmq_connection(
+        &self,
+        name: &str,
+    ) -> Result<crate::rabbitmq::RabbitConnection, RpcError> {
+        self.state
+            .lock()
+            .unwrap()
+            .rabbitmq
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                RpcError::app(format!(
+                    "`{name}` is not connected -- call `rabbitmq.connect` first"
+                ))
+            })
+    }
+
+    #[cfg(feature = "rabbitmq")]
+    async fn rabbitmq_queues(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let conn = self.rabbitmq_connection(name)?;
+        let queues = crate::rabbitmq::queues(&conn)
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!(queues))
+    }
+
+    #[cfg(feature = "rabbitmq")]
+    async fn rabbitmq_exchanges(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let conn = self.rabbitmq_connection(name)?;
+        let exchanges = crate::rabbitmq::exchanges(&conn)
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!(exchanges))
+    }
+
+    #[cfg(feature = "rabbitmq")]
+    async fn rabbitmq_bindings(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let exchange = str_param(params, "exchange")?;
+        let conn = self.rabbitmq_connection(name)?;
+        let bindings = crate::rabbitmq::bindings(&conn, exchange)
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!(bindings))
+    }
+
+    #[cfg(feature = "rabbitmq")]
+    async fn rabbitmq_peek(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let queue = str_param(params, "queue")?;
+        let conn = self.rabbitmq_connection(name)?;
+        let messages = crate::rabbitmq::peek(&conn, queue)
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!(messages))
+    }
+
+    #[cfg(feature = "rabbitmq")]
+    async fn rabbitmq_publish(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let exchange = str_param(params, "exchange")?;
+        let routing_key = params
+            .get("routing_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let payload = str_param(params, "payload")?;
+        let conn = self.rabbitmq_connection(name)?;
+        crate::rabbitmq::publish(&conn, exchange, routing_key, payload)
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!({"ok": true}))
+    }
 }
 
 /// `query` without the `--` line comments and `/* */` blocks that precede
@@ -1123,6 +1257,16 @@ fn connected_socket(state: &State, name: &str) -> bool {
 
 #[cfg(not(feature = "socket"))]
 fn connected_socket(_state: &State, _name: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "rabbitmq")]
+fn connected_rabbitmq(state: &State, name: &str) -> bool {
+    state.rabbitmq.contains_key(name)
+}
+
+#[cfg(not(feature = "rabbitmq"))]
+fn connected_rabbitmq(_state: &State, _name: &str) -> bool {
     false
 }
 
