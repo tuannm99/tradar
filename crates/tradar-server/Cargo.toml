@@ -41,6 +41,18 @@ protox = { version = "0.7", optional = true }
 tokio-stream = { version = "0.1", optional = true, features = ["net"] }
 bytes = { version = "1", optional = true }
 
+# Kafka tail -- the first connector this server pushes notifications for
+# (see docs/backlog/push-channel-design-2026-10-14.md). Not a reuse of
+# `tradar-connector-kafka` (its `KafkaSession` is built around a
+# tick()-driven event queue for the TUI's render loop, a different shape
+# than "push a notification line the moment a message arrives" -- same
+# reasoning gRPC's own module above already set a precedent for: talk to
+# the underlying client library directly rather than through a connector
+# crate shaped for a different consumer). `futures-util` only for the
+# consumer stream's `.next()`, same as that crate.
+rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
+futures-util = { version = "0.3", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 
@@ -54,6 +66,10 @@ prost = "0.13"
 # have bespoke TUI screens and no driver to expose yet, see "Server
 # headless" in docs/architecture.md. Feature names match `tradar-app`'s.
 [features]
+# `kafka` deliberately NOT in default: `rdkafka`'s `cmake-build` compiles
+# `librdkafka` from vendored source and needs `cmake`/`gcc`/`libcurl-dev`
+# on the build machine -- same reason `tradar-app`'s own `kafka` feature
+# stays opt-in for `make test-unit` (see CLAUDE.md's "Commands").
 default = ["postgres", "mysql", "sqlite", "mongo", "elasticsearch", "redis", "cassandra", "clickhouse", "grpc"]
 postgres = ["dep:tradar-connector-postgres"]
 mysql = ["dep:tradar-connector-mysql"]
@@ -64,3 +80,4 @@ redis = ["dep:tradar-connector-redis"]
 cassandra = ["dep:tradar-connector-cassandra"]
 clickhouse = ["dep:tradar-connector-clickhouse"]
 grpc = ["dep:tonic", "dep:tonic-reflection", "dep:prost", "dep:prost-reflect", "dep:protox", "dep:tokio-stream", "dep:bytes"]
+kafka = ["dep:rdkafka", "dep:futures-util"]

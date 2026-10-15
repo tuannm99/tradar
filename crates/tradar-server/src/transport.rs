@@ -63,10 +63,13 @@ pub async fn serve(listener: UnixListener, server: Arc<Server>) {
 /// stands in front of the `cancel` meant for it -- which also means replies
 /// can arrive out of order; clients match them by `id`. The tasks live in a
 /// `JoinSet`, so a client that disconnects takes its in-flight queries with
-/// it instead of leaving them running for nobody.
+/// it instead of leaving them running for nobody. The same `outbox` also
+/// carries background push notifications (Kafka tail, ...) -- see
+/// `ClientConnection`'s own doc comment in `server.rs`.
 async fn serve_connection(stream: UnixStream, server: Arc<Server>) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let (replies, mut outbox) = mpsc::unbounded_channel::<String>();
+    let client = server.new_client(replies.clone());
     let writer = tokio::spawn(async move {
         while let Some(line) = outbox.recv().await {
             if write.write_all(line.as_bytes()).await.is_err() {
@@ -83,12 +86,13 @@ async fn serve_connection(stream: UnixStream, server: Arc<Server>) -> std::io::R
         }
         let replies = replies.clone();
         let server = Arc::clone(&server);
+        let client = client.clone();
         in_flight.spawn(async move {
             let response = if line.len() > MAX_LINE {
                 error_response(-32600, "request too large")
             } else {
                 match serde_json::from_str::<Value>(&line) {
-                    Ok(request) => server.handle(request).await,
+                    Ok(request) => server.handle(request, &client).await,
                     Err(e) => error_response(-32700, &format!("parse error: {e}")),
                 }
             };
@@ -100,6 +104,10 @@ async fn serve_connection(stream: UnixStream, server: Arc<Server>) -> std::io::R
     drop(in_flight);
     drop(replies);
     let _ = writer.await;
+    // Any subscription (Kafka tail, ...) this client started and never
+    // explicitly stopped must not keep running for a socket nobody is
+    // reading from anymore.
+    server.client_disconnected(&client);
     Ok(())
 }
 

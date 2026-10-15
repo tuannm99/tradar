@@ -6,6 +6,10 @@ local uv = vim.uv or vim.loop
 local M = {}
 
 local pipe, buffer, pending, next_id = nil, '', {}, 0
+--- method -> list of callbacks, for a pushed notification (no `id`, see
+--- docs/backlog/push-channel-design-2026-10-14.md) rather than a reply to
+--- a request this client made -- `kafka.tail.message` today.
+local notification_handlers = {}
 
 local function default_socket()
   local base = vim.env.XDG_RUNTIME_DIR or vim.fn.fnamemodify(vim.fn.tempname(), ':h')
@@ -29,6 +33,15 @@ end
 local function on_line(line)
   local ok, msg = pcall(vim.json.decode, line, { luanil = { object = true } })
   if not ok or type(msg) ~= 'table' then return end
+  -- A notification has no `id` at all (distinct from a response, which
+  -- always has one, `null` included on a parse-error reply) -- routed by
+  -- `method` to whoever called `M.on`, not matched against `pending`.
+  if msg.id == nil and msg.method then
+    for _, cb in ipairs(notification_handlers[msg.method] or {}) do
+      vim.schedule(function() cb(msg.params) end)
+    end
+    return
+  end
   local cb = pending[msg.id]
   pending[msg.id] = nil
   if cb then
@@ -115,6 +128,25 @@ function M.request_sync(method, params, timeout_ms)
   M.request(method, params, function(e, r) done, err, result = true, e, r end)
   if not vim.wait(timeout_ms or 500, function() return done end, 5) then return 'timeout' end
   return err, result
+end
+
+--- Subscribes `cb(params)` to every pushed notification for `method`
+--- (`kafka.tail.message`, ...) -- several callers can register for the
+--- same method (e.g. two tail buffers), each gets every notification, so a
+--- caller filters by its own `params.subscription` itself. Returns an
+--- unsubscribe function.
+function M.on(method, cb)
+  notification_handlers[method] = notification_handlers[method] or {}
+  table.insert(notification_handlers[method], cb)
+  return function()
+    local handlers = notification_handlers[method]
+    for i, h in ipairs(handlers or {}) do
+      if h == cb then
+        table.remove(handlers, i)
+        break
+      end
+    end
+  end
 end
 
 function M.connected() return pipe ~= nil end

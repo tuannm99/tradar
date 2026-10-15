@@ -29,6 +29,13 @@ vim.api.nvim_create_user_command('TradarGrpcLoadProto', function(a)
   require('tradar.grpc').load_proto(nil, a.args)
 end, { nargs = 1, complete = 'file' })
 
+-- Kafka tail: a push-channel notification stream, not a request/response
+-- method the way everything above is -- see docs/backlog/kafka-tail-server-2026-10-15.md.
+vim.api.nvim_create_user_command('TradarKafkaConnect', function(a) require('tradar.kafka').connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarKafkaTail', function(a)
+  require('tradar.kafka').tail(a.fargs[1], a.fargs[2])
+end, { nargs = '*' })
+
 -- Query files for the non-SQL connectors. Highlighting borrows a real
 -- grammar where one fits (`.mongo` is JavaScript) -- see README.
 vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq' } })
