@@ -99,6 +99,11 @@ struct State {
     /// against the Management HTTP API, same shape as gRPC.
     #[cfg(feature = "rabbitmq")]
     rabbitmq: HashMap<String, crate::rabbitmq::RabbitConnection>,
+    /// HTTP connections, kept apart from `drivers` for the same reason as
+    /// `rabbitmq`/`grpc` above -- no `QueryDriver` to serve, no push state
+    /// (see `http.rs`'s doc comment).
+    #[cfg(feature = "http")]
+    http: HashMap<String, crate::http::HttpConnection>,
 }
 
 /// One live client socket (`transport.rs`'s `serve_connection`) -- *not* a
@@ -290,6 +295,12 @@ impl Server {
             "rabbitmq.peek" => self.rabbitmq_peek(params).await,
             #[cfg(feature = "rabbitmq")]
             "rabbitmq.publish" => self.rabbitmq_publish(params).await,
+            #[cfg(feature = "http")]
+            "http.connect" => self.http_connect(params),
+            #[cfg(feature = "http")]
+            "http.disconnect" => self.http_disconnect(params),
+            #[cfg(feature = "http")]
+            "http.send" => self.http_send(params).await,
             _ => Err(RpcError {
                 code: METHOD_NOT_FOUND,
                 message: format!("unknown method `{method}`"),
@@ -325,7 +336,8 @@ impl Server {
                         || connected_grpc(&connected, &c.name)
                         || connected_kafka(&connected, &c.name)
                         || connected_socket(&connected, &c.name)
-                        || connected_rabbitmq(&connected, &c.name),
+                        || connected_rabbitmq(&connected, &c.name)
+                        || connected_http(&connected, &c.name),
                     "supported": self.is_supported(&c.driver),
                 })
             })
@@ -343,6 +355,7 @@ impl Server {
             || (driver == "kafka" && cfg!(feature = "kafka"))
             || (driver == "socket" && cfg!(feature = "socket"))
             || (driver == "rabbitmq" && cfg!(feature = "rabbitmq"))
+            || (driver == "http" && cfg!(feature = "http"))
     }
 
     fn driver(&self, params: &Value) -> Result<Arc<dyn QueryDriver>, RpcError> {
@@ -1188,6 +1201,64 @@ impl Server {
             .map_err(|e| RpcError::app(e.to_string()))?;
         Ok(json!({"ok": true}))
     }
+
+    /// No liveness probe (see `http.rs`'s doc comment) so this never fails
+    /// -- it only needs a saved connection to exist, same as `connect`'s
+    /// own "no saved connection named" check for every other driver.
+    #[cfg(feature = "http")]
+    fn http_connect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        if self.state.lock().unwrap().http.contains_key(name) {
+            return Ok(json!({"connected": true, "already": true}));
+        }
+        let saved = self
+            .saved()?
+            .into_iter()
+            .find(|c| c.name == name && c.driver == "http")
+            .ok_or_else(|| RpcError::app(format!("no saved http connection named `{name}`")))?;
+        let conn = crate::http::connect(&saved.target);
+        self.state
+            .lock()
+            .unwrap()
+            .http
+            .insert(name.to_string(), conn);
+        Ok(json!({"connected": true, "already": false}))
+    }
+
+    #[cfg(feature = "http")]
+    fn http_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let removed = self.state.lock().unwrap().http.remove(name).is_some();
+        Ok(json!({"disconnected": removed}))
+    }
+
+    #[cfg(feature = "http")]
+    async fn http_send(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let method = params
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("GET");
+        let url = params.get("url").and_then(Value::as_str).unwrap_or("");
+        let headers = params.get("headers").and_then(Value::as_str).unwrap_or("");
+        let body = params.get("body").and_then(Value::as_str).unwrap_or("");
+        let conn = self
+            .state
+            .lock()
+            .unwrap()
+            .http
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                RpcError::app(format!(
+                    "`{name}` is not connected -- call `http.connect` first"
+                ))
+            })?;
+        let response = crate::http::send(&conn, method, url, headers, body)
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        Ok(json!(response))
+    }
 }
 
 /// `query` without the `--` line comments and `/* */` blocks that precede
@@ -1267,6 +1338,16 @@ fn connected_rabbitmq(state: &State, name: &str) -> bool {
 
 #[cfg(not(feature = "rabbitmq"))]
 fn connected_rabbitmq(_state: &State, _name: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "http")]
+fn connected_http(state: &State, name: &str) -> bool {
+    state.http.contains_key(name)
+}
+
+#[cfg(not(feature = "http"))]
+fn connected_http(_state: &State, _name: &str) -> bool {
     false
 }
 
