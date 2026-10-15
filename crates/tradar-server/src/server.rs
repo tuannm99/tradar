@@ -53,6 +53,13 @@ struct State {
     /// QueryDriver>` shape every other connection here uses.
     #[cfg(feature = "grpc")]
     grpc: HashMap<String, crate::grpc::GrpcConnection>,
+    /// In-flight `grpc.invoke`s named with `query_id`, mirroring `running`
+    /// above -- a separate map because gRPC has no `Arc<dyn QueryDriver>`
+    /// to carry alongside the `Notify` (and no DB-side "stop processing"
+    /// to call either; cancelling only drops the client's own wait, same
+    /// ceiling `QueryDriver::cancel_query` already has for most drivers).
+    #[cfg(feature = "grpc")]
+    grpc_running: HashMap<String, Arc<Notify>>,
 }
 
 pub struct Server {
@@ -352,15 +359,23 @@ impl Server {
     async fn cancel(&self, params: &Value) -> Result<Value, RpcError> {
         let id = str_param(params, "query_id")?;
         let target = self.state.lock().unwrap().running.get(id).cloned();
-        let Some((notify, driver)) = target else {
-            return Ok(json!({"cancelled": false}));
-        };
-        notify.notify_one();
-        // Best-effort; the client already got `cancelled: true` either
-        // way -- see `QueryDriver::cancel_query`'s own doc comment for why
-        // this never promises the statement actually stopped.
-        let _ = driver.cancel_query().await;
-        Ok(json!({"cancelled": true}))
+        if let Some((notify, driver)) = target {
+            notify.notify_one();
+            // Best-effort; the client already got `cancelled: true` either
+            // way -- see `QueryDriver::cancel_query`'s own doc comment for
+            // why this never promises the statement actually stopped.
+            let _ = driver.cancel_query().await;
+            return Ok(json!({"cancelled": true}));
+        }
+        #[cfg(feature = "grpc")]
+        {
+            let target = self.state.lock().unwrap().grpc_running.get(id).cloned();
+            if let Some(notify) = target {
+                notify.notify_one();
+                return Ok(json!({"cancelled": true}));
+            }
+        }
+        Ok(json!({"cancelled": false}))
     }
 
     /// Rebuilds a connection's completion source from the live schema. A
@@ -582,6 +597,12 @@ impl Server {
     /// here (a gRPC call isn't a statement the client could choose to run
     /// later) -- the "show it, run it only after `y`" rule is specific to
     /// row-edit's generated write statements, not to RPCs in general.
+    ///
+    /// An optional `query_id` (same idea as `execute`'s) lets a client
+    /// `cancel` a slow invoke -- best-effort, same ceiling `cancel` already
+    /// has for most `QueryDriver`s: it only drops this future's own wait,
+    /// never anything server-side (there is no gRPC-level "stop processing
+    /// this call", unlike a DB's own cancel).
     #[cfg(feature = "grpc")]
     async fn grpc_invoke(&self, params: &Value) -> Result<Value, RpcError> {
         let name = str_param(params, "connection")?;
@@ -597,10 +618,28 @@ impl Server {
             })?;
             (conn.channel.clone(), conn.pool.clone())
         };
-        let outcome = crate::grpc::invoke(channel, &pool, service, method, request).await?;
+
+        let query_id = params.get("query_id").and_then(Value::as_str);
+        let cancel = Arc::new(Notify::new());
+        if let Some(id) = query_id {
+            self.state
+                .lock()
+                .unwrap()
+                .grpc_running
+                .insert(id.to_string(), Arc::clone(&cancel));
+        }
+        let outcome = tokio::select! {
+            result = crate::grpc::invoke(channel, &pool, service, method, request) => Some(result),
+            () = cancel.notified() => None,
+        };
+        if let Some(id) = query_id {
+            self.state.lock().unwrap().grpc_running.remove(id);
+        }
         match outcome {
-            Ok(response) => Ok(json!({"response": response})),
-            Err(status) => Err(status.into()),
+            Some(Ok(Ok(response))) => Ok(json!({"response": response})),
+            Some(Ok(Err(status))) => Err(status.into()),
+            Some(Err(e)) => Err(e.into()),
+            None => Err(RpcError::app("invoke cancelled")),
         }
     }
 }
