@@ -70,7 +70,7 @@ prost = "0.13"
 # `librdkafka` from vendored source and needs `cmake`/`gcc`/`libcurl-dev`
 # on the build machine -- same reason `tradar-app`'s own `kafka` feature
 # stays opt-in for `make test-unit` (see CLAUDE.md's "Commands").
-default = ["postgres", "mysql", "sqlite", "mongo", "elasticsearch", "redis", "cassandra", "clickhouse", "grpc"]
+default = ["postgres", "mysql", "sqlite", "mongo", "elasticsearch", "redis", "cassandra", "clickhouse", "grpc", "socket"]
 postgres = ["dep:tradar-connector-postgres"]
 mysql = ["dep:tradar-connector-mysql"]
 sqlite = ["dep:tradar-connector-sqlite"]
@@ -81,3 +81,7 @@ cassandra = ["dep:tradar-connector-cassandra"]
 clickhouse = ["dep:tradar-connector-clickhouse"]
 grpc = ["dep:tonic", "dep:tonic-reflection", "dep:prost", "dep:prost-reflect", "dep:protox", "dep:tokio-stream", "dep:bytes"]
 kafka = ["dep:rdkafka", "dep:futures-util"]
+# Socket tail -- unlike `kafka`, needs no extra dependency or toolchain
+# (plain `tokio::net::TcpStream`, already a dependency), so it's a normal
+# default feature rather than opt-in.
+socket = []

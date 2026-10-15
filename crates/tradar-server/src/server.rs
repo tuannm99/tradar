@@ -80,6 +80,18 @@ struct State {
     kafka_tails_by_client: HashMap<u64, Vec<String>>,
     #[cfg(feature = "kafka")]
     next_kafka_subscription: u64,
+    /// Socket tail subscriptions (`socket.tail.start`/`socket.tail.stop`),
+    /// keyed by the subscription id the client named -- `(owning client
+    /// id, saved connection name, the live TCP tail)`. The connection name
+    /// rides along here (unlike Kafka, which keeps it in its own `kafka`
+    /// map) because a Socket "connection" has no persistent per-name state
+    /// of its own to look it up from -- see `socket.rs`'s doc comment.
+    #[cfg(feature = "socket")]
+    socket_tails: HashMap<String, (u64, String, crate::socket::TailHandle)>,
+    #[cfg(feature = "socket")]
+    socket_tails_by_client: HashMap<u64, Vec<String>>,
+    #[cfg(feature = "socket")]
+    next_socket_subscription: u64,
 }
 
 /// One live client socket (`transport.rs`'s `serve_connection`) -- *not* a
@@ -97,7 +109,7 @@ struct State {
 // other build with every push connector's feature off. Still part of the
 // public shape: `new_client`/`client_disconnected` take/use `ClientConnection`
 // unconditionally so the generic plumbing doesn't itself need feature gates.
-#[cfg_attr(not(feature = "kafka"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "kafka", feature = "socket")), allow(dead_code))]
 #[derive(Clone)]
 pub struct ClientConnection {
     id: u64,
@@ -119,7 +131,7 @@ impl ClientConnection {
         Self { id: 0, outbox }
     }
 
-    #[cfg_attr(not(feature = "kafka"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "kafka", feature = "socket")), allow(dead_code))]
     pub(crate) fn notify(&self, method: &str, params: Value) {
         let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
         let _ = self.outbox.send(format!("{line}\n"));
@@ -166,10 +178,15 @@ impl Server {
 
     /// Call when a client's socket closes: aborts and forgets every
     /// background subscription it started and never explicitly stopped.
-    #[cfg_attr(not(feature = "kafka"), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "kafka", feature = "socket")),
+        allow(unused_variables)
+    )]
     pub fn client_disconnected(&self, client: &ClientConnection) {
         #[cfg(feature = "kafka")]
         self.kafka_forget_client(client.id);
+        #[cfg(feature = "socket")]
+        self.socket_forget_client(client.id);
     }
 
     /// One request object in, one response object out (JSON-RPC 2.0, minus
@@ -193,7 +210,10 @@ impl Server {
         }
     }
 
-    #[cfg_attr(not(feature = "kafka"), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "kafka", feature = "socket")),
+        allow(unused_variables)
+    )]
     async fn dispatch(
         &self,
         method: &str,
@@ -243,6 +263,12 @@ impl Server {
             "kafka.tail.start" => self.kafka_tail_start(params, client),
             #[cfg(feature = "kafka")]
             "kafka.tail.stop" => self.kafka_tail_stop(params),
+            #[cfg(feature = "socket")]
+            "socket.tail.start" => self.socket_tail_start(params, client).await,
+            #[cfg(feature = "socket")]
+            "socket.send" => self.socket_send(params, client).await,
+            #[cfg(feature = "socket")]
+            "socket.tail.stop" => self.socket_tail_stop(params),
             _ => Err(RpcError {
                 code: METHOD_NOT_FOUND,
                 message: format!("unknown method `{method}`"),
@@ -276,7 +302,8 @@ impl Server {
                     "target": c.target,
                     "connected": connected.drivers.contains_key(&c.name)
                         || connected_grpc(&connected, &c.name)
-                        || connected_kafka(&connected, &c.name),
+                        || connected_kafka(&connected, &c.name)
+                        || connected_socket(&connected, &c.name),
                     "supported": self.is_supported(&c.driver),
                 })
             })
@@ -285,12 +312,13 @@ impl Server {
     }
 
     /// Whether this server build can serve `driver` at all -- through the
-    /// `Connector`/`QueryDriver` registry, or (gRPC/Kafka) through their
-    /// own `grpc.*`/`kafka.*` methods instead.
+    /// `Connector`/`QueryDriver` registry, or (gRPC/Kafka/Socket) through
+    /// their own `grpc.*`/`kafka.*`/`socket.*` methods instead.
     fn is_supported(&self, driver: &str) -> bool {
         self.registry.contains_key(driver)
             || (driver == "grpc" && cfg!(feature = "grpc"))
             || (driver == "kafka" && cfg!(feature = "kafka"))
+            || (driver == "socket" && cfg!(feature = "socket"))
     }
 
     fn driver(&self, params: &Value) -> Result<Arc<dyn QueryDriver>, RpcError> {
@@ -891,6 +919,141 @@ impl Server {
             handle.stop();
         }
     }
+
+    /// Dials the saved connection's target and starts tailing it
+    /// immediately -- see `socket.rs`'s doc comment for why Socket has no
+    /// separate `connect` step the way Kafka/gRPC do. Returns a
+    /// `subscription` id once the TCP handshake succeeds; data arrives
+    /// after as `socket.tail.message` notifications on `client`'s own
+    /// socket (`{subscription, direction: "received"|"sent", text}`, or
+    /// `{subscription, error}` once the peer closes/errors).
+    #[cfg(feature = "socket")]
+    async fn socket_tail_start(
+        &self,
+        params: &Value,
+        client: &ClientConnection,
+    ) -> Result<Value, RpcError> {
+        let name = str_param(params, "connection")?;
+        let target = self
+            .saved()?
+            .into_iter()
+            .find(|c| c.name == name && c.driver == "socket")
+            .ok_or_else(|| RpcError::app(format!("no saved socket connection named `{name}`")))?
+            .target;
+
+        let subscription = {
+            let mut state = self.state.lock().unwrap();
+            state.next_socket_subscription += 1;
+            format!("socket-{}", state.next_socket_subscription)
+        };
+
+        let client_id = client.id;
+        let push_client = client.clone();
+        let handle = crate::socket::start_tail(&target, subscription.clone(), move |item| {
+            push_client.notify("socket.tail.message", item)
+        })
+        .await
+        .map_err(|e| RpcError::app(format!("không kết nối được tới `{target}`: {e}")))?;
+
+        let mut state = self.state.lock().unwrap();
+        state
+            .socket_tails
+            .insert(subscription.clone(), (client_id, name.to_string(), handle));
+        state
+            .socket_tails_by_client
+            .entry(client_id)
+            .or_default()
+            .push(subscription.clone());
+        Ok(json!({"subscription": subscription}))
+    }
+
+    /// Writes `text` (plus a trailing `\n` unless `newline: false`) to a
+    /// running tail's own TCP stream -- the write itself also comes back
+    /// as a `socket.tail.message` notification with `direction: "sent"`,
+    /// the same "echo what was typed" shape
+    /// `tradar-connector-socket`'s own `push_entry` logs both directions
+    /// with, so the plugin doesn't need to echo it client-side itself.
+    /// Pushed straight through `client` (the caller of this very request)
+    /// rather than looked up from `socket_tails` -- only the client that
+    /// owns a subscription can name its id to send on it, so this is
+    /// always the right socket to echo onto.
+    #[cfg(feature = "socket")]
+    async fn socket_send(
+        &self,
+        params: &Value,
+        client: &ClientConnection,
+    ) -> Result<Value, RpcError> {
+        let subscription = str_param(params, "subscription")?;
+        let text = str_param(params, "text")?;
+        let newline = params
+            .get("newline")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if text.is_empty() {
+            return Ok(json!({"sent": false}));
+        }
+        let sent_text = if newline {
+            format!("{text}\n")
+        } else {
+            text.to_string()
+        };
+
+        let handle = {
+            let state = self.state.lock().unwrap();
+            state
+                .socket_tails
+                .get(subscription)
+                .map(|(_, _, h)| h.clone())
+                .ok_or_else(|| {
+                    RpcError::app(format!(
+                        "`{subscription}` is not tailing -- call `socket.tail.start` first"
+                    ))
+                })?
+        };
+        handle
+            .send(sent_text.clone().into_bytes())
+            .await
+            .map_err(|e| RpcError::app(e.to_string()))?;
+        client.notify(
+            "socket.tail.message",
+            json!({"subscription": subscription, "direction": "sent", "text": sent_text}),
+        );
+        Ok(json!({"sent": true}))
+    }
+
+    #[cfg(feature = "socket")]
+    fn socket_tail_stop(&self, params: &Value) -> Result<Value, RpcError> {
+        let subscription = str_param(params, "subscription")?;
+        let mut state = self.state.lock().unwrap();
+        let Some((client_id, _name, handle)) = state.socket_tails.remove(subscription) else {
+            return Ok(json!({"stopped": false}));
+        };
+        if let Some(list) = state.socket_tails_by_client.get_mut(&client_id) {
+            list.retain(|s| s != subscription);
+        }
+        drop(state);
+        handle.stop();
+        Ok(json!({"stopped": true}))
+    }
+
+    /// Aborts and forgets every tail `client_id` started and never
+    /// explicitly `socket.tail.stop`ped -- called from `client_disconnected`
+    /// when that socket closes. Mirrors `kafka_forget_client` exactly.
+    #[cfg(feature = "socket")]
+    fn socket_forget_client(&self, client_id: u64) {
+        let mut state = self.state.lock().unwrap();
+        let Some(subs) = state.socket_tails_by_client.remove(&client_id) else {
+            return;
+        };
+        let handles: Vec<_> = subs
+            .iter()
+            .filter_map(|s| state.socket_tails.remove(s))
+            .collect();
+        drop(state);
+        for (_, _, handle) in handles {
+            handle.stop();
+        }
+    }
 }
 
 /// `query` without the `--` line comments and `/* */` blocks that precede
@@ -947,6 +1110,19 @@ fn connected_kafka(state: &State, name: &str) -> bool {
 
 #[cfg(not(feature = "kafka"))]
 fn connected_kafka(_state: &State, _name: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "socket")]
+fn connected_socket(state: &State, name: &str) -> bool {
+    state
+        .socket_tails
+        .values()
+        .any(|(_, conn_name, _)| conn_name == name)
+}
+
+#[cfg(not(feature = "socket"))]
+fn connected_socket(_state: &State, _name: &str) -> bool {
     false
 }
 
