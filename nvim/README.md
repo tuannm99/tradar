@@ -54,11 +54,11 @@ Dùng file `.mongo` (filetype `mongo`, tô màu như JavaScript), `.redis`, `.es
 -- tradar: tên-connection     (SQL)
 ```
 
-Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu hiện **bảng** (cột phẳng `address.city`) để dùng `i`/`dd`/`gyc`/export như SQL; `gT` đổi sang JSON. `<leader>re` (EXPLAIN) chỉ có cho SQL.
+Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu hiện **bảng** (cột phẳng `address.city`) để dùng `i`/`dd`/`gyc`/export như SQL; `<leader>rv` đổi sang JSON. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 
 ### gRPC
 
-Khác hẳn SQL/Mongo/Redis/Elasticsearch: không có buffer nguồn nào gắn connection — một connection gRPC chỉ là `driver = "grpc"` trong `connections.toml` (`target` = `host:port` trần hoặc URL đầy đủ, plaintext). `:TradarGrpcConnect [tên]` (bỏ trống thì chọn qua picker), rồi `:TradarGrpcServices` liệt kê service đã biết (qua server reflection thật, hoặc rỗng nếu server không hỗ trợ — nạp `.proto` tay bằng `:TradarGrpcLoadProto <đường-dẫn>`). Chọn service rồi method mở một buffer JSON mới (tab mới) với nội dung `{}` — gõ request vào đó, `<leader>rr` hoặc `:TradarGrpcSend` gọi thật, response hiện ở một split riêng. Chỉ **unary** cho v1 (xem `docs/architecture.md`, "Chốt lại scope v1" mục gRPC) — chưa có skeleton tự sinh theo shape message, chưa streaming, chưa metadata/header.
+Khác hẳn SQL/Mongo/Redis/Elasticsearch: không có buffer nguồn nào gắn connection — một connection gRPC chỉ là `driver = "grpc"` trong `connections.toml` (`target` = `host:port` trần hoặc URL đầy đủ, plaintext). `:TradarGrpcConnect [tên]` (bỏ trống thì chọn qua picker, ưu tiên connection của buffer request đang đứng nếu có), rồi `:TradarGrpcServices` liệt kê service đã biết (qua server reflection thật, hoặc rỗng nếu server không hỗ trợ — nạp `.proto` tay bằng `:TradarGrpcLoadProto <đường-dẫn>`). Chọn service rồi method mở một buffer JSON mới (tab mới) với nội dung `{}` — gõ request vào đó, `<leader>rr`/`:TradarGrpcSend` gọi thật (response hiện ở split riêng), `<leader>rx`/`:TradarGrpcCancel` huỷ nếu đang chạy lâu, `q` đóng (cả tab lẫn response split), `g?` xem lại các phím này. Chọn lại đúng connection/service/method đã mở sẽ nhảy về tab cũ thay vì mở thêm tab mới. Chỉ **unary** cho v1 (xem `docs/architecture.md`, "Chốt lại scope v1" mục gRPC) — chưa có skeleton tự sinh theo shape message, chưa streaming, chưa metadata/header.
 
 ### Định dạng `.tdb` (nhiều dialect, nhiều connection, một file)
 
@@ -93,8 +93,13 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 | `rs` / `rc` / `rm` | panel schema / chọn connection / tải thêm dòng |
 | `K` | thông tin bảng/cột dưới con trỏ (kiểu, PK, FK, index; hiểu alias `o.user_id`); không biết thì rơi về hover của LSP |
 | `gd` | trên tên bảng: mở bảng (`SELECT ... LIMIT 100`); chỗ khác: `definition` của LSP |
+| `g?` | liệt kê phím của buffer hiện tại (SQL, kết quả, panel schema đều có) |
 
-Trong buffer kết quả: `i` sửa ô (nhập giá trị — gõ `NULL` để đặt NULL — rồi hiện câu `UPDATE` để bạn xác nhận), `dd` xoá dòng (hiện câu `DELETE` rồi xác nhận); sau khi chạy, kết quả tự làm mới và con trỏ ở nguyên dòng. Chỉ sửa được kết quả của truy vấn một bảng có khoá chính và có chọn cột khoá, nếu không sẽ báo lý do. `gd` trên ô của cột khoá ngoại chạy `SELECT` dòng được tham chiếu (kết quả của truy vấn một bảng), `gyc` ô, `gyr` dòng, `gyC` cột, `gyj`/`gyv`/`gym` cả kết quả (JSON/CSV/Markdown), `:TradarExport csv|json|md|tsv [file]`, `q` đóng. Cuộn tới cuối tự tải trang kế.
+Trong buffer kết quả: `i` sửa ô (nhập giá trị — gõ `NULL` để đặt NULL — rồi hiện câu `UPDATE` để bạn xác nhận), `dd` xoá dòng (hiện câu `DELETE` rồi xác nhận); sau khi chạy, kết quả tự làm mới và con trỏ ở nguyên dòng. Chỉ sửa được kết quả của truy vấn một bảng có khoá chính và có chọn cột khoá, nếu không sẽ báo lý do. `gd` trên ô của cột khoá ngoại chạy `SELECT` dòng được tham chiếu (kết quả của truy vấn một bảng), `gyc` ô, `gyr` dòng, `gyC` cột, `gyj`/`gyv`/`gym` cả kết quả (JSON/CSV/Markdown), `<leader>rv` đổi bảng ↔ JSON (document), `K` xem trọn giá trị một ô (hữu ích khi ô bị cắt bớt — xem dưới), `:TradarExport csv|json|md|tsv [file]`, `q` đóng. Cuộn tới cuối tự tải trang kế.
+
+**Cột quá rộng tự bị cắt** (cap 40 ký tự hiển thị, giống TUI) — ô dài hơn hiện dấu `…` ở cuối thay vì kéo giãn cả cột; `K` trên ô đó xem giá trị đầy đủ. Chưa có cách resize tay như TUI (`<`/`>`) — nếu cần xem/copy giá trị đầy đủ, dùng `K` hoặc `gyc`.
+
+Buffer kết quả **không có sort/filter theo cột** như TUI — chủ đích: Neovim đã có sẵn editor SQL thật ngay cạnh, sửa `ORDER BY`/`WHERE` rồi `<leader>rr` chạy lại tiện hơn một UI tương tác riêng.
 
 Statusline: `require('tradar').status()` (chuỗi rỗng ngoài buffer SQL).
 Completion: nguồn `blink.cmp` `tradar.blink` (hoặc `omnifunc`).

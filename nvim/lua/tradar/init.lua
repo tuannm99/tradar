@@ -45,6 +45,16 @@ local state = {
 
 local function notify(msg, level) vim.notify('tradar: ' .. msg, level or vim.log.levels.INFO) end
 
+--- `g?`: a floating cheat-sheet of the current buffer's own tradar keymap
+--- -- the bare `g`-prefixed/vim-like keys here (`gyc`, `i`, `dd`, the
+--- schema panel's `<CR>`/`<Tab>`...) have no which-key entry the way the
+--- `<leader>r*` family does (`M.setup`'s `wk.add` only covers that one
+--- prefix), so a first-time user otherwise has no way to discover them
+--- short of reading the README.
+local function show_help(lines)
+  vim.lsp.util.open_floating_preview(lines, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
+end
+
 local function call(method, params, cb, on_error)
   rpc.ensure(opts, function(err)
     if err then
@@ -295,12 +305,49 @@ end
 
 local attach_results
 
-local function paint_results()
+--- `new_from` (1-based index into `r.rows`), when given, means "only rows
+--- from here on are new since the last paint" -- `M.more` passes it after
+--- a page lands. For a plain `table` result (the common case: SQL, fixed
+--- column set from the query itself) this lets a long scroll session
+--- repaint in O(new rows) instead of O(every row loaded so far): if the
+--- new page didn't grow any column's width, the already-painted lines'
+--- padding is still correct, so only the new rows' own lines get built
+--- and appended -- nothing earlier is re-measured or rewritten. A
+--- `documents` result shown as a table is **not** eligible: `render.flatten`
+--- can introduce a column a later page's documents have and earlier ones
+--- never did (its own column set isn't fixed up front the way a SQL
+--- result's is), so it always gets a full rebuild below regardless of
+--- `new_from`.
+local function paint_results(new_from)
   local r = state.result
   local buf = state.results_buf
+
+  if r.kind == 'table' and new_from and r.widths then
+    local new_rows = { unpack(r.rows, new_from) }
+    local widths = render.column_widths(r.columns, new_rows, r.widths)
+    local grew = false
+    for i, w in ipairs(widths) do
+      if w ~= r.widths[i] then
+        grew = true
+        break
+      end
+    end
+    if not grew then
+      r.spans = render.spans_for(widths)
+      local new_lines = render.row_lines(r.columns, widths, new_rows)
+      local total = vim.api.nvim_buf_line_count(buf)
+      local footer_at = math.max(total - 2, 0)
+      vim.list_extend(new_lines, { '', results_title(r) })
+      vim.bo[buf].modifiable = true
+      vim.api.nvim_buf_set_lines(buf, footer_at, total, false, new_lines)
+      vim.bo[buf].modifiable = false
+      return
+    end
+  end
+
   local lines
   if r.kind == 'table' then
-    lines, r.spans = render.table(r.columns, r.rows)
+    lines, r.spans, r.widths = render.table(r.columns, r.rows)
   elseif r.view == 'table' then
     r.tcols, r.trows = render.flatten(r.rows, r.field_order)
     lines, r.spans = render.table(r.tcols, r.trows)
@@ -382,10 +429,11 @@ function M.more(cb)
   call('fetch', { cursor = r.id, offset = r.shown, limit = cb and 2000 or PAGE }, function(page)
     r.fetching = false
     if state.result ~= r then return end
+    local new_from = #r.rows + 1
     vim.list_extend(r.rows, page.rows)
     if r.field_order and page.field_order then vim.list_extend(r.field_order, page.field_order) end
     r.shown = #r.rows
-    paint_results()
+    paint_results(new_from)
     if cb then cb() end
   end, function(err)
     r.fetching = false
@@ -501,14 +549,41 @@ attach_results = function(buf)
   map('n', 'gyj', function() M.yank_all('json') end, 'yank all as JSON')
   map('n', 'gyv', function() M.yank_all('csv') end, 'yank all as CSV')
   map('n', 'gym', function() M.yank_all('md') end, 'yank all as Markdown table')
-  map('n', 'gT', function() M.toggle_view() end, 'documents: table <-> JSON')
+  -- Not `gT`: that shadows the builtin previous-tab binding (real risk now
+  -- that gRPC's request buffers routinely live in their own tabs). Same
+  -- prefix every other tradar action already uses, kept out of the
+  -- plain-`g`-prefixed family on purpose for that reason.
+  map('n', (opts.prefix or '<leader>r') .. 'v', function() M.toggle_view() end, 'documents: table <-> JSON')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
   map('n', 'i', function() M.edit_cell() end, 'edit this cell (shows the UPDATE first)')
   map('n', 'dd', function() M.delete_row() end, 'delete this row (shows the DELETE first)')
+  -- `K` is free here (the SQL buffer's own `K` is schema hover, a
+  -- different buffer) -- same "K = more about what's under the cursor"
+  -- idiom, useful once a cell is wider than the grid's own column cap
+  -- and its text got truncated (see `render.MAX_COLUMN_WIDTH`).
+  map('n', 'K', function()
+    local row, col = cell_at()
+    if not row then return end
+    local _, rows = tabular(state.result)
+    local value = tostring(rows[row][col] or '')
+    show_help(vim.split(value, '\n', { plain = true }))
+  end, 'preview the full value of this cell')
   map('n', 'q', function()
     local win = vim.fn.bufwinid(buf)
     if win ~= -1 then vim.api.nvim_win_close(win, true) end
   end, 'close results')
+  map('n', 'g?', function()
+    show_help({
+      '# tradar: results buffer',
+      '- `gyc` / `gyr` / `gyC` yank cell / row (visual: many rows) / column',
+      '- `gyj` / `gyv` / `gym` yank all as JSON / CSV / Markdown table',
+      ('- `%sv` documents: table <-> JSON'):format(opts.prefix or '<leader>r'),
+      '- `gd` follow foreign key under cursor',
+      '- `i` / `dd` edit this cell / delete this row (shows the statement first)',
+      '- `K` preview the full value of this cell',
+      '- `q` close',
+    })
+  end, 'show keymap help')
 
   -- Scrolling to the end loads the next page: no key to remember.
   vim.api.nvim_create_autocmd('CursorMoved', {
@@ -853,6 +928,14 @@ function M.schema()
       if node and node.key then toggle(node) end
     end, { buffer = buf, desc = 'tradar: expand/collapse the schema or table under the cursor' })
     vim.keymap.set('n', 'q', '<cmd>close<CR>', { buffer = buf, desc = 'close' })
+    vim.keymap.set('n', 'g?', function()
+      show_help({
+        '# tradar: schema panel',
+        '- `<CR>` insert name into the SQL buffer, or toggle a folder/table',
+        '- `<Tab>` expand/collapse the schema or table under the cursor',
+        '- `q` close',
+      })
+    end, { buffer = buf, desc = 'tradar: show keymap help' })
     if vim.fn.bufwinid(buf) == -1 then
       vim.cmd('topleft 40vsplit')
       vim.api.nvim_win_set_buf(0, buf)
@@ -1259,6 +1342,19 @@ function M.attach(buf)
     map('n', 'h', function() require('tradar.telescope').history() end, 'history (telescope)')
     map('n', 'm', function() M.more() end, 'load more rows')
     map('n', 'e', M.explain, 'explain statement under cursor')
+    vim.keymap.set('n', 'g?', function()
+      show_help({
+        '# tradar: SQL buffer',
+        ('- `%sr` (n/x) run statement under cursor / selection'):format(p),
+        ('- `%sa` / `%sx` run all / cancel'):format(p, p),
+        ('- `%sc` / `%ss` choose connection / schema panel'):format(p, p),
+        ('- `%st` / `%sh` tables / history (telescope)'):format(p, p),
+        ('- `%sm` load more rows (scrolling to the end also does this)'):format(p),
+        ('- `%se` explain statement under cursor'):format(p),
+        '- `K` table/column info under cursor (falls back to LSP hover)',
+        '- `gd` open table under cursor (falls back to LSP go-to-definition)',
+      })
+    end, { buffer = buf, desc = 'tradar: show keymap help' })
   end
   M.attach_nav(buf)
   local conn = M.connection_for(buf)

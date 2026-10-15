@@ -13,40 +13,99 @@ end
 local SEP = ' │ '
 local SEP_WIDTH = 3
 
+--- Past this many display columns, a cell is truncated with a trailing
+--- `…` rather than stretching the column to fit -- one long value (a JSON
+--- blob, a long text field) used to drag every other column far to the
+--- right with it, matching nothing the TUI does (its own auto-width caps
+--- the same way, `docs/backlog/column-resize-2026-09-24.md`). No manual
+--- override here yet (TUI's `<`/`>`) -- `K` on the results buffer previews
+--- a cell's untruncated value instead, see `init.lua`'s `attach_results`.
+M.MAX_COLUMN_WIDTH = 40
+
 local function cell(value)
   return (tostring(value):gsub('[\r\n\t]', ' '))
 end
 
---- Aligned text table plus, per column, the display-column span it
---- occupies (`spans[i] = {first, last}`, 1-based, inclusive) -- what lets a
---- cursor position map back to a cell for yanking.
-function M.table(columns, rows)
+--- `text` padded to `width`, or truncated-with-`…` if it doesn't fit.
+--- Character-count truncation (`strcharpart`), not display-width-exact --
+--- a cell dense with double-width (CJK) characters can still overflow
+--- `width` by a little; good enough without a wcwidth-aware clipper this
+--- codebase doesn't otherwise need.
+local function pad_or_truncate(text, width)
+  local w = vim.fn.strdisplaywidth(text)
+  if w <= width then return text .. string.rep(' ', width - w) end
+  return vim.fn.strcharpart(text, 0, math.max(width - 1, 0)) .. '…'
+end
+
+--- Each column's display width (header vs. every cell in `rows`, whichever
+--- is wider), clamped to `MAX_COLUMN_WIDTH`. `prev` (optional, the same
+--- shape this returns) seeds the running max instead of starting from the
+--- header alone -- a caller that already painted earlier pages can pass
+--- their stored widths and scan only the *new* rows, so finding the
+--- running max is O(new rows), not O(every row loaded so far). Widths
+--- only ever grow (never shrink back down as old wide values scroll out
+--- of view) whether computed this way or from scratch -- same as before
+--- this function was split out of `M.table`.
+function M.column_widths(columns, rows, prev)
   local widths = {}
-  for i, name in ipairs(columns) do widths[i] = vim.fn.strdisplaywidth(name) end
+  for i, name in ipairs(columns) do
+    widths[i] = math.min(prev and prev[i] or vim.fn.strdisplaywidth(name), M.MAX_COLUMN_WIDTH)
+  end
   for _, row in ipairs(rows) do
     for i = 1, #columns do
-      widths[i] = math.max(widths[i], vim.fn.strdisplaywidth(cell(row[i] or '')))
+      widths[i] = math.min(math.max(widths[i], vim.fn.strdisplaywidth(cell(row[i] or ''))), M.MAX_COLUMN_WIDTH)
     end
   end
-  local function line(values)
+  return widths
+end
+
+--- The display-column span each column occupies (`{first, last}`,
+--- 1-based, inclusive) at the given `widths` -- what lets a cursor
+--- position map back to a cell for yanking (`column_at` below).
+function M.spans_for(widths)
+  local spans, pos = {}, 1
+  for i, w in ipairs(widths) do
+    spans[i] = { pos, pos + w - 1 }
+    pos = pos + w + SEP_WIDTH
+  end
+  return spans
+end
+
+--- The header name row plus its `─┼─` rule, at `widths`.
+function M.header_lines(columns, widths)
+  local parts, rule = {}, {}
+  for i, name in ipairs(columns) do
+    parts[i] = pad_or_truncate(cell(name), widths[i])
+    rule[i] = string.rep('─', widths[i])
+  end
+  return { table.concat(parts, SEP), table.concat(rule, '─┼─') }
+end
+
+--- One line per row in `rows`, at `widths` -- no header, so a caller
+--- appending only the newest page's rows isn't handed lines it didn't ask
+--- for.
+function M.row_lines(columns, widths, rows)
+  local out = {}
+  for r, row in ipairs(rows) do
     local parts = {}
     for i = 1, #columns do
-      local text = cell(values[i] or '')
-      parts[i] = text .. string.rep(' ', widths[i] - vim.fn.strdisplaywidth(text))
+      parts[i] = pad_or_truncate(cell(row[i] or ''), widths[i])
     end
-    return table.concat(parts, SEP)
+    out[r] = table.concat(parts, SEP)
   end
-  local rule = {}
-  for i = 1, #columns do rule[i] = string.rep('─', widths[i]) end
-  local out = { line(columns), table.concat(rule, '─┼─') }
-  for _, row in ipairs(rows) do out[#out + 1] = line(row) end
+  return out
+end
 
-  local spans, pos = {}, 1
-  for i = 1, #columns do
-    spans[i] = { pos, pos + widths[i] - 1 }
-    pos = pos + widths[i] + SEP_WIDTH
-  end
-  return out, spans
+--- Aligned text table (header + every row in `rows`) plus the spans and
+--- widths computed along the way -- the one-call convenience `init.lua`
+--- uses for a full (re)paint; `column_widths`/`header_lines`/`row_lines`
+--- above are what let it paint an *appended* page more cheaply instead
+--- (see `attach_results`'s `paint_results`).
+function M.table(columns, rows, prev_widths)
+  local widths = M.column_widths(columns, rows, prev_widths)
+  local out = M.header_lines(columns, widths)
+  vim.list_extend(out, M.row_lines(columns, widths, rows))
+  return out, M.spans_for(widths), widths
 end
 
 --- Documents as a table: one column per field, nested objects flattened to

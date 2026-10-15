@@ -12,13 +12,20 @@
 -- small scratch-buffer helpers rather than reusing `init.lua`'s (which are
 -- wired to the "one persistent results buffer per Neovim instance" model
 -- query screens use); a request buffer here is disposable, one per
--- invocation, same spirit as why Kafka/RabbitMQ/HTTP/Socket in the TUI
--- don't reuse `QueryScreenComponent`.
+-- method, same spirit as why Kafka/RabbitMQ/HTTP/Socket in the TUI don't
+-- reuse `QueryScreenComponent`.
 local rpc = require('tradar.rpc')
 
 local M = {}
 
-local state = { current = nil }
+local state = { current = nil, next_id = 0 }
+
+--- `connection/service/method` -> request buffer already open for it, so
+--- re-picking the same method jumps back to that buffer instead of piling
+--- up another disposable tab every time (a UX gap found reviewing the
+--- plugin -- browsing several methods in a row used to leave one tab per
+--- look, none of them closed automatically).
+local open_buffers = {}
 
 local function notify(msg, level) vim.notify('tradar-grpc: ' .. msg, level or vim.log.levels.INFO) end
 
@@ -35,6 +42,16 @@ local function call(method, params, cb)
   end)
 end
 
+--- The connection a `services()`/`methods()` call with no explicit name
+--- should act on: the request buffer under the cursor's own connection
+--- first (so re-browsing from inside a request buffer for "staging" never
+--- silently acts on "prod" just because that was connected most recently
+--- elsewhere), then the last connection picked anywhere, then a prompt.
+local function implicit_connection()
+  local info = vim.b[0] and vim.b[0].tradar_grpc
+  return (info and info.connection) or state.current
+end
+
 --- Picks a saved connection with `driver == "grpc"` if `name` is omitted,
 --- then connects (idempotent server-side: a second `grpc.connect` on an
 --- already-open connection just answers `already: true`, so every public
@@ -44,8 +61,10 @@ local function with_connection(name, cb)
     state.current = name
     return call('grpc.connect', { connection = name }, function() cb(name) end)
   end
-  if state.current then
-    return call('grpc.connect', { connection = state.current }, function() cb(state.current) end)
+  local implicit = implicit_connection()
+  if implicit then
+    state.current = implicit
+    return call('grpc.connect', { connection = implicit }, function() cb(implicit) end)
   end
   call('connections.list', nil, function(list)
     local usable = vim.tbl_filter(function(c) return c.driver == 'grpc' end, list)
@@ -128,6 +147,13 @@ local function show_response(request_buf, text)
     resp_buf = scratch('tradar://grpc-response')
     vim.bo[resp_buf].filetype = 'json'
     vim.b[request_buf].tradar_grpc_response = resp_buf
+    -- Only this window closes on `q` -- the request buffer (and its tab)
+    -- stays, since the point of the split is to keep editing/re-sending
+    -- the same request, same as the SQL results buffer's own `q`.
+    vim.keymap.set('n', 'q', function()
+      local win = vim.fn.bufwinid(resp_buf)
+      if win ~= -1 then vim.api.nvim_win_close(win, true) end
+    end, { buffer = resp_buf, desc = 'tradar: close gRPC response' })
   end
   vim.bo[resp_buf].modifiable = true
   vim.api.nvim_buf_set_lines(resp_buf, 0, -1, false, vim.split(text, '\n', { plain = true }))
@@ -151,24 +177,90 @@ function M.send(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   local info = vim.b[buf].tradar_grpc
   if not info then return notify('not a tradar gRPC request buffer', vim.log.levels.ERROR) end
+  if vim.b[buf].tradar_grpc_query_id then
+    return notify('a request is already running on this buffer -- <leader>rx to cancel it first', vim.log.levels.WARN)
+  end
   local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
   local ok, request = pcall(vim.json.decode, text, { luanil = { object = true, array = true } })
   if not ok then return notify('request is not valid JSON: ' .. tostring(request), vim.log.levels.ERROR) end
-  call('grpc.invoke', {
-    connection = info.connection,
-    service = info.service,
-    method = info.method,
-    request = request,
-  }, function(result) show_response(buf, vim.json.encode(result.response)) end)
+
+  state.next_id = state.next_id + 1
+  local query_id = ('grpc-%d'):format(state.next_id)
+  vim.b[buf].tradar_grpc_query_id = query_id
+  local function clear() if vim.api.nvim_buf_is_valid(buf) then vim.b[buf].tradar_grpc_query_id = nil end end
+
+  rpc.ensure(require('tradar').rpc_opts(), function(err)
+    if err then
+      clear()
+      return notify(err, vim.log.levels.ERROR)
+    end
+    rpc.request('grpc.invoke', {
+      connection = info.connection,
+      service = info.service,
+      method = info.method,
+      request = request,
+      query_id = query_id,
+    }, function(e, result, data)
+      clear()
+      if e then
+        local suffix = data and data.grpc_code and (' (grpc_code=' .. tostring(data.grpc_code) .. ')') or ''
+        return notify(e .. suffix, vim.log.levels.ERROR)
+      end
+      show_response(buf, vim.json.encode(result.response))
+    end)
+  end)
+end
+
+--- Cancels the in-flight `grpc.invoke` started from this buffer, if any --
+--- best-effort the same way `M.cancel`/`:TradarCancel` is for SQL: a gRPC
+--- call has no server-side "stop processing" analogue to a DB's own
+--- cancel, so this only drops the client's own wait (see `tradar-server`'s
+--- `cancel` method, shared across both).
+function M.cancel(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local query_id = vim.b[buf].tradar_grpc_query_id
+  if not query_id then return notify('nothing running on this buffer', vim.log.levels.WARN) end
+  call('cancel', { query_id = query_id }, function(result)
+    if result.cancelled then vim.b[buf].tradar_grpc_query_id = nil end
+    notify(result.cancelled and 'cancelled' or 'already finished')
+  end)
 end
 
 function M.open_request(connection, service, method)
-  local buf = scratch(('tradar-grpc://%s/%s/%s'):format(connection, service, method))
+  local key = table.concat({ connection, service, method }, '/')
+  local existing = open_buffers[key]
+  if existing and vim.api.nvim_buf_is_valid(existing) then
+    local win = vim.fn.bufwinid(existing)
+    if win ~= -1 then
+      vim.api.nvim_set_current_win(win)
+    else
+      vim.cmd.tabnew()
+      vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), existing)
+    end
+    return notify(('%s/%s -- already open'):format(service, method))
+  end
+
+  local buf = scratch('tradar-grpc://' .. key)
+  open_buffers[key] = buf
   vim.bo[buf].filetype = 'json'
   vim.b[buf].tradar_grpc = { connection = connection, service = service, method = method }
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '{}' })
   vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcSend', function() M.send(buf) end, {})
+  vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcCancel', function() M.cancel(buf) end, {})
   vim.keymap.set('n', '<leader>rr', function() M.send(buf) end, { buffer = buf, desc = 'tradar: send gRPC request' })
+  vim.keymap.set('n', '<leader>rx', function() M.cancel(buf) end, { buffer = buf, desc = 'tradar: cancel gRPC request' })
+  -- Closes the whole tab, response split included -- unlike the response
+  -- buffer's own `q`, there is no reason to keep an empty request buffer
+  -- around once the user is done with it.
+  vim.keymap.set('n', 'q', function() pcall(vim.cmd.tabclose) end, { buffer = buf, desc = 'tradar: close gRPC request' })
+  vim.keymap.set('n', 'g?', function()
+    vim.lsp.util.open_floating_preview({
+      '# tradar: gRPC request buffer',
+      '- `<leader>rr` / `:TradarGrpcSend` send this request',
+      '- `<leader>rx` / `:TradarGrpcCancel` cancel if still running',
+      '- `q` close (the response split too)',
+    }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
+  end, { buffer = buf, desc = 'tradar: show keymap help' })
   vim.cmd.tabnew()
   vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), buf)
   notify(('%s/%s -- edit the JSON body, then <leader>rr or :TradarGrpcSend'):format(service, method))
