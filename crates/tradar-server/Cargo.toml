@@ -53,6 +53,15 @@ bytes = { version = "1", optional = true }
 rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
 futures-util = { version = "0.3", optional = true }
 
+# RabbitMQ -- no push-channel needed (the Management HTTP API has no
+# streaming endpoint, see rabbitmq.rs's doc comment), so this is a plain
+# request/response module like grpc.rs. Not a reuse of
+# `tradar-connector-rabbitmq` (its types are `pub(crate)`-scoped to its own
+# TUI `Screen`); needs no toolchain beyond `reqwest`, so it's a normal
+# default feature rather than opt-in.
+reqwest = { version = "0.12", optional = true, features = ["json"] }
+serde = { version = "1", optional = true, features = ["derive"] }
+
 [dev-dependencies]
 tempfile = "3"
 
@@ -70,7 +79,7 @@ prost = "0.13"
 # `librdkafka` from vendored source and needs `cmake`/`gcc`/`libcurl-dev`
 # on the build machine -- same reason `tradar-app`'s own `kafka` feature
 # stays opt-in for `make test-unit` (see CLAUDE.md's "Commands").
-default = ["postgres", "mysql", "sqlite", "mongo", "elasticsearch", "redis", "cassandra", "clickhouse", "grpc", "socket"]
+default = ["postgres", "mysql", "sqlite", "mongo", "elasticsearch", "redis", "cassandra", "clickhouse", "grpc", "socket", "rabbitmq"]
 postgres = ["dep:tradar-connector-postgres"]
 mysql = ["dep:tradar-connector-mysql"]
 sqlite = ["dep:tradar-connector-sqlite"]
@@ -85,3 +94,4 @@ kafka = ["dep:rdkafka", "dep:futures-util"]
 # (plain `tokio::net::TcpStream`, already a dependency), so it's a normal
 # default feature rather than opt-in.
 socket = []
+rabbitmq = ["dep:reqwest", "dep:serde"]
