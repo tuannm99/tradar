@@ -48,7 +48,7 @@ Project docs (`docs/*.md`, `README.md`) are written in Vietnamese — keep techn
 
 See `docs/architecture.md` for the current module layout and the `QueryDriver`/`Connector`/`Session` trait contracts, kept short and current — it describes the shape as it stands today, not the history of how it got there. The rule that matters most for any change: code in each connector crate (`tradar-connector-*`, directly under `crates/`) only implements those traits and depends on nothing else in the workspace; code in `tradar-query-workbench` (components, `query_engine`) depends only on the `QueryDriver` trait, never on a concrete connector crate. This is what lets new databases be added without touching core logic.
 
-Finished sub-project history (what each feature was, why, and how it was verified) lives in `docs/backlog/` — one file per sub-project, indexed by `docs/backlog/README.md`. Open/unscoped roadmap items live in `docs/roadmap.md`. A detailed user-facing usage guide is planned as a separate wiki (not yet written) — until then, `nvim/README.md` covers plugin usage.
+Finished sub-project history (what each feature was, why, and how it was verified) lives in `docs/backlog/` — one file per sub-project, indexed by `docs/backlog/README.md`. Open/unscoped roadmap items live in `docs/roadmap.md`. The user-facing usage guide lives in `docs/wiki/` (Markdown pages, laid out for GitHub Wiki: `Home.md`, `_Sidebar.md`, one page per topic) — update the relevant page when user-visible behavior changes; `nvim/README.md` is the plugin's own reference.
 
 Other standing principles:
 
