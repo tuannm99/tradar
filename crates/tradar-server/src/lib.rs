@@ -2,6 +2,7 @@
 //! over a local socket so an editor (Neovim) can be the UI. See "Server
 //! headless" in docs/architecture.md.
 
+mod extension;
 #[cfg(feature = "grpc")]
 mod grpc;
 #[cfg(feature = "http")]
@@ -14,6 +15,8 @@ mod rabbitmq;
 mod server;
 #[cfg(feature = "socket")]
 mod socket;
+#[cfg(any(feature = "kafka", feature = "socket"))]
+mod subscriptions;
 mod transport;
 
 use std::collections::HashMap;

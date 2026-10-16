@@ -18,9 +18,10 @@ use tradar_query_workbench::components::completion::{CandidateKind, CompletionSo
 use tradar_query_workbench::query_driver::{QueryDriver, completion_context};
 use tradar_query_workbench::query_engine::QueryEngine;
 
+use crate::extension::{Ctx, Extension};
 use crate::protocol::{
     METHOD_NOT_FOUND, PROTOCOL_VERSION, RpcError, StoredResult, parse_row_edit, schema_json,
-    statement_json,
+    statement_json, str_param, u64_param, usize_param,
 };
 
 /// Rows returned inline by `execute` -- enough to fill a screen, so the
@@ -49,62 +50,6 @@ struct State {
     /// future to stop waiting on, and which connection to tell the
     /// database about).
     running: HashMap<String, (Arc<Notify>, Arc<dyn QueryDriver>)>,
-    /// gRPC connections, kept apart from `drivers` -- gRPC has no
-    /// `QueryDriver` to serve (see `grpc.rs`'s doc comment), so it needs its
-    /// own channel + schema state instead of fitting the `Arc<dyn
-    /// QueryDriver>` shape every other connection here uses.
-    #[cfg(feature = "grpc")]
-    grpc: HashMap<String, crate::grpc::GrpcConnection>,
-    /// In-flight `grpc.invoke`s named with `query_id`, mirroring `running`
-    /// above -- a separate map because gRPC has no `Arc<dyn QueryDriver>`
-    /// to carry alongside the `Notify` (and no DB-side "stop processing"
-    /// to call either; cancelling only drops the client's own wait, same
-    /// ceiling `QueryDriver::cancel_query` already has for most drivers).
-    #[cfg(feature = "grpc")]
-    grpc_running: HashMap<String, Arc<Notify>>,
-    /// Kafka tail subscriptions (`kafka.tail.start`/`kafka.tail.stop`),
-    /// keyed by the subscription id the client named. See `kafka.rs`'s
-    /// doc comment for why this doesn't go through `drivers` either.
-    #[cfg(feature = "kafka")]
-    kafka: HashMap<String, crate::kafka::KafkaConnection>,
-    /// `(owning client id, the two tasks)` -- the id is what lets
-    /// `kafka_tail_stop`/`kafka_forget_client` also remove this
-    /// subscription from `kafka_tails_by_client` without a linear scan.
-    #[cfg(feature = "kafka")]
-    kafka_tails: HashMap<String, (u64, crate::kafka::TailHandle)>,
-    /// Which subscription ids belong to which `ClientConnection` -- the
-    /// only reason `ClientConnection::id` exists at all: when that socket
-    /// closes, every tail it started (and forgot to `kafka.tail.stop`)
-    /// must be aborted too, or an orphaned consumer runs forever for a
-    /// client nobody is listening on anymore.
-    #[cfg(feature = "kafka")]
-    kafka_tails_by_client: HashMap<u64, Vec<String>>,
-    #[cfg(feature = "kafka")]
-    next_kafka_subscription: u64,
-    /// Socket tail subscriptions (`socket.tail.start`/`socket.tail.stop`),
-    /// keyed by the subscription id the client named -- `(owning client
-    /// id, saved connection name, the live TCP tail)`. The connection name
-    /// rides along here (unlike Kafka, which keeps it in its own `kafka`
-    /// map) because a Socket "connection" has no persistent per-name state
-    /// of its own to look it up from -- see `socket.rs`'s doc comment.
-    #[cfg(feature = "socket")]
-    socket_tails: HashMap<String, (u64, String, crate::socket::TailHandle)>,
-    #[cfg(feature = "socket")]
-    socket_tails_by_client: HashMap<u64, Vec<String>>,
-    #[cfg(feature = "socket")]
-    next_socket_subscription: u64,
-    /// RabbitMQ connections, kept apart from `drivers` for the same reason
-    /// gRPC's own `grpc` map is -- no `QueryDriver` to serve (see
-    /// `rabbitmq.rs`'s doc comment). No push state at all (unlike
-    /// Kafka/Socket): every RabbitMQ operation is a plain request/response
-    /// against the Management HTTP API, same shape as gRPC.
-    #[cfg(feature = "rabbitmq")]
-    rabbitmq: HashMap<String, crate::rabbitmq::RabbitConnection>,
-    /// HTTP connections, kept apart from `drivers` for the same reason as
-    /// `rabbitmq`/`grpc` above -- no `QueryDriver` to serve, no push state
-    /// (see `http.rs`'s doc comment).
-    #[cfg(feature = "http")]
-    http: HashMap<String, crate::http::HttpConnection>,
 }
 
 /// One live client socket (`transport.rs`'s `serve_connection`) -- *not* a
@@ -116,16 +61,12 @@ struct State {
 /// can push notification lines onto *that* client's own socket, and be
 /// torn down when *that* client disconnects, without touching another
 /// client's subscriptions on the same server.
-// No push-capable connector is compiled in without `kafka` (Socket tail
-// is designed, per docs/backlog/push-channel-design-2026-10-14.md, but not
-// yet built) -- `id`/`outbox`/`notify` go unused in that build, same as any
-// other build with every push connector's feature off. Still part of the
-// public shape: `new_client`/`client_disconnected` take/use `ClientConnection`
-// unconditionally so the generic plumbing doesn't itself need feature gates.
+// `id`/`outbox`/`notify` are only used by push-capable extensions (Kafka,
+// Socket); a build with both off leaves them unused.
 #[cfg_attr(not(any(feature = "kafka", feature = "socket")), allow(dead_code))]
 #[derive(Clone)]
 pub struct ClientConnection {
-    id: u64,
+    pub(crate) id: u64,
     /// A notification is a JSON-RPC object with no `id` -- same framing,
     /// same per-connection channel `transport.rs` already had for replies,
     /// just sent without a request ever asking for it.
@@ -155,6 +96,7 @@ pub struct Server {
     registry: HashMap<String, Box<dyn Connector>>,
     store: Option<ConnectionStore>,
     state: Mutex<State>,
+    extensions: Vec<Box<dyn Extension>>,
     /// Fired by the `shutdown` method; `main` waits on it next to Ctrl-C.
     shutdown: Arc<Notify>,
     next_client_id: AtomicU64,
@@ -169,6 +111,7 @@ impl Server {
             registry,
             store,
             state: Mutex::new(State::default()),
+            extensions: crate::extension::all(),
             shutdown: Arc::new(Notify::new()),
             next_client_id: AtomicU64::new(1),
         }
@@ -191,15 +134,10 @@ impl Server {
 
     /// Call when a client's socket closes: aborts and forgets every
     /// background subscription it started and never explicitly stopped.
-    #[cfg_attr(
-        not(any(feature = "kafka", feature = "socket")),
-        allow(unused_variables)
-    )]
     pub fn client_disconnected(&self, client: &ClientConnection) {
-        #[cfg(feature = "kafka")]
-        self.kafka_forget_client(client.id);
-        #[cfg(feature = "socket")]
-        self.socket_forget_client(client.id);
+        for extension in &self.extensions {
+            extension.client_disconnected(client.id);
+        }
     }
 
     /// One request object in, one response object out (JSON-RPC 2.0, minus
@@ -223,10 +161,6 @@ impl Server {
         }
     }
 
-    #[cfg_attr(
-        not(any(feature = "kafka", feature = "socket")),
-        allow(unused_variables)
-    )]
     async fn dispatch(
         &self,
         method: &str,
@@ -255,60 +189,33 @@ impl Server {
             "complete" => self.complete(params),
             "edit.source" => self.edit_source(params),
             "edit.sql" => self.edit_sql(params),
-            #[cfg(feature = "grpc")]
-            "grpc.connect" => self.grpc_connect(params).await,
-            #[cfg(feature = "grpc")]
-            "grpc.disconnect" => self.grpc_disconnect(params),
-            #[cfg(feature = "grpc")]
-            "grpc.services" => self.grpc_services(params),
-            #[cfg(feature = "grpc")]
-            "grpc.load_proto" => self.grpc_load_proto(params),
-            #[cfg(feature = "grpc")]
-            "grpc.methods" => self.grpc_methods(params),
-            #[cfg(feature = "grpc")]
-            "grpc.invoke" => self.grpc_invoke(params).await,
-            #[cfg(feature = "kafka")]
-            "kafka.connect" => self.kafka_connect(params).await,
-            #[cfg(feature = "kafka")]
-            "kafka.disconnect" => self.kafka_disconnect(params),
-            #[cfg(feature = "kafka")]
-            "kafka.topics" => self.kafka_topics(params).await,
-            #[cfg(feature = "kafka")]
-            "kafka.tail.start" => self.kafka_tail_start(params, client),
-            #[cfg(feature = "kafka")]
-            "kafka.tail.stop" => self.kafka_tail_stop(params),
-            #[cfg(feature = "socket")]
-            "socket.tail.start" => self.socket_tail_start(params, client).await,
-            #[cfg(feature = "socket")]
-            "socket.send" => self.socket_send(params, client).await,
-            #[cfg(feature = "socket")]
-            "socket.tail.stop" => self.socket_tail_stop(params),
-            #[cfg(feature = "rabbitmq")]
-            "rabbitmq.connect" => self.rabbitmq_connect(params).await,
-            #[cfg(feature = "rabbitmq")]
-            "rabbitmq.disconnect" => self.rabbitmq_disconnect(params),
-            #[cfg(feature = "rabbitmq")]
-            "rabbitmq.queues" => self.rabbitmq_queues(params).await,
-            #[cfg(feature = "rabbitmq")]
-            "rabbitmq.exchanges" => self.rabbitmq_exchanges(params).await,
-            #[cfg(feature = "rabbitmq")]
-            "rabbitmq.bindings" => self.rabbitmq_bindings(params).await,
-            #[cfg(feature = "rabbitmq")]
-            "rabbitmq.peek" => self.rabbitmq_peek(params).await,
-            #[cfg(feature = "rabbitmq")]
-            "rabbitmq.publish" => self.rabbitmq_publish(params).await,
-            #[cfg(feature = "http")]
-            "http.connect" => self.http_connect(params),
-            #[cfg(feature = "http")]
-            "http.disconnect" => self.http_disconnect(params),
-            #[cfg(feature = "http")]
-            "http.send" => self.http_send(params).await,
-            _ => Err(RpcError {
-                code: METHOD_NOT_FOUND,
-                message: format!("unknown method `{method}`"),
-                data: None,
-            }),
+            _ => self.dispatch_extension(method, params, client).await,
         }
+    }
+
+    /// Routes `<driver>.<method>` to the extension serving `<driver>`.
+    async fn dispatch_extension(
+        &self,
+        method: &str,
+        params: &Value,
+        client: &ClientConnection,
+    ) -> Result<Value, RpcError> {
+        let unknown = || RpcError {
+            code: METHOD_NOT_FOUND,
+            message: format!("unknown method `{method}`"),
+            data: None,
+        };
+        let (driver, rest) = method.split_once('.').ok_or_else(unknown)?;
+        let extension = self
+            .extensions
+            .iter()
+            .find(|e| e.driver() == driver)
+            .ok_or_else(unknown)?;
+        let ctx = Ctx {
+            store: self.store.as_ref(),
+            client,
+        };
+        extension.handle(rest, params, &ctx).await
     }
 
     /// `{major, minor}` of `protocol::PROTOCOL_VERSION` -- never behind a
@@ -344,11 +251,7 @@ impl Server {
                     "driver": c.driver,
                     "target": c.target,
                     "connected": connected.drivers.contains_key(&c.name)
-                        || connected_grpc(&connected, &c.name)
-                        || connected_kafka(&connected, &c.name)
-                        || connected_socket(&connected, &c.name)
-                        || connected_rabbitmq(&connected, &c.name)
-                        || connected_http(&connected, &c.name),
+                        || self.extensions.iter().any(|e| e.is_connected(&c.name)),
                     "supported": self.is_supported(&c.driver),
                 })
             })
@@ -357,16 +260,10 @@ impl Server {
     }
 
     /// Whether this server build can serve `driver` at all -- through the
-    /// `Connector`/`QueryDriver` registry, or (gRPC/Kafka/Socket/RabbitMQ)
-    /// through their own `grpc.*`/`kafka.*`/`socket.*`/`rabbitmq.*` methods
-    /// instead.
+    /// `Connector`/`QueryDriver` registry, or through an extension's own
+    /// `<driver>.*` methods.
     fn is_supported(&self, driver: &str) -> bool {
-        self.registry.contains_key(driver)
-            || (driver == "grpc" && cfg!(feature = "grpc"))
-            || (driver == "kafka" && cfg!(feature = "kafka"))
-            || (driver == "socket" && cfg!(feature = "socket"))
-            || (driver == "rabbitmq" && cfg!(feature = "rabbitmq"))
-            || (driver == "http" && cfg!(feature = "http"))
+        self.registry.contains_key(driver) || self.extensions.iter().any(|e| e.driver() == driver)
     }
 
     fn driver(&self, params: &Value) -> Result<Arc<dyn QueryDriver>, RpcError> {
@@ -545,13 +442,8 @@ impl Server {
             let _ = driver.cancel_query().await;
             return Ok(json!({"cancelled": true}));
         }
-        #[cfg(feature = "grpc")]
-        {
-            let target = self.state.lock().unwrap().grpc_running.get(id).cloned();
-            if let Some(notify) = target {
-                notify.notify_one();
-                return Ok(json!({"cancelled": true}));
-            }
+        if self.extensions.iter().any(|e| e.cancel(id)) {
+            return Ok(json!({"cancelled": true}));
         }
         Ok(json!({"cancelled": false}))
     }
@@ -687,589 +579,6 @@ impl Server {
         let edit = parse_row_edit(params)?;
         Ok(json!({"sql": driver.edit_sql(&edit)}))
     }
-
-    /// Opens the channel and tries server reflection; a server that
-    /// doesn't implement it still connects (`grpc.services` just comes
-    /// back empty until `grpc.load_proto` fills the pool by hand).
-    #[cfg(feature = "grpc")]
-    async fn grpc_connect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        if self.state.lock().unwrap().grpc.contains_key(name) {
-            return Ok(json!({"connected": true, "already": true}));
-        }
-        let saved = self
-            .saved()?
-            .into_iter()
-            .find(|c| c.name == name && c.driver == "grpc")
-            .ok_or_else(|| RpcError::app(format!("no saved gRPC connection named `{name}`")))?;
-        let channel = crate::grpc::connect(&saved.target).await.map_err(|e| {
-            RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
-        })?;
-        let pool = crate::grpc::discover_via_reflection(channel.clone())
-            .await
-            .unwrap_or_default();
-        self.state.lock().unwrap().grpc.insert(
-            name.to_string(),
-            crate::grpc::GrpcConnection { channel, pool },
-        );
-        Ok(json!({"connected": true, "already": false}))
-    }
-
-    #[cfg(feature = "grpc")]
-    fn grpc_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let removed = self.state.lock().unwrap().grpc.remove(name).is_some();
-        Ok(json!({"disconnected": removed}))
-    }
-
-    #[cfg(feature = "grpc")]
-    fn grpc_services(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let state = self.state.lock().unwrap();
-        let conn = state.grpc.get(name).ok_or_else(|| {
-            RpcError::app(format!(
-                "`{name}` is not connected -- call `grpc.connect` first"
-            ))
-        })?;
-        Ok(json!(crate::grpc::list_services(&conn.pool)))
-    }
-
-    /// Fallback discovery for a server without reflection: parse a
-    /// `.proto` file on disk and merge it into the connection's pool.
-    #[cfg(feature = "grpc")]
-    fn grpc_load_proto(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let path = str_param(params, "path")?;
-        let mut state = self.state.lock().unwrap();
-        let conn = state.grpc.get_mut(name).ok_or_else(|| {
-            RpcError::app(format!(
-                "`{name}` is not connected -- call `grpc.connect` first"
-            ))
-        })?;
-        let added = crate::grpc::load_proto(&mut conn.pool, path)
-            .map_err(|e| RpcError::app(format!("không parse được `{path}`: {e}")))?;
-        Ok(json!({"added": added}))
-    }
-
-    #[cfg(feature = "grpc")]
-    fn grpc_methods(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let service = str_param(params, "service")?;
-        let state = self.state.lock().unwrap();
-        let conn = state.grpc.get(name).ok_or_else(|| {
-            RpcError::app(format!(
-                "`{name}` is not connected -- call `grpc.connect` first"
-            ))
-        })?;
-        let methods = crate::grpc::list_methods(&conn.pool, service)
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!(
-            methods
-                .iter()
-                .map(|m| json!({"name": m.name, "input": m.input, "output": m.output}))
-                .collect::<Vec<_>>()
-        ))
-    }
-
-    /// Only *invokes*; unlike `edit.sql` there is nothing to show-then-run
-    /// here (a gRPC call isn't a statement the client could choose to run
-    /// later) -- the "show it, run it only after `y`" rule is specific to
-    /// row-edit's generated write statements, not to RPCs in general.
-    ///
-    /// An optional `query_id` (same idea as `execute`'s) lets a client
-    /// `cancel` a slow invoke -- best-effort, same ceiling `cancel` already
-    /// has for most `QueryDriver`s: it only drops this future's own wait,
-    /// never anything server-side (there is no gRPC-level "stop processing
-    /// this call", unlike a DB's own cancel).
-    #[cfg(feature = "grpc")]
-    async fn grpc_invoke(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let service = str_param(params, "service")?;
-        let method = str_param(params, "method")?;
-        let request = params.get("request").cloned().unwrap_or(json!({}));
-        let (channel, pool) = {
-            let state = self.state.lock().unwrap();
-            let conn = state.grpc.get(name).ok_or_else(|| {
-                RpcError::app(format!(
-                    "`{name}` is not connected -- call `grpc.connect` first"
-                ))
-            })?;
-            (conn.channel.clone(), conn.pool.clone())
-        };
-
-        let query_id = params.get("query_id").and_then(Value::as_str);
-        let cancel = Arc::new(Notify::new());
-        if let Some(id) = query_id {
-            self.state
-                .lock()
-                .unwrap()
-                .grpc_running
-                .insert(id.to_string(), Arc::clone(&cancel));
-        }
-        let outcome = tokio::select! {
-            result = crate::grpc::invoke(channel, &pool, service, method, request) => Some(result),
-            () = cancel.notified() => None,
-        };
-        if let Some(id) = query_id {
-            self.state.lock().unwrap().grpc_running.remove(id);
-        }
-        match outcome {
-            Some(Ok(Ok(response))) => Ok(json!({"response": response})),
-            Some(Ok(Err(status))) => Err(status.into()),
-            Some(Err(e)) => Err(e.into()),
-            None => Err(RpcError::app("invoke cancelled")),
-        }
-    }
-
-    /// Opens the Kafka client and probes the broker's metadata once (fails
-    /// loudly here, like `grpc.connect`'s channel dial, rather than
-    /// silently connecting then only finding out on the first
-    /// `kafka.topics`/`kafka.tail.start`).
-    #[cfg(feature = "kafka")]
-    async fn kafka_connect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        if self.state.lock().unwrap().kafka.contains_key(name) {
-            return Ok(json!({"connected": true, "already": true}));
-        }
-        let saved = self
-            .saved()?
-            .into_iter()
-            .find(|c| c.name == name && c.driver == "kafka")
-            .ok_or_else(|| RpcError::app(format!("no saved kafka connection named `{name}`")))?;
-        let conn = crate::kafka::connect(&saved.target).await.map_err(|e| {
-            RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
-        })?;
-        self.state
-            .lock()
-            .unwrap()
-            .kafka
-            .insert(name.to_string(), conn);
-        Ok(json!({"connected": true, "already": false}))
-    }
-
-    #[cfg(feature = "kafka")]
-    fn kafka_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let removed = self.state.lock().unwrap().kafka.remove(name).is_some();
-        Ok(json!({"disconnected": removed}))
-    }
-
-    #[cfg(feature = "kafka")]
-    async fn kafka_topics(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let brokers = {
-            let state = self.state.lock().unwrap();
-            state
-                .kafka
-                .get(name)
-                .ok_or_else(|| {
-                    RpcError::app(format!(
-                        "`{name}` is not connected -- call `kafka.connect` first"
-                    ))
-                })?
-                .brokers
-                .clone()
-        };
-        let topics = crate::kafka::list_topics(&brokers)
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!(topics))
-    }
-
-    /// Starts a tail: one background subscription per call, never shared
-    /// with another client tailing the same topic (see
-    /// `docs/backlog/push-channel-design-2026-10-14.md`'s "mỗi subscription
-    /// một task nền độc lập"). Returns immediately with a `subscription`
-    /// id; messages arrive later as `kafka.tail.message` notifications on
-    /// `client`'s own socket, not as part of this reply.
-    #[cfg(feature = "kafka")]
-    fn kafka_tail_start(
-        &self,
-        params: &Value,
-        client: &ClientConnection,
-    ) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let topic = str_param(params, "topic")?.to_string();
-        let from_beginning = params.get("from").and_then(Value::as_str) == Some("earliest");
-
-        let brokers = {
-            let state = self.state.lock().unwrap();
-            state
-                .kafka
-                .get(name)
-                .ok_or_else(|| {
-                    RpcError::app(format!(
-                        "`{name}` is not connected -- call `kafka.connect` first"
-                    ))
-                })?
-                .brokers
-                .clone()
-        };
-
-        let subscription = {
-            let mut state = self.state.lock().unwrap();
-            state.next_kafka_subscription += 1;
-            format!("kafka-{}", state.next_kafka_subscription)
-        };
-
-        let client_id = client.id;
-        let push_client = client.clone();
-        let handle = crate::kafka::start_tail(
-            brokers,
-            topic,
-            from_beginning,
-            subscription.clone(),
-            move |item| push_client.notify("kafka.tail.message", item),
-        );
-
-        let mut state = self.state.lock().unwrap();
-        state
-            .kafka_tails
-            .insert(subscription.clone(), (client_id, handle));
-        state
-            .kafka_tails_by_client
-            .entry(client_id)
-            .or_default()
-            .push(subscription.clone());
-        Ok(json!({"subscription": subscription}))
-    }
-
-    #[cfg(feature = "kafka")]
-    fn kafka_tail_stop(&self, params: &Value) -> Result<Value, RpcError> {
-        let subscription = str_param(params, "subscription")?;
-        let mut state = self.state.lock().unwrap();
-        let Some((client_id, handle)) = state.kafka_tails.remove(subscription) else {
-            return Ok(json!({"stopped": false}));
-        };
-        if let Some(list) = state.kafka_tails_by_client.get_mut(&client_id) {
-            list.retain(|s| s != subscription);
-        }
-        drop(state);
-        handle.stop();
-        Ok(json!({"stopped": true}))
-    }
-
-    /// Aborts and forgets every tail `client_id` started and never
-    /// explicitly `kafka.tail.stop`ped -- called from
-    /// `client_disconnected` when that socket closes.
-    #[cfg(feature = "kafka")]
-    fn kafka_forget_client(&self, client_id: u64) {
-        let mut state = self.state.lock().unwrap();
-        let Some(subs) = state.kafka_tails_by_client.remove(&client_id) else {
-            return;
-        };
-        let handles: Vec<_> = subs
-            .iter()
-            .filter_map(|s| state.kafka_tails.remove(s))
-            .collect();
-        drop(state);
-        for (_, handle) in handles {
-            handle.stop();
-        }
-    }
-
-    /// Dials the saved connection's target and starts tailing it
-    /// immediately -- see `socket.rs`'s doc comment for why Socket has no
-    /// separate `connect` step the way Kafka/gRPC do. Returns a
-    /// `subscription` id once the TCP handshake succeeds; data arrives
-    /// after as `socket.tail.message` notifications on `client`'s own
-    /// socket (`{subscription, direction: "received"|"sent", text}`, or
-    /// `{subscription, error}` once the peer closes/errors).
-    #[cfg(feature = "socket")]
-    async fn socket_tail_start(
-        &self,
-        params: &Value,
-        client: &ClientConnection,
-    ) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let target = self
-            .saved()?
-            .into_iter()
-            .find(|c| c.name == name && c.driver == "socket")
-            .ok_or_else(|| RpcError::app(format!("no saved socket connection named `{name}`")))?
-            .target;
-
-        let subscription = {
-            let mut state = self.state.lock().unwrap();
-            state.next_socket_subscription += 1;
-            format!("socket-{}", state.next_socket_subscription)
-        };
-
-        let client_id = client.id;
-        let push_client = client.clone();
-        let handle = crate::socket::start_tail(&target, subscription.clone(), move |item| {
-            push_client.notify("socket.tail.message", item)
-        })
-        .await
-        .map_err(|e| RpcError::app(format!("không kết nối được tới `{target}`: {e}")))?;
-
-        let mut state = self.state.lock().unwrap();
-        state
-            .socket_tails
-            .insert(subscription.clone(), (client_id, name.to_string(), handle));
-        state
-            .socket_tails_by_client
-            .entry(client_id)
-            .or_default()
-            .push(subscription.clone());
-        Ok(json!({"subscription": subscription}))
-    }
-
-    /// Writes `text` (plus a trailing `\n` unless `newline: false`) to a
-    /// running tail's own TCP stream -- the write itself also comes back
-    /// as a `socket.tail.message` notification with `direction: "sent"`,
-    /// the same "echo what was typed" shape
-    /// `tradar-connector-socket`'s own `push_entry` logs both directions
-    /// with, so the plugin doesn't need to echo it client-side itself.
-    /// Pushed straight through `client` (the caller of this very request)
-    /// rather than looked up from `socket_tails` -- only the client that
-    /// owns a subscription can name its id to send on it, so this is
-    /// always the right socket to echo onto.
-    #[cfg(feature = "socket")]
-    async fn socket_send(
-        &self,
-        params: &Value,
-        client: &ClientConnection,
-    ) -> Result<Value, RpcError> {
-        let subscription = str_param(params, "subscription")?;
-        let text = str_param(params, "text")?;
-        let newline = params
-            .get("newline")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        if text.is_empty() {
-            return Ok(json!({"sent": false}));
-        }
-        let sent_text = if newline {
-            format!("{text}\n")
-        } else {
-            text.to_string()
-        };
-
-        let handle = {
-            let state = self.state.lock().unwrap();
-            state
-                .socket_tails
-                .get(subscription)
-                .map(|(_, _, h)| h.clone())
-                .ok_or_else(|| {
-                    RpcError::app(format!(
-                        "`{subscription}` is not tailing -- call `socket.tail.start` first"
-                    ))
-                })?
-        };
-        handle
-            .send(sent_text.clone().into_bytes())
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        client.notify(
-            "socket.tail.message",
-            json!({"subscription": subscription, "direction": "sent", "text": sent_text}),
-        );
-        Ok(json!({"sent": true}))
-    }
-
-    #[cfg(feature = "socket")]
-    fn socket_tail_stop(&self, params: &Value) -> Result<Value, RpcError> {
-        let subscription = str_param(params, "subscription")?;
-        let mut state = self.state.lock().unwrap();
-        let Some((client_id, _name, handle)) = state.socket_tails.remove(subscription) else {
-            return Ok(json!({"stopped": false}));
-        };
-        if let Some(list) = state.socket_tails_by_client.get_mut(&client_id) {
-            list.retain(|s| s != subscription);
-        }
-        drop(state);
-        handle.stop();
-        Ok(json!({"stopped": true}))
-    }
-
-    /// Aborts and forgets every tail `client_id` started and never
-    /// explicitly `socket.tail.stop`ped -- called from `client_disconnected`
-    /// when that socket closes. Mirrors `kafka_forget_client` exactly.
-    #[cfg(feature = "socket")]
-    fn socket_forget_client(&self, client_id: u64) {
-        let mut state = self.state.lock().unwrap();
-        let Some(subs) = state.socket_tails_by_client.remove(&client_id) else {
-            return;
-        };
-        let handles: Vec<_> = subs
-            .iter()
-            .filter_map(|s| state.socket_tails.remove(s))
-            .collect();
-        drop(state);
-        for (_, _, handle) in handles {
-            handle.stop();
-        }
-    }
-
-    #[cfg(feature = "rabbitmq")]
-    async fn rabbitmq_connect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        if self.state.lock().unwrap().rabbitmq.contains_key(name) {
-            return Ok(json!({"connected": true, "already": true}));
-        }
-        let saved = self
-            .saved()?
-            .into_iter()
-            .find(|c| c.name == name && c.driver == "rabbitmq")
-            .ok_or_else(|| RpcError::app(format!("no saved rabbitmq connection named `{name}`")))?;
-        let conn = crate::rabbitmq::connect(&saved.target).await.map_err(|e| {
-            RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
-        })?;
-        self.state
-            .lock()
-            .unwrap()
-            .rabbitmq
-            .insert(name.to_string(), conn);
-        Ok(json!({"connected": true, "already": false}))
-    }
-
-    #[cfg(feature = "rabbitmq")]
-    fn rabbitmq_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let removed = self.state.lock().unwrap().rabbitmq.remove(name).is_some();
-        Ok(json!({"disconnected": removed}))
-    }
-
-    /// A clone of the named, already-connected RabbitMQ connection -- the
-    /// shared "look it up or fail with the same message every
-    /// `rabbitmq.*` method wants" step. Cloned (not borrowed) because the
-    /// `std::sync::MutexGuard` locking `self.state` can't itself live
-    /// across the `.await` every real call below needs to make.
-    #[cfg(feature = "rabbitmq")]
-    fn rabbitmq_connection(
-        &self,
-        name: &str,
-    ) -> Result<crate::rabbitmq::RabbitConnection, RpcError> {
-        self.state
-            .lock()
-            .unwrap()
-            .rabbitmq
-            .get(name)
-            .cloned()
-            .ok_or_else(|| {
-                RpcError::app(format!(
-                    "`{name}` is not connected -- call `rabbitmq.connect` first"
-                ))
-            })
-    }
-
-    #[cfg(feature = "rabbitmq")]
-    async fn rabbitmq_queues(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let conn = self.rabbitmq_connection(name)?;
-        let queues = crate::rabbitmq::queues(&conn)
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!(queues))
-    }
-
-    #[cfg(feature = "rabbitmq")]
-    async fn rabbitmq_exchanges(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let conn = self.rabbitmq_connection(name)?;
-        let exchanges = crate::rabbitmq::exchanges(&conn)
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!(exchanges))
-    }
-
-    #[cfg(feature = "rabbitmq")]
-    async fn rabbitmq_bindings(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let exchange = str_param(params, "exchange")?;
-        let conn = self.rabbitmq_connection(name)?;
-        let bindings = crate::rabbitmq::bindings(&conn, exchange)
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!(bindings))
-    }
-
-    #[cfg(feature = "rabbitmq")]
-    async fn rabbitmq_peek(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let queue = str_param(params, "queue")?;
-        let conn = self.rabbitmq_connection(name)?;
-        let messages = crate::rabbitmq::peek(&conn, queue)
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!(messages))
-    }
-
-    #[cfg(feature = "rabbitmq")]
-    async fn rabbitmq_publish(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let exchange = str_param(params, "exchange")?;
-        let routing_key = params
-            .get("routing_key")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let payload = str_param(params, "payload")?;
-        let conn = self.rabbitmq_connection(name)?;
-        crate::rabbitmq::publish(&conn, exchange, routing_key, payload)
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!({"ok": true}))
-    }
-
-    /// No liveness probe (see `http.rs`'s doc comment) so this never fails
-    /// -- it only needs a saved connection to exist, same as `connect`'s
-    /// own "no saved connection named" check for every other driver.
-    #[cfg(feature = "http")]
-    fn http_connect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        if self.state.lock().unwrap().http.contains_key(name) {
-            return Ok(json!({"connected": true, "already": true}));
-        }
-        let saved = self
-            .saved()?
-            .into_iter()
-            .find(|c| c.name == name && c.driver == "http")
-            .ok_or_else(|| RpcError::app(format!("no saved http connection named `{name}`")))?;
-        let conn = crate::http::connect(&saved.target);
-        self.state
-            .lock()
-            .unwrap()
-            .http
-            .insert(name.to_string(), conn);
-        Ok(json!({"connected": true, "already": false}))
-    }
-
-    #[cfg(feature = "http")]
-    fn http_disconnect(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let removed = self.state.lock().unwrap().http.remove(name).is_some();
-        Ok(json!({"disconnected": removed}))
-    }
-
-    #[cfg(feature = "http")]
-    async fn http_send(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = str_param(params, "connection")?;
-        let method = params
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or("GET");
-        let url = params.get("url").and_then(Value::as_str).unwrap_or("");
-        let headers = params.get("headers").and_then(Value::as_str).unwrap_or("");
-        let body = params.get("body").and_then(Value::as_str).unwrap_or("");
-        let conn = self
-            .state
-            .lock()
-            .unwrap()
-            .http
-            .get(name)
-            .cloned()
-            .ok_or_else(|| {
-                RpcError::app(format!(
-                    "`{name}` is not connected -- call `http.connect` first"
-                ))
-            })?;
-        let response = crate::http::send(&conn, method, url, headers, body)
-            .await
-            .map_err(|e| RpcError::app(e.to_string()))?;
-        Ok(json!(response))
-    }
 }
 
 /// `query` without the `--` line comments and `/* */` blocks that precede
@@ -1307,83 +616,6 @@ fn is_ddl(query: &str) -> bool {
         // An insert is how a Mongo collection (and new fields) come to exist.
         || lower.contains(".insertone(")
         || lower.contains(".insertmany(")
-}
-
-#[cfg(feature = "grpc")]
-fn connected_grpc(state: &State, name: &str) -> bool {
-    state.grpc.contains_key(name)
-}
-
-#[cfg(not(feature = "grpc"))]
-fn connected_grpc(_state: &State, _name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "kafka")]
-fn connected_kafka(state: &State, name: &str) -> bool {
-    state.kafka.contains_key(name)
-}
-
-#[cfg(not(feature = "kafka"))]
-fn connected_kafka(_state: &State, _name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "socket")]
-fn connected_socket(state: &State, name: &str) -> bool {
-    state
-        .socket_tails
-        .values()
-        .any(|(_, conn_name, _)| conn_name == name)
-}
-
-#[cfg(not(feature = "socket"))]
-fn connected_socket(_state: &State, _name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "rabbitmq")]
-fn connected_rabbitmq(state: &State, name: &str) -> bool {
-    state.rabbitmq.contains_key(name)
-}
-
-#[cfg(not(feature = "rabbitmq"))]
-fn connected_rabbitmq(_state: &State, _name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "http")]
-fn connected_http(state: &State, name: &str) -> bool {
-    state.http.contains_key(name)
-}
-
-#[cfg(not(feature = "http"))]
-fn connected_http(_state: &State, _name: &str) -> bool {
-    false
-}
-
-fn str_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
-    params
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or_else(|| RpcError::invalid(format!("`{name}` must be a string")))
-}
-
-fn u64_param(params: &Value, name: &str) -> Result<u64, RpcError> {
-    params
-        .get(name)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| RpcError::invalid(format!("`{name}` must be a non-negative integer")))
-}
-
-fn usize_param(params: &Value, name: &str) -> Result<Option<usize>, RpcError> {
-    match params.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => v
-            .as_u64()
-            .map(|n| Some(n as usize))
-            .ok_or_else(|| RpcError::invalid(format!("`{name}` must be a non-negative integer"))),
-    }
 }
 
 #[cfg(test)]

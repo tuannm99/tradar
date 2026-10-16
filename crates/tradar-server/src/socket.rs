@@ -198,6 +198,136 @@ pub async fn start_tail(
     })))
 }
 
+/// Each subscription carries the saved connection name it dialed, which is
+/// what `connections.list` reports as "connected".
+struct SocketState {
+    tails: crate::subscriptions::Subscriptions<TailHandle, String>,
+}
+
+impl Default for SocketState {
+    fn default() -> Self {
+        Self {
+            tails: crate::subscriptions::Subscriptions::new("socket"),
+        }
+    }
+}
+
+/// `socket.*` -- there is no separate connect step: a Socket "connection"
+/// *is* the TCP session, so `socket.tail.start` dials and tails at once.
+#[derive(Default)]
+pub struct SocketExtension {
+    state: std::sync::Mutex<SocketState>,
+}
+
+#[async_trait::async_trait]
+impl crate::extension::Extension for SocketExtension {
+    fn driver(&self) -> &'static str {
+        "socket"
+    }
+
+    fn is_connected(&self, name: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .tails
+            .any_meta(|conn_name| conn_name == name)
+    }
+
+    fn client_disconnected(&self, client_id: u64) {
+        let handles = self.state.lock().unwrap().tails.remove_client(client_id);
+        for handle in handles {
+            handle.stop();
+        }
+    }
+
+    async fn handle(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        ctx: &crate::extension::Ctx<'_>,
+    ) -> Result<serde_json::Value, crate::protocol::RpcError> {
+        use crate::extension::unknown_method;
+        use crate::protocol::{RpcError, str_param};
+        use serde_json::{Value, json};
+
+        match method {
+            // Data arrives after as `socket.tail.message` notifications on
+            // the caller's socket (`{subscription, direction, text}`, or
+            // `{subscription, error}` once the peer closes/errors).
+            "tail.start" => {
+                let name = str_param(params, "connection")?;
+                let target = ctx.saved(name, "socket")?.target;
+                let subscription = self.state.lock().unwrap().tails.next_id();
+                let client_id = ctx.client.id;
+                let push_client = ctx.client.clone();
+                let handle = start_tail(&target, subscription.clone(), move |item| {
+                    push_client.notify("socket.tail.message", item)
+                })
+                .await
+                .map_err(|e| RpcError::app(format!("không kết nối được tới `{target}`: {e}")))?;
+
+                self.state.lock().unwrap().tails.insert(
+                    subscription.clone(),
+                    client_id,
+                    name.to_string(),
+                    handle,
+                );
+                Ok(json!({"subscription": subscription}))
+            }
+            // Writes to a running tail's TCP stream; the write also comes
+            // back as a `direction: "sent"` notification, pushed through the
+            // caller (only the owner can name a subscription to send on).
+            "send" => {
+                let subscription = str_param(params, "subscription")?;
+                let text = str_param(params, "text")?;
+                let newline = params
+                    .get("newline")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                if text.is_empty() {
+                    return Ok(json!({"sent": false}));
+                }
+                let sent_text = if newline {
+                    format!("{text}\n")
+                } else {
+                    text.to_string()
+                };
+                let handle = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .tails
+                    .get(subscription)
+                    .cloned()
+                    .ok_or_else(|| {
+                        RpcError::app(format!(
+                            "`{subscription}` is not tailing -- call `socket.tail.start` first"
+                        ))
+                    })?;
+                handle
+                    .send(sent_text.clone().into_bytes())
+                    .await
+                    .map_err(|e| RpcError::app(e.to_string()))?;
+                ctx.client.notify(
+                    "socket.tail.message",
+                    json!({"subscription": subscription, "direction": "sent", "text": sent_text}),
+                );
+                Ok(json!({"sent": true}))
+            }
+            "tail.stop" => {
+                let subscription = str_param(params, "subscription")?;
+                let handle = self.state.lock().unwrap().tails.remove(subscription);
+                let stopped = handle.is_some();
+                if let Some(handle) = handle {
+                    handle.stop();
+                }
+                Ok(json!({"stopped": stopped}))
+            }
+            _ => Err(unknown_method("socket", method)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
