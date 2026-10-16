@@ -114,6 +114,83 @@ pub async fn send(
     })
 }
 
+/// `http.*` -- no state beyond the connections themselves, no push.
+#[derive(Default)]
+pub struct HttpExtension {
+    connections: std::sync::Mutex<std::collections::HashMap<String, HttpConnection>>,
+}
+
+#[async_trait::async_trait]
+impl crate::extension::Extension for HttpExtension {
+    fn driver(&self) -> &'static str {
+        "http"
+    }
+
+    fn is_connected(&self, name: &str) -> bool {
+        self.connections.lock().unwrap().contains_key(name)
+    }
+
+    async fn handle(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        ctx: &crate::extension::Ctx<'_>,
+    ) -> Result<serde_json::Value, crate::protocol::RpcError> {
+        use crate::extension::{not_connected, unknown_method};
+        use crate::protocol::{RpcError, str_param};
+        use serde_json::{Value, json};
+
+        let name = str_param(params, "connection")?;
+        match method {
+            // No liveness probe (see the module doc comment), so this never
+            // fails -- it only needs a saved connection to exist.
+            "connect" => {
+                if self.is_connected(name) {
+                    return Ok(json!({"connected": true, "already": true}));
+                }
+                let saved = ctx.saved(name, "http")?;
+                let conn = connect(&saved.target);
+                self.connections
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), conn);
+                Ok(json!({"connected": true, "already": false}))
+            }
+            "disconnect" => {
+                let removed = self.connections.lock().unwrap().remove(name).is_some();
+                Ok(json!({"disconnected": removed}))
+            }
+            "send" => {
+                let field = |key: &str, default: &'static str| -> String {
+                    params
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or(default)
+                        .to_string()
+                };
+                let conn = self
+                    .connections
+                    .lock()
+                    .unwrap()
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| not_connected("http", name))?;
+                let response = send(
+                    &conn,
+                    &field("method", "GET"),
+                    &field("url", ""),
+                    &field("headers", ""),
+                    &field("body", ""),
+                )
+                .await
+                .map_err(|e| RpcError::app(e.to_string()))?;
+                Ok(json!(response))
+            }
+            _ => Err(unknown_method("http", method)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

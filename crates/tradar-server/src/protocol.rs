@@ -319,6 +319,30 @@ pub fn parse_row_edit(params: &Value) -> Result<RowEdit, RpcError> {
     Ok(RowEdit { table, key, change })
 }
 
+pub(crate) fn str_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
+    params
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::invalid(format!("`{name}` must be a string")))
+}
+
+pub(crate) fn u64_param(params: &Value, name: &str) -> Result<u64, RpcError> {
+    params
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| RpcError::invalid(format!("`{name}` must be a non-negative integer")))
+}
+
+pub(crate) fn usize_param(params: &Value, name: &str) -> Result<Option<usize>, RpcError> {
+    match params.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(|n| Some(n as usize))
+            .ok_or_else(|| RpcError::invalid(format!("`{name}` must be a non-negative integer"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

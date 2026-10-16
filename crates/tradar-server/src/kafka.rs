@@ -227,6 +227,158 @@ pub fn start_tail(
     TailHandle { reader, forwarder }
 }
 
+#[derive(Default)]
+struct KafkaState {
+    connections: std::collections::HashMap<String, KafkaConnection>,
+    /// subscription id -> (owning client id, the two tasks)
+    tails: std::collections::HashMap<String, (u64, TailHandle)>,
+    /// client id -> its subscription ids, so a closing socket aborts exactly
+    /// its own tails without scanning `tails`.
+    by_client: std::collections::HashMap<u64, Vec<String>>,
+    next_subscription: u64,
+}
+
+/// `kafka.*` -- connections plus push-style tail subscriptions (see
+/// `docs/backlog/push-channel-design-2026-10-14.md`).
+#[derive(Default)]
+pub struct KafkaExtension {
+    state: std::sync::Mutex<KafkaState>,
+}
+
+#[async_trait::async_trait]
+impl crate::extension::Extension for KafkaExtension {
+    fn driver(&self) -> &'static str {
+        "kafka"
+    }
+
+    fn is_connected(&self, name: &str) -> bool {
+        self.state.lock().unwrap().connections.contains_key(name)
+    }
+
+    /// Aborts and forgets every tail `client_id` started and never
+    /// explicitly `kafka.tail.stop`ped.
+    fn client_disconnected(&self, client_id: u64) {
+        let mut state = self.state.lock().unwrap();
+        let Some(subs) = state.by_client.remove(&client_id) else {
+            return;
+        };
+        let handles: Vec<_> = subs.iter().filter_map(|s| state.tails.remove(s)).collect();
+        drop(state);
+        for (_, handle) in handles {
+            handle.stop();
+        }
+    }
+
+    async fn handle(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        ctx: &crate::extension::Ctx<'_>,
+    ) -> Result<serde_json::Value, crate::protocol::RpcError> {
+        use crate::extension::{not_connected, unknown_method};
+        use crate::protocol::{RpcError, str_param};
+        use serde_json::{Value, json};
+
+        let brokers_of = |name: &str| {
+            self.state
+                .lock()
+                .unwrap()
+                .connections
+                .get(name)
+                .map(|c| c.brokers.clone())
+                .ok_or_else(|| not_connected("kafka", name))
+        };
+        match method {
+            // Opens the Kafka client and probes the broker's metadata once
+            // (fails loudly here rather than on the first `topics`/`tail`).
+            "connect" => {
+                let name = str_param(params, "connection")?;
+                if self.is_connected(name) {
+                    return Ok(json!({"connected": true, "already": true}));
+                }
+                let saved = ctx.saved(name, "kafka")?;
+                let conn = connect(&saved.target).await.map_err(|e| {
+                    RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+                })?;
+                self.state
+                    .lock()
+                    .unwrap()
+                    .connections
+                    .insert(name.to_string(), conn);
+                Ok(json!({"connected": true, "already": false}))
+            }
+            "disconnect" => {
+                let name = str_param(params, "connection")?;
+                let removed = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .connections
+                    .remove(name)
+                    .is_some();
+                Ok(json!({"disconnected": removed}))
+            }
+            "topics" => {
+                let brokers = brokers_of(str_param(params, "connection")?)?;
+                let topics = list_topics(&brokers)
+                    .await
+                    .map_err(|e| RpcError::app(e.to_string()))?;
+                Ok(json!(topics))
+            }
+            // One background subscription per call, never shared with
+            // another client tailing the same topic. Returns immediately
+            // with a `subscription` id; messages arrive later as
+            // `kafka.tail.message` notifications on the caller's socket.
+            "tail.start" => {
+                let name = str_param(params, "connection")?;
+                let topic = str_param(params, "topic")?.to_string();
+                let from_beginning = params.get("from").and_then(Value::as_str) == Some("earliest");
+                let brokers = brokers_of(name)?;
+
+                let subscription = {
+                    let mut state = self.state.lock().unwrap();
+                    state.next_subscription += 1;
+                    format!("kafka-{}", state.next_subscription)
+                };
+                let client_id = ctx.client.id;
+                let push_client = ctx.client.clone();
+                let handle = start_tail(
+                    brokers,
+                    topic,
+                    from_beginning,
+                    subscription.clone(),
+                    move |item| push_client.notify("kafka.tail.message", item),
+                );
+
+                let mut state = self.state.lock().unwrap();
+                state
+                    .tails
+                    .insert(subscription.clone(), (client_id, handle));
+                state
+                    .by_client
+                    .entry(client_id)
+                    .or_default()
+                    .push(subscription.clone());
+                Ok(json!({"subscription": subscription}))
+            }
+            "tail.stop" => {
+                let subscription = str_param(params, "subscription")?;
+                let mut state = self.state.lock().unwrap();
+                let Some((client_id, handle)) = state.tails.remove(subscription) else {
+                    return Ok(json!({"stopped": false}));
+                };
+                if let Some(list) = state.by_client.get_mut(&client_id) {
+                    list.retain(|s| s != subscription);
+                }
+                drop(state);
+                handle.stop();
+                Ok(json!({"stopped": true}))
+            }
+            _ => Err(unknown_method("kafka", method)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,7 @@
 //! over a local socket so an editor (Neovim) can be the UI. See "Server
 //! headless" in docs/architecture.md.
 
+mod extension;
 #[cfg(feature = "grpc")]
 mod grpc;
 #[cfg(feature = "http")]

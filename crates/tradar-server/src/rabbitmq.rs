@@ -214,6 +214,91 @@ pub async fn publish(
     Ok(())
 }
 
+/// `rabbitmq.*` -- plain request/response against the Management API, no
+/// push state.
+#[derive(Default)]
+pub struct RabbitExtension {
+    connections: std::sync::Mutex<std::collections::HashMap<String, RabbitConnection>>,
+}
+
+#[async_trait::async_trait]
+impl crate::extension::Extension for RabbitExtension {
+    fn driver(&self) -> &'static str {
+        "rabbitmq"
+    }
+
+    fn is_connected(&self, name: &str) -> bool {
+        self.connections.lock().unwrap().contains_key(name)
+    }
+
+    async fn handle(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        ctx: &crate::extension::Ctx<'_>,
+    ) -> Result<serde_json::Value, crate::protocol::RpcError> {
+        use crate::extension::{not_connected, unknown_method};
+        use crate::protocol::{RpcError, str_param};
+        use serde_json::{Value, json};
+
+        let name = str_param(params, "connection")?;
+        let app = |e: anyhow::Error| RpcError::app(e.to_string());
+        // Cloned out (not borrowed): a `std::sync::MutexGuard` can't live
+        // across the `.await` every real call below makes.
+        let conn = || {
+            self.connections
+                .lock()
+                .unwrap()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| not_connected("rabbitmq", name))
+        };
+        match method {
+            "connect" => {
+                if self.is_connected(name) {
+                    return Ok(json!({"connected": true, "already": true}));
+                }
+                let saved = ctx.saved(name, "rabbitmq")?;
+                let conn = connect(&saved.target).await.map_err(|e| {
+                    RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+                })?;
+                self.connections
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), conn);
+                Ok(json!({"connected": true, "already": false}))
+            }
+            "disconnect" => {
+                let removed = self.connections.lock().unwrap().remove(name).is_some();
+                Ok(json!({"disconnected": removed}))
+            }
+            "queues" => Ok(json!(queues(&conn()?).await.map_err(app)?)),
+            "exchanges" => Ok(json!(exchanges(&conn()?).await.map_err(app)?)),
+            "bindings" => {
+                let exchange = str_param(params, "exchange")?;
+                Ok(json!(bindings(&conn()?, exchange).await.map_err(app)?))
+            }
+            "peek" => {
+                let queue = str_param(params, "queue")?;
+                Ok(json!(peek(&conn()?, queue).await.map_err(app)?))
+            }
+            "publish" => {
+                let exchange = str_param(params, "exchange")?;
+                let routing_key = params
+                    .get("routing_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let payload = str_param(params, "payload")?;
+                publish(&conn()?, exchange, routing_key, payload)
+                    .await
+                    .map_err(app)?;
+                Ok(json!({"ok": true}))
+            }
+            _ => Err(unknown_method("rabbitmq", method)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
