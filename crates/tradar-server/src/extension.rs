@@ -26,6 +26,8 @@ use crate::server::ClientConnection;
 /// What a request handler may need from the server beyond its params.
 pub(crate) struct Ctx<'a> {
     pub store: Option<&'a ConnectionStore>,
+    /// Only the push-capable extensions (Kafka, Socket) read this.
+    #[cfg_attr(not(any(feature = "kafka", feature = "socket")), allow(dead_code))]
     pub client: &'a ClientConnection,
 }
 
@@ -71,6 +73,12 @@ pub(crate) fn unknown_method(driver: &str, method: &str) -> RpcError {
     }
 }
 
+#[cfg(any(
+    feature = "grpc",
+    feature = "kafka",
+    feature = "rabbitmq",
+    feature = "http"
+))]
 pub(crate) fn not_connected(driver: &str, name: &str) -> RpcError {
     RpcError::app(format!(
         "`{name}` is not connected -- call `{driver}.connect` first"

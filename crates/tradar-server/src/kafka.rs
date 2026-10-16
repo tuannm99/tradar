@@ -227,15 +227,18 @@ pub fn start_tail(
     TailHandle { reader, forwarder }
 }
 
-#[derive(Default)]
 struct KafkaState {
     connections: std::collections::HashMap<String, KafkaConnection>,
-    /// subscription id -> (owning client id, the two tasks)
-    tails: std::collections::HashMap<String, (u64, TailHandle)>,
-    /// client id -> its subscription ids, so a closing socket aborts exactly
-    /// its own tails without scanning `tails`.
-    by_client: std::collections::HashMap<u64, Vec<String>>,
-    next_subscription: u64,
+    tails: crate::subscriptions::Subscriptions<TailHandle>,
+}
+
+impl Default for KafkaState {
+    fn default() -> Self {
+        Self {
+            connections: Default::default(),
+            tails: crate::subscriptions::Subscriptions::new("kafka"),
+        }
+    }
 }
 
 /// `kafka.*` -- connections plus push-style tail subscriptions (see
@@ -258,13 +261,8 @@ impl crate::extension::Extension for KafkaExtension {
     /// Aborts and forgets every tail `client_id` started and never
     /// explicitly `kafka.tail.stop`ped.
     fn client_disconnected(&self, client_id: u64) {
-        let mut state = self.state.lock().unwrap();
-        let Some(subs) = state.by_client.remove(&client_id) else {
-            return;
-        };
-        let handles: Vec<_> = subs.iter().filter_map(|s| state.tails.remove(s)).collect();
-        drop(state);
-        for (_, handle) in handles {
+        let handles = self.state.lock().unwrap().tails.remove_client(client_id);
+        for handle in handles {
             handle.stop();
         }
     }
@@ -335,11 +333,7 @@ impl crate::extension::Extension for KafkaExtension {
                 let from_beginning = params.get("from").and_then(Value::as_str) == Some("earliest");
                 let brokers = brokers_of(name)?;
 
-                let subscription = {
-                    let mut state = self.state.lock().unwrap();
-                    state.next_subscription += 1;
-                    format!("kafka-{}", state.next_subscription)
-                };
+                let subscription = self.state.lock().unwrap().tails.next_id();
                 let client_id = ctx.client.id;
                 let push_client = ctx.client.clone();
                 let handle = start_tail(
@@ -350,29 +344,22 @@ impl crate::extension::Extension for KafkaExtension {
                     move |item| push_client.notify("kafka.tail.message", item),
                 );
 
-                let mut state = self.state.lock().unwrap();
-                state
-                    .tails
-                    .insert(subscription.clone(), (client_id, handle));
-                state
-                    .by_client
-                    .entry(client_id)
-                    .or_default()
-                    .push(subscription.clone());
+                self.state.lock().unwrap().tails.insert(
+                    subscription.clone(),
+                    client_id,
+                    (),
+                    handle,
+                );
                 Ok(json!({"subscription": subscription}))
             }
             "tail.stop" => {
                 let subscription = str_param(params, "subscription")?;
-                let mut state = self.state.lock().unwrap();
-                let Some((client_id, handle)) = state.tails.remove(subscription) else {
-                    return Ok(json!({"stopped": false}));
-                };
-                if let Some(list) = state.by_client.get_mut(&client_id) {
-                    list.retain(|s| s != subscription);
+                let handle = self.state.lock().unwrap().tails.remove(subscription);
+                let stopped = handle.is_some();
+                if let Some(handle) = handle {
+                    handle.stop();
                 }
-                drop(state);
-                handle.stop();
-                Ok(json!({"stopped": true}))
+                Ok(json!({"stopped": stopped}))
             }
             _ => Err(unknown_method("kafka", method)),
         }

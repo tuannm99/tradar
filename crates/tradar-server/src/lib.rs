@@ -15,6 +15,8 @@ mod rabbitmq;
 mod server;
 #[cfg(feature = "socket")]
 mod socket;
+#[cfg(any(feature = "kafka", feature = "socket"))]
+mod subscriptions;
 mod transport;
 
 use std::collections::HashMap;

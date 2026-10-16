@@ -9,6 +9,10 @@ Refactor thuần, không đổi hành vi wire. Trước đó `server.rs` (1426 d
 
 Khác biệt nhìn thấy được duy nhất: lỗi "no saved … connection named" của gRPC giờ viết `grpc` thường (trước là `gRPC`) vì dùng chung `Ctx::saved`.
 
-Chưa làm (mục 2 trong đề xuất cùng đợt): Kafka và Socket vẫn lặp quản lý subscription (`tails`/`by_client`/bộ đếm id) — có thể gộp thành `Subscriptions<Handle>` generic.
+## Gộp quản lý subscription của Kafka và Socket
 
-Xác nhận: `cargo build`/`clippy --all-targets -- -D warnings` sạch ở 4 cấu hình (mặc định, `--features kafka`, `--no-default-features --features postgres,sqlite`, `--features sqlite`); `make test-unit` xanh với số test không đổi.
+`subscriptions.rs`: `Subscriptions<H, M>` — id (`<prefix>-<n>`), ownership theo client, `remove`/`remove_client`. `M` là metadata đi kèm (Socket lưu tên connection để `connections.list` báo `connected`; Kafka dùng `()`). Hai hàm gỡ **trả handle về** thay vì tự `stop()`, để caller nhả lock state trước khi abort task — giữ đúng thứ tự cũ. Thay cho bộ ba `tails`/`by_client`/`next_subscription` chép y hệt ở cả hai module (kèm hai bản `*_forget_client`). 4 unit test mới cho chính cấu trúc này.
+
+Nhân tiện bắt được và sửa 3 cảnh báo dead-code chỉ lộ ra ở tổ hợp feature hẹp (`not_connected`, `Ctx::client`, các field/method của `Subscriptions`) — build/clippy mặc định không thấy, nên giờ clippy được chạy ở 8 tổ hợp: mặc định, `--features kafka`, và `sqlite` + từng extension riêng lẻ (`http`/`grpc`/`rabbitmq`/`socket`/`kafka`) + không extension nào.
+
+Xác nhận: `clippy --all-targets -- -D warnings` sạch ở 8 tổ hợp feature nêu trên; `make test-unit` xanh, số test tích hợp không đổi (rpc 17, grpc 6, http 4, rabbitmq 5, socket 6), test lib 26 → 30.

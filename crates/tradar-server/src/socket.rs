@@ -198,12 +198,18 @@ pub async fn start_tail(
     })))
 }
 
-#[derive(Default)]
+/// Each subscription carries the saved connection name it dialed, which is
+/// what `connections.list` reports as "connected".
 struct SocketState {
-    /// subscription id -> (owning client id, saved connection name, tail)
-    tails: std::collections::HashMap<String, (u64, String, TailHandle)>,
-    by_client: std::collections::HashMap<u64, Vec<String>>,
-    next_subscription: u64,
+    tails: crate::subscriptions::Subscriptions<TailHandle, String>,
+}
+
+impl Default for SocketState {
+    fn default() -> Self {
+        Self {
+            tails: crate::subscriptions::Subscriptions::new("socket"),
+        }
+    }
 }
 
 /// `socket.*` -- there is no separate connect step: a Socket "connection"
@@ -224,18 +230,12 @@ impl crate::extension::Extension for SocketExtension {
             .lock()
             .unwrap()
             .tails
-            .values()
-            .any(|(_, conn_name, _)| conn_name == name)
+            .any_meta(|conn_name| conn_name == name)
     }
 
     fn client_disconnected(&self, client_id: u64) {
-        let mut state = self.state.lock().unwrap();
-        let Some(subs) = state.by_client.remove(&client_id) else {
-            return;
-        };
-        let handles: Vec<_> = subs.iter().filter_map(|s| state.tails.remove(s)).collect();
-        drop(state);
-        for (_, _, handle) in handles {
+        let handles = self.state.lock().unwrap().tails.remove_client(client_id);
+        for handle in handles {
             handle.stop();
         }
     }
@@ -257,11 +257,7 @@ impl crate::extension::Extension for SocketExtension {
             "tail.start" => {
                 let name = str_param(params, "connection")?;
                 let target = ctx.saved(name, "socket")?.target;
-                let subscription = {
-                    let mut state = self.state.lock().unwrap();
-                    state.next_subscription += 1;
-                    format!("socket-{}", state.next_subscription)
-                };
+                let subscription = self.state.lock().unwrap().tails.next_id();
                 let client_id = ctx.client.id;
                 let push_client = ctx.client.clone();
                 let handle = start_tail(&target, subscription.clone(), move |item| {
@@ -270,15 +266,12 @@ impl crate::extension::Extension for SocketExtension {
                 .await
                 .map_err(|e| RpcError::app(format!("không kết nối được tới `{target}`: {e}")))?;
 
-                let mut state = self.state.lock().unwrap();
-                state
-                    .tails
-                    .insert(subscription.clone(), (client_id, name.to_string(), handle));
-                state
-                    .by_client
-                    .entry(client_id)
-                    .or_default()
-                    .push(subscription.clone());
+                self.state.lock().unwrap().tails.insert(
+                    subscription.clone(),
+                    client_id,
+                    name.to_string(),
+                    handle,
+                );
                 Ok(json!({"subscription": subscription}))
             }
             // Writes to a running tail's TCP stream; the write also comes
@@ -305,7 +298,7 @@ impl crate::extension::Extension for SocketExtension {
                     .unwrap()
                     .tails
                     .get(subscription)
-                    .map(|(_, _, h)| h.clone())
+                    .cloned()
                     .ok_or_else(|| {
                         RpcError::app(format!(
                             "`{subscription}` is not tailing -- call `socket.tail.start` first"
@@ -323,16 +316,12 @@ impl crate::extension::Extension for SocketExtension {
             }
             "tail.stop" => {
                 let subscription = str_param(params, "subscription")?;
-                let mut state = self.state.lock().unwrap();
-                let Some((client_id, _name, handle)) = state.tails.remove(subscription) else {
-                    return Ok(json!({"stopped": false}));
-                };
-                if let Some(list) = state.by_client.get_mut(&client_id) {
-                    list.retain(|s| s != subscription);
+                let handle = self.state.lock().unwrap().tails.remove(subscription);
+                let stopped = handle.is_some();
+                if let Some(handle) = handle {
+                    handle.stop();
                 }
-                drop(state);
-                handle.stop();
-                Ok(json!({"stopped": true}))
+                Ok(json!({"stopped": stopped}))
             }
             _ => Err(unknown_method("socket", method)),
         }
