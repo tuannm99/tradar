@@ -70,3 +70,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`http-server-2026-10-17.md`](http-server-2026-10-17.md) — HTTP qua server (không cần push-channel).
 - [`protocol-versioning-2026-10-18.md`](protocol-versioning-2026-10-18.md) — phiên bản hoá protocol JSON-RPC (`version` method, cảnh báo không chặn).
 - [`server-extension-trait-2026-10-19.md`](server-extension-trait-2026-10-19.md) — tách 5 connector phi-`QueryDriver` khỏi `server.rs` bằng trait `Extension` (1426 → 658 dòng, `#[cfg]` 80 → 3), không đổi hành vi wire; kèm `Subscriptions<H, M>` dùng chung cho Kafka/Socket tail.
+- [`wiki-huong-dan-2026-10-19.md`](wiki-huong-dan-2026-10-19.md) — wiki hướng dẫn sử dụng trong `docs/wiki/` (cài đặt, kết nối, SQL, Mongo/Redis/ES, `.tdb`, Kafka/RabbitMQ/HTTP/Socket/gRPC, TUI, xử lý sự cố).
