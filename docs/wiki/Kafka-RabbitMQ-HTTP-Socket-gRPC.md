@@ -11,7 +11,7 @@ Cần `tradar-server` build với `--features kafka` ([Cài đặt](Cai-dat)).
 | `:TradarKafkaConnect [tên]` | kết nối (kiểm tra metadata broker ngay) |
 | `:TradarKafkaTail [tên] [topic]` | tail realtime một topic |
 
-`:TradarKafkaTail` bỏ trống phần nào thì hỏi phần đó, và luôn hỏi tail từ `latest` hay `earliest`. Kết quả là một buffer cuộn trong tab mới, **không sửa được**; message mới tự nối vào cuối — con trỏ chỉ bám theo khi đang đứng ở dòng cuối (cuộn lên đọc thì buffer đứng yên), và chỉ giữ 5000 dòng gần nhất. `q` dừng tail và đóng. Mỗi lần tail là một consumer riêng dùng-một-lần (không join consumer group thật) — tail hai lần cùng topic cho hai luồng độc lập, không chia đôi dữ liệu. Topic nội bộ `__*` bị ẩn.
+`:TradarKafkaTail` bỏ trống phần nào thì hỏi phần đó, và luôn hỏi tail từ `latest` hay `earliest`. Kết quả là một buffer cuộn trong tab mới, **không sửa được**; message mới tự nối vào cuối — con trỏ chỉ bám theo khi đang đứng ở dòng cuối (cuộn lên đọc thì buffer đứng yên), và chỉ giữ 5000 dòng gần nhất. `q` dừng tail và đóng. `p` tạm dừng/tiếp tục (tin vẫn về, hiện khi tiếp tục), `f` lọc theo chuỗi con (không phân biệt hoa thường), `c` xoá buffer, `g?` xem phím; thanh winbar phía trên hiện connection/topic, `PAUSED`, bộ lọc đang bật. Nếu server khởi động lại/mất kết nối, tail tự đăng ký lại từ `latest` một lần (ghi chú vào transcript; tin trong lúc mất không phát lại), thất bại thì winbar báo `DISCONNECTED` và `R` thử lại. Mỗi lần tail là một consumer riêng dùng-một-lần (không join consumer group thật) — tail hai lần cùng topic cho hai luồng độc lập, không chia đôi dữ liệu. Topic nội bộ `__*` bị ẩn.
 
 ## RabbitMQ
 

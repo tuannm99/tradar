@@ -76,3 +76,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`nvim-connections-tail-fixes-2026-10-20.md`](nvim-connections-tail-fixes-2026-10-20.md) — `:TradarConnections` mở `connections.toml` (+ `connections.path`, protocol 1.1), sửa Socket tail không gõ được, tail buffer không giật con trỏ/không phình vô hạn; rà HTTP/RabbitMQ/Kafka còn lại
 - [`http-request-buffer-2026-10-21.md`](http-request-buffer-2026-10-21.md) — `:TradarHttpSend` mở buffer request sửa được (`METHOD url` / headers / body nhiều dòng) thay chuỗi `vim.ui.input`
 - [`rabbitmq-publish-buffer-2026-10-21.md`](rabbitmq-publish-buffer-2026-10-21.md) — RabbitMQ publish bằng buffer sửa được (payload nhiều dòng), `r` làm mới split peek/bindings
+- [`kafka-tail-controls-2026-10-21.md`](kafka-tail-controls-2026-10-21.md) — Kafka tail: `p` tạm dừng, `f` lọc, `c` xoá, tự nối lại khi mất kết nối server (`R` thử lại), winbar trạng thái
