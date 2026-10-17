@@ -19,7 +19,7 @@ Tất cả phím có tiền tố `<leader>r` (đổi được bằng `setup{ pre
 | `rs` | panel schema (cây schema → bảng → cột) |
 | `rc` | đổi connection |
 | `rm` | tải thêm dòng |
-| `rv` | (kết quả dạng tài liệu) đổi bảng ↔ JSON |
+| `rv` | đổi bảng ↔ JSON (SQL: mảng object; tài liệu: JSON gốc) |
 
 Ranh giới statement do chính driver quyết định. Chạy hoàn toàn async: có spinner và thời gian trên statusline, Neovim không bị đơ. Lệnh tương ứng: `:TradarRun`, `:TradarRunAll`, `:TradarCancel`, `:TradarMore`, `:TradarSchema`, `:TradarTables`, `:TradarHistory`.
 
@@ -31,8 +31,10 @@ Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Cuộn tới cuối sẽ
 
 | Phím | Việc |
 |---|---|
-| `i` | sửa ô (gõ `NULL` để đặt NULL) |
-| `dd` | xoá dòng |
+| `gK` | xem cả dòng hiện tại, mỗi trường một dòng |
+| `i` | xếp hàng việc sửa ô (gõ `NULL` để đặt NULL) |
+| `dd` | xếp hàng việc xoá dòng |
+| `rw` / `ru` | commit / bỏ các thay đổi đang chờ |
 | `gyc` / `gyr` / `gyC` | copy ô / dòng (visual: nhiều dòng) / cột |
 | `gyj` / `gyv` / `gym` | copy cả kết quả dạng JSON / CSV / Markdown |
 | `K` | xem trọn giá trị một ô |
@@ -45,7 +47,7 @@ Cột rộng hơn 40 ký tự bị cắt và thêm `…`; dùng `K` hoặc `gyc`
 
 ### Sửa ô / xoá dòng
 
-`i` và `dd` **không chạy ngay**: plugin sinh câu `UPDATE`/`DELETE`, hiện cho bạn xem, chỉ chạy sau khi bạn chọn `Run`; xong tự chạy lại truy vấn gốc và giữ nguyên dòng đang đứng. Chỉ sửa được khi kết quả đến từ **một bảng có khoá chính** và cột khoá có trong kết quả; nếu không, plugin báo rõ lý do (không biết bảng nguồn, bảng không có khoá chính, cột khoá không có trong kết quả, hoặc giá trị khoá là NULL).
+`i` và `dd` **không chạy ngay**: plugin sinh câu `UPDATE`/`DELETE` và xếp vào hàng đợi, dòng bị ảnh hưởng được đánh dấu (`● cột = giá trị`, `✗ delete`); sửa lại cùng ô thì thay thế, xoá dòng thì thay các sửa trước đó. Khi xong bấm `<leader>rw`: plugin liệt kê toàn bộ câu lệnh và chỉ chạy, lần lượt, sau khi bạn chọn `Commit` (dừng ở câu lỗi đầu tiên — không bọc transaction); `<leader>ru` bỏ hết. Commit xong tự chạy lại truy vấn gốc và giữ nguyên dòng đang đứng. Hộp xác nhận này thay cho bước hỏi của guard, nên connection `protected` chỉ bị hỏi một lần. Chỉ sửa được khi kết quả đến từ **một bảng có khoá chính** và cột khoá có trong kết quả; nếu không, plugin báo rõ lý do (không biết bảng nguồn, bảng không có khoá chính, cột khoá không có trong kết quả, hoặc giá trị khoá là NULL).
 
 ## Điều hướng theo schema
 
