@@ -75,3 +75,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`result-buffer-views-staged-edit-2026-10-20.md`](result-buffer-views-staged-edit-2026-10-20.md) — buffer kết quả: JSON view cho SQL (`<leader>rv`), row view `gK`, `i`/`dd` xếp hàng rồi `<leader>rw` commit / `<leader>ru` bỏ
 - [`nvim-connections-tail-fixes-2026-10-20.md`](nvim-connections-tail-fixes-2026-10-20.md) — `:TradarConnections` mở `connections.toml` (+ `connections.path`, protocol 1.1), sửa Socket tail không gõ được, tail buffer không giật con trỏ/không phình vô hạn; rà HTTP/RabbitMQ/Kafka còn lại
 - [`http-request-buffer-2026-10-21.md`](http-request-buffer-2026-10-21.md) — `:TradarHttpSend` mở buffer request sửa được (`METHOD url` / headers / body nhiều dòng) thay chuỗi `vim.ui.input`
+- [`rabbitmq-publish-buffer-2026-10-21.md`](rabbitmq-publish-buffer-2026-10-21.md) — RabbitMQ publish bằng buffer sửa được (payload nhiều dòng), `r` làm mới split peek/bindings

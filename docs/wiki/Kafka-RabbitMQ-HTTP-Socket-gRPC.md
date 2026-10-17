@@ -22,9 +22,20 @@ Dùng Management HTTP API (không phải AMQP), nên mỗi thao tác là một l
 | `:TradarRabbitmqConnect [tên]` | kết nối |
 | `:TradarRabbitmqPeek [tên] [queue]` | xem message gần nhất của queue — **không tiêu huỷ** (requeue ngay sau khi đọc) |
 | `:TradarRabbitmqBindings [tên] [exchange]` | xem binding của exchange (exchange mặc định không tên bị ẩn) |
-| `:TradarRabbitmqPublish [tên]` | hỏi lần lượt exchange (bỏ trống = default exchange), routing key, payload |
+| `:TradarRabbitmqPublish [tên]` | mở buffer publish sửa được (trong buffer thì publish luôn); `<leader>rr` cũng publish |
 
-Bỏ trống `queue`/`exchange` thì chọn qua picker (queue kèm số `ready`/`unacked`/`consumers`). Kết quả hiện trong một split dùng lại được; message `redelivered` được đánh dấu.
+Bỏ trống `queue`/`exchange` thì chọn qua picker (queue kèm số `ready`/`unacked`/`consumers`). Kết quả hiện trong một split dùng lại được; message `redelivered` được đánh dấu. Trong split đó `r` làm mới (peek lại / liệt kê lại bindings).
+
+Buffer publish:
+
+```
+exchange:
+routing-key: orders
+
+{"id": 1}
+```
+
+`exchange:` bỏ trống = default exchange (khi đó `routing-key:` là tên queue); mọi thứ sau dòng trống là payload, nhiều dòng thoải mái. Mỗi connection một buffer, giữ nội dung để sửa nhẹ rồi gửi lại.
 
 ## HTTP
 

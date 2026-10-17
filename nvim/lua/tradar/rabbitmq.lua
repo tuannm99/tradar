@@ -53,7 +53,9 @@ function M.connect(name) with_connection(name, function(conn) notify('connected 
 --- response split, just for this module's own browsing instead of a
 --- request/response pair.
 local browse_buf = nil
-local function show_lines(title, lines)
+local browse_refresh = nil
+local function show_lines(title, lines, refresh)
+  browse_refresh = refresh
   if not (browse_buf and vim.api.nvim_buf_is_valid(browse_buf)) then
     browse_buf = vim.api.nvim_create_buf(false, true)
     vim.bo[browse_buf].bufhidden = 'hide'
@@ -63,9 +65,12 @@ local function show_lines(title, lines)
       local win = vim.fn.bufwinid(browse_buf)
       if win ~= -1 then vim.api.nvim_win_close(win, true) end
     end, { buffer = browse_buf, desc = 'tradar: close' })
+    vim.keymap.set('n', 'r', function()
+      if browse_refresh then browse_refresh() end
+    end, { buffer = browse_buf, desc = 'tradar: refresh' })
     vim.keymap.set('n', 'g?', function()
       vim.lsp.util.open_floating_preview(
-        { '# tradar: RabbitMQ browse buffer', '- `q` close' },
+        { '# tradar: RabbitMQ browse buffer', '- `r` refresh (re-peek / re-list)', '- `q` close' },
         'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 }
       )
     end, { buffer = browse_buf, desc = 'tradar: show keymap help' })
@@ -100,7 +105,7 @@ function M.peek(name, queue)
           vim.list_extend(lines, vim.split(m.payload, '\n', { plain = true }))
           lines[#lines + 1] = ''
         end
-        show_lines(('%s: %d message(s) peeked from %s'):format(conn, #messages, q), lines)
+        show_lines(('%s: %d message(s) peeked from %s'):format(conn, #messages, q), lines, function() go(q) end)
       end)
     end
     if queue and queue ~= '' then return go(queue) end
@@ -128,7 +133,7 @@ function M.bindings(name, exchange)
         for _, b in ipairs(bindings) do
           lines[#lines + 1] = ('%s  (routing key: %s)'):format(b.destination, b.routing_key ~= '' and b.routing_key or '(none)')
         end
-        show_lines(('%s: %d binding(s) from %s'):format(conn, #bindings, ex), lines)
+        show_lines(('%s: %d binding(s) from %s'):format(conn, #bindings, ex), lines, function() go(ex) end)
       end)
     end
     if exchange and exchange ~= '' then return go(exchange) end
@@ -142,24 +147,93 @@ function M.bindings(name, exchange)
   end)
 end
 
---- `:TradarRabbitmqPublish [connection]` -- prompts for exchange (default
---- `""`, the default exchange, routed by queue name as the routing key),
---- routing key, and payload, one `vim.ui.input` at a time.
-function M.publish(name)
-  with_connection(name, function(conn)
-    vim.ui.input({ prompt = 'Exchange (blank = default): ' }, function(exchange)
-      if exchange == nil then return end
-      vim.ui.input({ prompt = 'Routing key: ' }, function(routing_key)
-        if routing_key == nil then return end
-        vim.ui.input({ prompt = 'Payload: ' }, function(payload)
-          if payload == nil then return end
-          call('rabbitmq.publish', { connection = conn, exchange = exchange, routing_key = routing_key, payload = payload }, function()
-            notify(('published to %s%s'):format(exchange ~= '' and exchange or '(default) ', routing_key))
-          end)
-        end)
-      end)
-    end)
+--- Splits a publish buffer into `exchange, routing_key, payload`:
+---
+---     exchange: orders          (blank / missing = the default exchange)
+---     routing-key: orders.new   (for the default exchange: the queue name)
+---
+---     {"id": 1}
+---
+--- Lines before the first blank line are `key: value` (`#` lines ignored);
+--- everything after it is the payload, as many lines as it needs.
+function M.parse_publish(lines)
+  local fields, i = {}, 1
+  while i <= #lines do
+    local line = lines[i]
+    i = i + 1
+    if line:match('^%s*$') then break end
+    if not line:match('^%s*#') then
+      local k, v = line:match('^%s*([%w_-]+)%s*:%s*(.-)%s*$')
+      if k then fields[k:lower():gsub('_', '-')] = v end
+    end
+  end
+  return fields['exchange'] or '', fields['routing-key'] or '', table.concat(vim.list_slice(lines, i), '\n')
+end
+
+local PUBLISH_TEMPLATE = {
+  '# <leader>rr (or :TradarRabbitmqPublish) publishes. Payload: everything after the blank line.',
+  'exchange:',
+  'routing-key:',
+  '',
+  '',
+}
+
+local publish_buffers = {} -- connection name -> its publish buffer
+
+function M.submit(buf)
+  local conn = vim.b[buf].tradar_rabbitmq and vim.b[buf].tradar_rabbitmq.connection
+  if not conn then return notify('not a tradar RabbitMQ publish buffer', vim.log.levels.WARN) end
+  local exchange, routing_key, payload = M.parse_publish(vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+  if exchange == '' and routing_key == '' then
+    return notify('set `routing-key:` (the queue name for the default exchange)', vim.log.levels.WARN)
+  end
+  call('rabbitmq.publish', { connection = conn, exchange = exchange, routing_key = routing_key, payload = payload }, function()
+    notify(('published to %s%s'):format(exchange ~= '' and exchange or '(default) ', routing_key))
   end)
+end
+
+--- Opens (or jumps back to) the editable publish buffer for `conn` -- one
+--- per connection, so the last message is there to tweak and publish again.
+function M.open_publish(conn)
+  local existing = publish_buffers[conn]
+  if existing and vim.api.nvim_buf_is_valid(existing) then
+    local win = vim.fn.bufwinid(existing)
+    if win ~= -1 then
+      vim.api.nvim_set_current_win(win)
+    else
+      vim.cmd.tabnew()
+      vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), existing)
+    end
+    return
+  end
+  local buf = vim.api.nvim_create_buf(true, true)
+  publish_buffers[conn] = buf
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  pcall(vim.api.nvim_buf_set_name, buf, ('tradar-rabbitmq://%s/publish [%d]'):format(conn, buf))
+  vim.b[buf].tradar_rabbitmq = { connection = conn }
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, PUBLISH_TEMPLATE)
+  local p = require('tradar').rpc_opts().prefix or '<leader>r'
+  vim.api.nvim_buf_create_user_command(buf, 'TradarRabbitmqPublish', function() M.submit(buf) end, {})
+  vim.keymap.set('n', p .. 'r', function() M.submit(buf) end, { buffer = buf, desc = 'tradar: publish message' })
+  vim.keymap.set('n', 'g?', function()
+    vim.lsp.util.open_floating_preview({
+      '# tradar: RabbitMQ publish buffer',
+      ('- `%sr` / `:TradarRabbitmqPublish` publish this message'):format(p),
+      '- `exchange:` (blank = default) and `routing-key:` (the queue name for the default exchange)',
+      '- the payload is everything after the blank line',
+    }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
+  end, { buffer = buf, desc = 'tradar: show keymap help' })
+  vim.cmd.tabnew()
+  vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), buf)
+  vim.api.nvim_win_set_cursor(0, { 3, 12 })
+end
+
+--- `:TradarRabbitmqPublish [connection]`: inside a publish buffer it
+--- publishes that buffer; elsewhere it opens the connection's buffer.
+function M.publish(name)
+  if (name == nil or name == '') and vim.b.tradar_rabbitmq then return M.submit(vim.api.nvim_get_current_buf()) end
+  with_connection(name, M.open_publish)
 end
 
 return M

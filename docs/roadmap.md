@@ -50,7 +50,8 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] Buffer kết quả: JSON view cho SQL, row view `gK`, sửa staged + commit — `docs/backlog/result-buffer-views-staged-edit-2026-10-20.md`
 - [x] `:TradarConnections` + sửa Socket tail/tail buffer — `docs/backlog/nvim-connections-tail-fixes-2026-10-20.md`
 - [x] HTTP: buffer request sửa được — `docs/backlog/http-request-buffer-2026-10-21.md`
-- [ ] RabbitMQ publish nhiều dòng + peek/bindings refresh; Kafka tail lọc/clear/tạm dừng/nối lại — xem mục "Rà, chưa làm" trong `docs/backlog/nvim-connections-tail-fixes-2026-10-20.md`
+- [x] RabbitMQ publish buffer + refresh — `docs/backlog/rabbitmq-publish-buffer-2026-10-21.md`
+- [ ] Kafka tail: lọc/clear/tạm dừng/nối lại — xem "Rà, chưa làm" trong `docs/backlog/nvim-connections-tail-fixes-2026-10-20.md`
 - [ ] Quyết định cuối: bỏ hẳn TUI hay giữ đóng băng
 - [ ] Tách phần client dùng chung giữa connector crate (TUI) và module `tradar-server` — **chủ đích chưa làm** (rà 2026-10-19). Đang bị chép: RabbitMQ `parse_target`/`RabbitTarget`/`request`/`PEEK_COUNT`/thân request peek; HTTP `parse_headers`/`resolve_url`; Kafka `ephemeral_group_id`/probe metadata/`list_topics`; Socket `hex_preview`/`chunk_text` và hằng số 500 của ring buffer. Chỉ là các hàm thuần và hằng số (vài trăm dòng, ít đổi) — phần khác nhau mới là phần lớn (TUI bọc trong `tick()`/event queue, server bọc trong notification push), nên không có `Session` hay `Extension` nào để gộp. Để server dùng chung thì chỉ có hai đường: phụ thuộc thẳng `tradar-connector-*` (kéo `ratatui`/UI TUI vào server) hoặc một crate chung mới (một crate cho cả bốn backend, không phải mỗi backend một crate). **Chỉ làm khi**: quyết định *giữ* TUI lâu dài, hoặc một lỗi phải sửa ở cả hai bản. Nếu quyết định *bỏ* TUI thì phần trùng lặp tự biến mất — tách trước sẽ là công cốc.
 - [ ] Đóng gói: đường dẫn socket dài hơn ~108 byte, Windows named pipe
