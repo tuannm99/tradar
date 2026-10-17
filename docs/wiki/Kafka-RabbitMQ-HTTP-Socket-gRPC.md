@@ -28,15 +28,24 @@ Bỏ trống `queue`/`exchange` thì chọn qua picker (queue kèm số `ready`/
 
 ## HTTP
 
-Client kiểu Postman, từng bước một.
+Client kiểu Postman: request là một **buffer sửa được**.
 
 | Lệnh | Việc |
 |---|---|
 | `:TradarHttpConnect [tên]` | ghi nhận connection (không gọi ra ngoài, nên không bao giờ lỗi) |
-| `:TradarHttpSend [tên]` | hỏi lần lượt method, URL, headers, body rồi gửi |
+| `:TradarHttpSend [tên]` | mở buffer request của connection (đang đứng trong buffer request thì gửi luôn); `<leader>rr` cũng gửi |
 
-- URL bắt đầu bằng `http://` hoặc `https://` dùng nguyên văn; còn lại được nối vào `target` của connection làm base.
-- Headers gõ trên **một dòng**, phân tách bằng `;`: `Authorization: Bearer abc; Accept: application/json`. Bỏ trống = không có header.
+```
+# comment (trước dòng trống thì bị bỏ qua)
+POST /users
+Content-Type: application/json
+
+{"name": "ann"}
+```
+
+- Dòng đầu: `METHOD url` (chỉ có URL = `GET`). URL bắt đầu bằng `http://`/`https://` dùng nguyên văn; còn lại được nối vào `target` của connection làm base.
+- Các dòng `Key: Value` tiếp theo là headers, đến dòng trống đầu tiên; từ đó trở xuống là body (nhiều dòng thoải mái).
+- Mỗi connection có một buffer request riêng, giữ nguyên nội dung trong phiên Neovim để sửa nhẹ rồi gửi lại. Buffer sửa được nên `q` không bị chiếm — đóng bằng `:q`/`:tabclose`.
 - Response (status, headers, body) hiện trong split `tradar://http`, dùng lại cho mọi lần gửi.
 
 ## Socket (raw TCP, kiểu netcat)
