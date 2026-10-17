@@ -3,6 +3,12 @@ local M = {}
 
 function M.check()
   vim.health.start('tradar')
+  -- The plugin uses `vim.keycode` / `vim.islist` (both 0.10).
+  if vim.fn.has('nvim-0.10') == 1 then
+    vim.health.ok('Neovim ' .. tostring(vim.version()))
+  else
+    vim.health.error('Neovim >= 0.10 is required (vim.keycode, vim.islist)', { 'upgrade Neovim' })
+  end
   local rpc = require('tradar.rpc')
   local cmd = rpc.server_cmd({})
   if cmd then

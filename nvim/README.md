@@ -36,7 +36,7 @@ cargo build --release -p tradar-server        # trong repo tradar
 
 ## Dùng
 
-Connection lấy từ `~/.config/tradar/connections.toml` (cùng file với TUI). Gắn một file `.sql` vào connection bằng dòng đầu file:
+Connection lấy từ `~/.config/tradar/connections.toml` (cùng file với TUI); `:TradarConnections` mở đúng file server đang đọc (có template nếu chưa có, `:w` là server thấy ngay và plugin báo số connection hoặc lỗi TOML), picker `:TradarConnect` cũng có dòng `+ edit connections file…`. Gắn một file `.sql` vào connection bằng dòng đầu file:
 
 ```sql
 -- tradar: tên-connection
@@ -62,11 +62,11 @@ Khác hẳn SQL/Mongo/Redis/Elasticsearch: không có buffer nguồn nào gắn 
 
 ### Kafka tail
 
-Tail realtime một topic Kafka qua `tradar-server`, yêu cầu build server với `cargo build -p tradar-server --features kafka` (không nằm trong `default`, xem CLAUDE.md). `:TradarKafkaConnect [tên]` (picker nếu bỏ trống, lọc `driver = "kafka"`), rồi `:TradarKafkaTail [tên] [topic]` — bỏ trống phần nào thì hỏi qua `vim.ui.select`, luôn hỏi tail từ `latest` hay `earliest`. Mở một buffer transcript cuộn (tab mới, không sửa được, giống panel Topics mode của TUI) — mỗi dòng mới nhận được nối vào cuối, `q` dừng tail và đóng (buffer tự `bufhidden = wipe`, đóng cửa sổ cuối cùng là dừng luôn subscription phía server). `g?` xem lại phím. Khác gRPC/SQL: server **đẩy** dòng mới về (JSON-RPC notification `kafka.tail.message`, không phải trả lời một request), nên không có khái niệm "chạy xong" hay `<leader>rx` huỷ — chỉ có dừng hẳn bằng `q`. Mỗi lần `:TradarKafkaTail` là một consumer Kafka riêng (nhóm consumer group dùng-một-lần, không chia tải với ai) — tail hai lần cùng một topic thấy đúng hai luồng độc lập, không phải chia đôi dữ liệu.
+Tail realtime một topic Kafka qua `tradar-server`, yêu cầu build server với `cargo build -p tradar-server --features kafka` (không nằm trong `default`, xem CLAUDE.md). `:TradarKafkaConnect [tên]` (picker nếu bỏ trống, lọc `driver = "kafka"`), rồi `:TradarKafkaTail [tên] [topic]` — bỏ trống phần nào thì hỏi qua `vim.ui.select`, luôn hỏi tail từ `latest` hay `earliest`. Mở một buffer transcript cuộn (tab mới, không sửa được, giống panel Topics mode của TUI) — mỗi dòng mới nhận được nối vào cuối (con trỏ chỉ bám theo khi đang ở dòng cuối; giữ 5000 dòng gần nhất), `q` dừng tail và đóng (buffer tự `bufhidden = wipe`, đóng cửa sổ cuối cùng là dừng luôn subscription phía server). `g?` xem lại phím. Khác gRPC/SQL: server **đẩy** dòng mới về (JSON-RPC notification `kafka.tail.message`, không phải trả lời một request), nên không có khái niệm "chạy xong" hay `<leader>rx` huỷ — chỉ có dừng hẳn bằng `q`. Mỗi lần `:TradarKafkaTail` là một consumer Kafka riêng (nhóm consumer group dùng-một-lần, không chia tải với ai) — tail hai lần cùng một topic thấy đúng hai luồng độc lập, không phải chia đôi dữ liệu.
 
 ### Socket tail
 
-Raw TCP, netcat-style, qua `tradar-server` — cùng kênh đẩy với Kafka tail, trong `default` (không cần toolchain gì thêm, khác `kafka`). `:TradarSocketTail [tên]` (picker nếu bỏ trống, lọc `driver = "socket"`) mở ngay một buffer transcript (tab mới, insert mode sẵn) — khác Kafka: buffer này **sửa được** và **hai chiều**: gõ một dòng rồi `<CR>` ở dòng cuối cùng là gửi, phản hồi (nếu có) tự nối vào ngay dưới. `›` đánh dấu dòng đã gửi, `‹` dòng nhận được — cùng ký hiệu TUI's Socket screen đã dùng. `q` dừng hẳn (đóng kết nối TCP phía server) và đóng buffer; `g?` xem lại phím. Không có bước connect riêng như Kafka/gRPC — một connection Socket *là* chính phiên TCP đó, nên `:TradarSocketTail` vừa mở vừa dial luôn; gọi lại lần hai cùng connection mở một phiên TCP độc lập hoàn toàn (một netcat session khác), không chia sẻ gì với phiên trước.
+Raw TCP, netcat-style, qua `tradar-server` — cùng kênh đẩy với Kafka tail, trong `default` (không cần toolchain gì thêm, khác `kafka`). `:TradarSocketTail [tên]` (picker nếu bỏ trống, lọc `driver = "socket"`) mở ngay một buffer transcript (tab mới, insert mode sẵn) — khác Kafka: buffer này **sửa được** và **hai chiều**: dòng cuối cùng là dòng nhập (kiểu prompt REPL): gõ rồi `<CR>` (normal hoặc insert) là gửi và xoá dòng nhập; dòng gửi/nhận chèn phía trên nó, buffer giữ 5000 dòng gần nhất. `›` đánh dấu dòng đã gửi, `‹` dòng nhận được — cùng ký hiệu TUI's Socket screen đã dùng. `q` dừng hẳn (đóng kết nối TCP phía server) và đóng buffer; `g?` xem lại phím. Không có bước connect riêng như Kafka/gRPC — một connection Socket *là* chính phiên TCP đó, nên `:TradarSocketTail` vừa mở vừa dial luôn; gọi lại lần hai cùng connection mở một phiên TCP độc lập hoàn toàn (một netcat session khác), không chia sẻ gì với phiên trước.
 
 ### RabbitMQ
 
@@ -117,7 +117,7 @@ Trong buffer kết quả: `i` sửa ô (nhập giá trị — gõ `NULL` để �
 
 Buffer kết quả **không có sort/filter theo cột** như TUI — chủ đích: Neovim đã có sẵn editor SQL thật ngay cạnh, sửa `ORDER BY`/`WHERE` rồi `<leader>rr` chạy lại tiện hơn một UI tương tác riêng.
 
-Statusline: `require('tradar').status()` (chuỗi rỗng ngoài buffer SQL).
+Cần Neovim ≥ 0.10 (`:checkhealth tradar` kiểm tra). Statusline: `require('tradar').status()` (chuỗi rỗng ngoài buffer SQL).
 Completion: nguồn `blink.cmp` `tradar.blink` (hoặc `omnifunc`).
 
 ## An toàn

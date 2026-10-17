@@ -9,7 +9,7 @@ driver = "postgres"              # id của connector (bảng dưới)
 target = "postgres://user:password@localhost:5432/mydb"
 ```
 
-Thêm/sửa/xoá được ngay trong connection picker của TUI (`a`/`e`/`d`), hoặc sửa tay file này. Lưu ý: khi lưu từ TUI, file bị ghi lại theo định dạng TOML chuẩn, nên comment và thứ tự key bạn viết tay sẽ mất.
+Thêm/sửa/xoá được ngay trong connection picker của TUI (`a`/`e`/`d`), hoặc sửa tay file này — trong Neovim gõ `:TradarConnections` (hoặc chọn dòng `+ edit connections file…` cuối picker của `:TradarConnect`) để mở đúng file mà server đang đọc; file mới thì có sẵn template comment. Server đọc lại file mỗi lần dùng nên chỉ cần `:w`, và mỗi lần lưu plugin kiểm tra ngay: đếm số connection, hoặc báo lỗi TOML kèm dòng/cột. Lưu ý: khi lưu từ TUI, file bị ghi lại theo định dạng TOML chuẩn, nên comment và thứ tự key bạn viết tay sẽ mất.
 
 ## `driver` và `target`
 

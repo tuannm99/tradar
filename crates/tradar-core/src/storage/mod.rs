@@ -566,6 +566,11 @@ impl ConnectionStore {
         Self { path }
     }
 
+    /// The `connections.toml` this store reads and writes.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     pub fn load(&self) -> anyhow::Result<Vec<SavedConnection>> {
         if !self.path.exists() {
             return Ok(Vec::new());
