@@ -5655,6 +5655,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "testcontainers",
  "tokio",
  "tokio-stream",
  "tonic",
