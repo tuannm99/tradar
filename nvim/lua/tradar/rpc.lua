@@ -10,6 +10,9 @@ local pipe, buffer, pending, next_id = nil, '', {}, 0
 --- docs/backlog/push-channel-design-2026-10-14.md) rather than a reply to
 --- a request this client made -- `kafka.tail.message` today.
 local notification_handlers = {}
+--- Callbacks run when the connection to the server is lost (not on a
+--- deliberate `M.close`) -- a tail buffer uses it to resubscribe.
+local disconnect_handlers = {}
 
 --- Kept in sync by hand with `tradar_server::protocol::PROTOCOL_VERSION.0`
 --- -- see that constant's own doc comment for the bump convention and why
@@ -76,6 +79,7 @@ local function on_data(err, chunk)
     for _, cb in pairs(waiting) do
       vim.schedule(function() cb('tradar-server closed the connection') end)
     end
+    for _, cb in ipairs(vim.list_slice(disconnect_handlers)) do vim.schedule(cb) end
     return
   end
   buffer = buffer .. chunk
@@ -185,6 +189,19 @@ function M.on(method, cb)
     for i, h in ipairs(handlers or {}) do
       if h == cb then
         table.remove(handlers, i)
+        break
+      end
+    end
+  end
+end
+
+--- Registers `cb` for a lost connection; returns an unsubscribe function.
+function M.on_disconnect(cb)
+  table.insert(disconnect_handlers, cb)
+  return function()
+    for i, h in ipairs(disconnect_handlers) do
+      if h == cb then
+        table.remove(disconnect_handlers, i)
         break
       end
     end
