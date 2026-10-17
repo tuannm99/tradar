@@ -3,7 +3,7 @@ DOCKER_SERVICES := postgres mysql redis mongo elasticsearch5 elasticsearch7 elas
 .PHONY: help build build-slim run fmt fmt-check clippy check \
 	test test-unit test-docker \
 	test-core test-connector-spi test-workbench test-app \
-	test-sqlite test-socket test-postgres test-mysql test-redis test-mongo test-elasticsearch test-clickhouse test-http \
+	test-sqlite test-socket test-kafka test-kafka-server test-postgres test-mysql test-redis test-mongo test-elasticsearch test-clickhouse test-http \
 	up down ps
 
 CARGO := cargo
@@ -58,7 +58,7 @@ test-unit: ## Tests that never touch Docker or need Kafka's native toolchain (cm
 	$(CARGO) test -p tradar-app --no-default-features \
 		--features postgres,mysql,sqlite,mongo,elasticsearch,redis,cassandra,clickhouse,rabbitmq,http,socket
 
-test-docker: test-postgres test-mysql test-redis test-mongo test-elasticsearch test-cassandra test-clickhouse test-rabbitmq test-kafka test-http ## Every connector whose tests need a Docker daemon (testcontainers)
+test-docker: test-postgres test-mysql test-redis test-mongo test-elasticsearch test-cassandra test-clickhouse test-rabbitmq test-kafka test-kafka-server test-http ## Every connector whose tests need a Docker daemon (testcontainers)
 
 test-core: ## tradar-core only (keymap, storage, theme, config, ui, vim_list)
 	$(CARGO) test -p tradar-core --lib
@@ -104,6 +104,9 @@ test-rabbitmq: ## tradar-connector-rabbitmq only -- needs Docker (testcontainers
 
 test-kafka: ## tradar-connector-kafka only -- needs Docker (testcontainers, GenericImage since no testcontainers-modules support)
 	$(CARGO) test -p tradar-connector-kafka --lib
+
+test-kafka-server: ## tradar-server's kafka.* end to end -- needs Docker + the `kafka` feature; set TRADAR_DOCKER_HOST_NETWORK=1 on a Docker without a bridge network
+	$(CARGO) test -p tradar-server --features kafka --test rpc_kafka
 
 test-http: ## tradar-connector-http only -- needs Docker (testcontainers, GenericImage; no long-lived compose service since it targets arbitrary URLs, not one fixed backend)
 	$(CARGO) test -p tradar-connector-http --lib

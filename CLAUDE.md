@@ -38,7 +38,7 @@ This is a Rust project built with Cargo (edition 2024).
 - Format: `cargo fmt`
 - Check without building: `cargo check`
 
-Ten of the twelve connectors' tests (Postgres, MySQL, Redis, Mongo, Elasticsearch, Cassandra, ClickHouse, RabbitMQ, Kafka, HTTP — everything but SQLite/Socket) spin up a real backend via `testcontainers`/`testcontainers-modules`, which requires a working Docker daemon. If Docker isn't available, run `make test-unit` (excludes those ten connector crates plus `tradar-app`, then runs `tradar-app`'s own tests separately with a trimmed feature set so building it doesn't pull in `kafka`'s native toolchain requirement) to exercise everything else; `make test-docker` runs just the Docker-dependent ones. Most cargo invocations need `--workspace` to cover every crate (e.g. `cargo clippy --all-targets --workspace -- -D warnings`).
+Ten of the twelve connectors' tests (Postgres, MySQL, Redis, Mongo, Elasticsearch, Cassandra, ClickHouse, RabbitMQ, Kafka, HTTP — everything but SQLite/Socket) spin up a real backend via `testcontainers`/`testcontainers-modules`, which requires a working Docker daemon. If Docker isn't available, run `make test-unit` (excludes those ten connector crates plus `tradar-app`, then runs `tradar-app`'s own tests separately with a trimmed feature set so building it doesn't pull in `kafka`'s native toolchain requirement) to exercise everything else; `make test-docker` runs just the Docker-dependent ones (including `make test-kafka-server`, `tradar-server`'s own Kafka end-to-end test; on a Docker without a bridge network set `TRADAR_DOCKER_HOST_NETWORK=1`). Most cargo invocations need `--workspace` to cover every crate (e.g. `cargo clippy --all-targets --workspace -- -D warnings`).
 
 ## Documentation language
 
