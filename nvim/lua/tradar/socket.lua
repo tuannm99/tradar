@@ -39,7 +39,7 @@ local function with_connection(name, cb)
   call('connections.list', nil, function(list)
     local usable = vim.tbl_filter(function(c) return c.driver == 'socket' end, list)
     if #usable == 0 then
-      return notify('no saved connection with driver = "socket" -- add one to connections.toml', vim.log.levels.WARN)
+      return notify('no saved connection with driver = "socket" -- add one with :TradarConnections', vim.log.levels.WARN)
     end
     vim.ui.select(usable, {
       prompt = 'tradar Socket connection',
@@ -52,16 +52,7 @@ local function with_connection(name, cb)
   end)
 end
 
-local function append(buf, lines)
-  if not vim.api.nvim_buf_is_valid(buf) then return end
-  vim.bo[buf].modifiable = true
-  local total = vim.api.nvim_buf_line_count(buf)
-  local at = (total == 1 and vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] == '') and 0 or total
-  vim.api.nvim_buf_set_lines(buf, at, total, false, lines)
-  vim.bo[buf].modifiable = false
-  local win = vim.fn.bufwinid(buf)
-  if win ~= -1 then vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 }) end
-end
+local function append(buf, lines) require('tradar.tail').append(buf, lines, { input = true }) end
 
 --- One `socket.tail.message` as transcript text -- `›`/`‹` for sent/received,
 --- same markers `tradar-connector-socket`'s own `format_entry` uses in the TUI.
@@ -108,14 +99,24 @@ local function open_tail(conn)
     notify(err, vim.log.levels.ERROR)
   end)
 
-  --- `<CR>` on the last line sends it (like a REPL/terminal input line);
-  --- anywhere else it's a plain newline, so pasted/received transcript
-  --- text can still be navigated and yanked normally.
+  --- The last line is the input line (like a REPL prompt): received/sent
+  --- lines land above it. `<CR>` on it sends and clears it, in normal and
+  --- insert mode; anywhere else it keeps its plain meaning, so the
+  --- transcript above can still be navigated and yanked.
+  local function submit()
+    local line = vim.api.nvim_get_current_line()
+    vim.api.nvim_set_current_line('')
+    M.send(buf, line)
+  end
   vim.keymap.set('n', '<CR>', function()
-    local row = vim.api.nvim_win_get_cursor(0)[1]
-    if row ~= vim.api.nvim_buf_line_count(buf) then return end
-    M.send(buf, vim.api.nvim_get_current_line())
-  end, { buffer = buf, desc = 'tradar: send this line' })
+    if vim.api.nvim_win_get_cursor(0)[1] ~= vim.api.nvim_buf_line_count(buf) then return end
+    submit()
+  end, { buffer = buf, desc = 'tradar: send the input line' })
+  vim.keymap.set('i', '<CR>', function()
+    if vim.api.nvim_win_get_cursor(0)[1] ~= vim.api.nvim_buf_line_count(buf) then return '<CR>' end
+    vim.schedule(submit)
+    return ''
+  end, { buffer = buf, expr = true, desc = 'tradar: send the input line' })
   vim.keymap.set('n', 'q', function()
     local win = vim.fn.bufwinid(buf)
     if win ~= -1 then vim.api.nvim_win_close(win, true) end
@@ -123,7 +124,8 @@ local function open_tail(conn)
   vim.keymap.set('n', 'g?', function()
     vim.lsp.util.open_floating_preview({
       '# tradar: Socket tail buffer',
-      '- `<CR>` on the last line sends it',
+      '- the last line is the input: `<CR>` on it sends and clears it',
+      ('- keeps the last %d lines'):format(require('tradar.tail').MAX_LINES),
       '- `q` stop this tail and close',
       '- `›` sent, `‹` received',
     }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })

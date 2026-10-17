@@ -4,6 +4,7 @@ vim.g.loaded_tradar = true
 local function t() return require('tradar') end
 
 vim.api.nvim_create_user_command('TradarConnect', function(a) t().connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarConnections', function() t().edit_connections() end, {})
 vim.api.nvim_create_user_command('TradarRun', function(a)
   if a.range > 0 then t().run(a.line1, a.line2) else t().run() end
 end, { range = true })

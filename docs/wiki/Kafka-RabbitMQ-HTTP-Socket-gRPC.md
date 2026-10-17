@@ -11,7 +11,7 @@ Cần `tradar-server` build với `--features kafka` ([Cài đặt](Cai-dat)).
 | `:TradarKafkaConnect [tên]` | kết nối (kiểm tra metadata broker ngay) |
 | `:TradarKafkaTail [tên] [topic]` | tail realtime một topic |
 
-`:TradarKafkaTail` bỏ trống phần nào thì hỏi phần đó, và luôn hỏi tail từ `latest` hay `earliest`. Kết quả là một buffer cuộn trong tab mới, **không sửa được**; message mới tự nối vào cuối. `q` dừng tail và đóng. Mỗi lần tail là một consumer riêng dùng-một-lần (không join consumer group thật) — tail hai lần cùng topic cho hai luồng độc lập, không chia đôi dữ liệu. Topic nội bộ `__*` bị ẩn.
+`:TradarKafkaTail` bỏ trống phần nào thì hỏi phần đó, và luôn hỏi tail từ `latest` hay `earliest`. Kết quả là một buffer cuộn trong tab mới, **không sửa được**; message mới tự nối vào cuối — con trỏ chỉ bám theo khi đang đứng ở dòng cuối (cuộn lên đọc thì buffer đứng yên), và chỉ giữ 5000 dòng gần nhất. `q` dừng tail và đóng. Mỗi lần tail là một consumer riêng dùng-một-lần (không join consumer group thật) — tail hai lần cùng topic cho hai luồng độc lập, không chia đôi dữ liệu. Topic nội bộ `__*` bị ẩn.
 
 ## RabbitMQ
 
@@ -41,7 +41,7 @@ Client kiểu Postman, từng bước một.
 
 ## Socket (raw TCP, kiểu netcat)
 
-`:TradarSocketTail [tên]` — không có bước connect riêng, lệnh này vừa kết nối vừa mở transcript. Buffer **sửa được và hai chiều**: gõ một dòng rồi `<CR>` ở dòng cuối cùng để gửi; phản hồi tự nối vào bên dưới. `›` đánh dấu dòng đã gửi, `‹` dòng nhận được. Nội dung nhị phân hiện hex preview. `q` đóng kết nối TCP và buffer. Gọi lại cùng connection mở một phiên TCP độc lập khác. Chưa hỗ trợ UDP hay TLS.
+`:TradarSocketTail [tên]` — không có bước connect riêng, lệnh này vừa kết nối vừa mở transcript. Buffer **sửa được và hai chiều**: dòng cuối cùng là dòng nhập (như prompt REPL): gõ rồi `<CR>` (normal hoặc insert) để gửi và xoá dòng nhập; dòng gửi/nhận luôn chèn phía trên nó. Giữ 5000 dòng gần nhất. `›` đánh dấu dòng đã gửi, `‹` dòng nhận được. Nội dung nhị phân hiện hex preview. `q` đóng kết nối TCP và buffer. Gọi lại cùng connection mở một phiên TCP độc lập khác. Chưa hỗ trợ UDP hay TLS.
 
 ## gRPC
 

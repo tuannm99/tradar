@@ -69,7 +69,7 @@ local function with_connection(name, cb)
   call('connections.list', nil, function(list)
     local usable = vim.tbl_filter(function(c) return c.driver == 'grpc' end, list)
     if #usable == 0 then
-      return notify('no saved connection with driver = "grpc" -- add one to connections.toml', vim.log.levels.WARN)
+      return notify('no saved connection with driver = "grpc" -- add one with :TradarConnections', vim.log.levels.WARN)
     end
     vim.ui.select(usable, {
       prompt = 'tradar gRPC connection',

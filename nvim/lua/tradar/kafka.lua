@@ -43,7 +43,7 @@ local function with_connection(name, cb)
   call('connections.list', nil, function(list)
     local usable = vim.tbl_filter(function(c) return c.driver == 'kafka' end, list)
     if #usable == 0 then
-      return notify('no saved connection with driver = "kafka" -- add one to connections.toml', vim.log.levels.WARN)
+      return notify('no saved connection with driver = "kafka" -- add one with :TradarConnections', vim.log.levels.WARN)
     end
     vim.ui.select(usable, {
       prompt = 'tradar Kafka connection',
@@ -69,18 +69,7 @@ local function pick_from(cb)
   vim.ui.select({ 'latest', 'earliest' }, { prompt = 'tail from' }, function(choice) if choice then cb(choice) end end)
 end
 
-local function append(buf, lines)
-  if not vim.api.nvim_buf_is_valid(buf) then return end
-  vim.bo[buf].modifiable = true
-  local total = vim.api.nvim_buf_line_count(buf)
-  -- The buffer opens with one empty placeholder line; the first real
-  -- message replaces it instead of leaving a blank line above the tail.
-  local at = (total == 1 and vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] == '') and 0 or total
-  vim.api.nvim_buf_set_lines(buf, at, total, false, lines)
-  vim.bo[buf].modifiable = false
-  local win = vim.fn.bufwinid(buf)
-  if win ~= -1 then vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 }) end
-end
+local append = require('tradar.tail').append
 
 --- One `kafka.tail.message` line as transcript text -- `key: value`, an
 --- empty key omitted, same shape the TUI's own Kafka Topics mode renders.
@@ -134,7 +123,8 @@ local function open_tail(conn, topic, from)
     vim.lsp.util.open_floating_preview({
       '# tradar: Kafka tail buffer',
       '- `q` stop this tail and close',
-      '- read-only transcript, newest message at the bottom',
+      '- read-only transcript; follows the newest message while the cursor is on the last line',
+      ('- keeps the last %d lines'):format(require('tradar.tail').MAX_LINES),
     }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
   end, { buffer = buf, desc = 'tradar: show keymap help' })
 

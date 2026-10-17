@@ -171,6 +171,9 @@ impl Server {
             "version" => Ok(self.version()),
             "connectors.list" => Ok(self.connectors()),
             "connections.list" => self.connections(),
+            "connections.path" => Ok(json!({
+                "path": self.store.as_ref().map(|s| s.path().display().to_string()),
+            })),
             "connect" => self.connect(params).await,
             "disconnect" => self.disconnect(params),
             "status" => self.status(params).await,
@@ -654,5 +657,28 @@ mod tests {
 
         assert_eq!(response["result"]["major"], PROTOCOL_VERSION.0);
         assert_eq!(response["result"]["minor"], PROTOCOL_VERSION.1);
+    }
+
+    #[tokio::test]
+    async fn connections_path_reports_the_store_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.toml");
+        let server = Server::new(
+            HashMap::new(),
+            Some(tradar_core::storage::ConnectionStore::at(path.clone())),
+        );
+        async fn call(server: &Server) -> Value {
+            server
+                .handle(
+                    json!({"jsonrpc": "2.0", "id": 1, "method": "connections.path"}),
+                    &ClientConnection::detached(),
+                )
+                .await
+        }
+        assert_eq!(
+            call(&server).await["result"]["path"],
+            path.display().to_string()
+        );
+        assert!(call(&Server::new(HashMap::new(), None)).await["result"]["path"].is_null());
     }
 }
