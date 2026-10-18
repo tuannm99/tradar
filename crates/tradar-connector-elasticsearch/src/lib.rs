@@ -27,7 +27,72 @@ impl ElasticsearchDriver {
     }
 }
 
+/// Kibana Dev Tools lets a request carry comments -- `# line` anywhere,
+/// `// line` and `/* block */` inside the body -- and a commented-out clause
+/// is the most ordinary thing to leave in a query buffer, so they are
+/// dropped before the request is read (a body with one would otherwise fail
+/// the local JSON check). `#` only counts at the start of a line (a JSON
+/// string cannot span lines, so no body line legitimately starts with it);
+/// `//` and `/* */` are only looked for in the body, string-aware, so a
+/// path or a `"http://..."` value is never mistaken for one.
+fn strip_comments(query: &str) -> String {
+    let query: String = query
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let query = query.trim_start();
+    let (request_line, body) = match query.split_once('\n') {
+        Some((first, rest)) => (first, rest),
+        None => return query.to_string(),
+    };
+    let chars: Vec<char> = body.chars().collect();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => {
+                out.push('"');
+                i += 1;
+                while i < chars.len() {
+                    out.push(chars[i]);
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                        out.push(chars[i]);
+                    } else if chars[i] == '"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'/') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                    if chars[i] == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+                i = (i + 2).min(chars.len());
+                out.push(' ');
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    format!("{request_line}\n{out}")
+}
+
 fn parse_query(query: &str) -> Option<(String, String, Option<String>)> {
+    let query = strip_comments(query);
     let mut lines = query.lines();
     let first = lines.next()?.trim();
     let mut parts = first.splitn(2, char::is_whitespace);
@@ -821,6 +886,28 @@ mod tests {
         assert_eq!(method, "POST");
         assert_eq!(path, "my-index/_search");
         assert_eq!(body.as_deref(), Some("{\"query\": {\"match_all\": {}}}"));
+    }
+
+    #[test]
+    fn parse_query_ignores_hash_line_and_block_comments_like_kibana() {
+        let (method, path, body) = parse_query(
+            "# find recent\nPOST my-index/_search\n{\n  // \"size\": 5,\n  \"query\": {\"match_all\": {}}, /* all */\n  # \"sort\": []\n  \"note\": \"see http://x/y # not a comment\"\n}",
+        )
+        .unwrap();
+
+        assert_eq!(method, "POST");
+        assert_eq!(path, "my-index/_search");
+        let parsed: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"query": {"match_all": {}}, "note": "see http://x/y # not a comment"})
+        );
+    }
+
+    #[test]
+    fn a_double_slash_in_the_request_path_is_not_a_comment() {
+        let (_, path, _) = parse_query("GET a//b/_search\n{}").unwrap();
+        assert_eq!(path, "a//b/_search");
     }
 
     #[test]

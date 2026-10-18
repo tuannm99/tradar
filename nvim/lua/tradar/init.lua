@@ -107,13 +107,21 @@ function M.connection_for(buf)
   return vim.b[buf].tradar_connection or modeline(buf) or project_file(buf) or state.default
 end
 
+--- Whether `buf` is a `.tdb` file: by filetype, or -- when that did not get
+--- set (the plugin loaded after the buffer, a filetype override) -- by name, so
+--- the fences are never sent to the server as if they were a query.
+function M.is_tdb(buf)
+  buf = resolve_buf(buf)
+  return vim.bo[buf].filetype == 'tdb' or vim.api.nvim_buf_get_name(buf):match('%.tdb$') ~= nil
+end
+
 --- The fenced block (see `tradar.blocks`) 1-based `row` falls inside, for
 --- a `.tdb` buffer -- `nil` for every other filetype (block syntax is
 --- `.tdb`-only) and for a `.tdb` row that isn't inside any block. `loose`:
 --- a fence line belongs to its block too (what `M.run` wants).
 function M.block_at(buf, row, loose)
   buf = resolve_buf(buf)
-  if vim.bo[buf].filetype ~= 'tdb' then return nil end
+  if not M.is_tdb(buf) then return nil end
   return blocks.at(vim.api.nvim_buf_get_lines(buf, 0, -1, false), row, loose)
 end
 
@@ -808,7 +816,7 @@ function M.run(range_start, range_end, all, transform)
   -- of which only know real buffer coordinates.
   local base_row = 0
   local lines
-  if vim.bo[buf].filetype == 'tdb' then
+  if M.is_tdb(buf) then
     local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
     local block = M.block_at(buf, cursor_row, true)
     if not block then
@@ -1639,7 +1647,7 @@ end
 function M.text_before_cursor(buf, row, col)
   buf = resolve_buf(buf)
   local from = 0
-  if vim.bo[buf].filetype == 'tdb' then
+  if M.is_tdb(buf) then
     local block = M.block_at(buf, row)
     if not block then return nil end
     from = block.start - 1
@@ -1746,14 +1754,18 @@ end
 function M.maybe_attach(buf)
   buf = resolve_buf(buf)
   if vim.b[buf].tradar_attached then return end
-  if vim.bo[buf].filetype == 'sql' or modeline(buf) then M.attach(buf) end
+  if vim.bo[buf].filetype == 'sql' or M.is_tdb(buf) or modeline(buf) then M.attach(buf) end
 end
 
 function M.setup(user)
   opts = user or {}
   local ok, wk = pcall(require, 'which-key')
   if ok and wk.add then wk.add({ { opts.prefix or '<leader>r', group = 'database (tradar)' } }) end
-  M.maybe_attach(0)
+  -- Buffers that were read before setup() ran (a lazy-loaded plugin) missed
+  -- their FileType/BufReadPost events.
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(b) then M.maybe_attach(b) end
+  end
 end
 
 --- The `setup{}` table (socket path, `server_cmd`, ...), so other modules
