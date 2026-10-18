@@ -49,6 +49,10 @@ Tên connection không có trong `~/.config/tradar/connections.toml`, hoặc có
 
 `tradar-server` của bạn build không có Kafka. Build lại với `--features kafka` ([Cài đặt](Cai-dat)).
 
+## File `.tdb` không tô màu, hoặc `rr` gửi cả dòng ``` lên server
+
+Filetype của file không phải `tdb` (gõ `:set ft?`). Thường gặp khi plugin load muộn hơn lúc buffer được đọc: Neovim tự đoán `.tdb` là `conf` (nhất là khi dòng đầu bắt đầu bằng `#`). Plugin đã tự sửa (thư mục `ftdetect/`, và tự đặt lại filetype cho buffer đang mở khi plugin load), tự bật highlight markdown (treesitter, không có parser thì dùng syntax markdown) và nhận `.tdb` theo đuôi file kể cả khi filetype bị ghi đè — nếu vẫn thấy sai, kiểm tra `:verbose set ft?` xem plugin nào đặt nó, và dùng `lazy = false` ([Cài đặt](Cai-dat)). Tô màu đúng cho từng fence còn cần parser treesitter của `markdown` và của dialect trong fence (`sql`, `javascript`, `json`).
+
 ## Không sửa được ô / xoá được dòng trong kết quả
 
 Kết quả chỉ sửa được khi đến từ **một bảng có khoá chính** và cột khoá có trong kết quả. Plugin sẽ nói rõ lý do cụ thể. Với kết quả `JOIN` nhiều bảng thì không sửa được.

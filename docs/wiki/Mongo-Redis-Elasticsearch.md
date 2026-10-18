@@ -37,6 +37,7 @@ GET /my-index/_search
 { "query": { "match_all": {} } }
 ```
 
+- Comment kiểu Kibana được bỏ trước khi gửi: dòng bắt đầu bằng `#` ở bất kỳ đâu, `// …` và `/* … */` trong body (không nhầm với `//` trong đường dẫn hay trong chuỗi `"http://…"`).
 - Body được kiểm tra JSON ngay trên máy trước khi gửi; chấp nhận cả NDJSON (một JSON mỗi dòng) cho `_bulk`/`_msearch`.
 - Response không phải 2xx hiện như lỗi thật, kèm body lỗi của Elasticsearch.
 - Mỗi lần chạy chỉ một request; chưa có cấu hình auth/TLS client-cert riêng.

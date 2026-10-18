@@ -76,6 +76,43 @@ pcall(vim.treesitter.language.register, 'json', 'esq')
 vim.filetype.add({ extension = { tdb = 'tdb' } })
 pcall(vim.treesitter.language.register, 'markdown', 'tdb')
 
+-- Belt and braces for the filetype (without it none of the block handling or
+-- highlighting applies, and the fences reach the server as SQL): `ftdetect/`
+-- covers a normal start; these cover this file loading *after* a buffer was
+-- already read (a lazy-loaded plugin, a restored session) by fixing the
+-- buffers that are open now and any opened later.
+local query_exts = { tdb = 'tdb', mongo = 'mongo', redis = 'redis', esq = 'esq' }
+local function fix_filetype(buf)
+  if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].buftype ~= '' then return end
+  local ft = query_exts[vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':e')]
+  if ft and vim.bo[buf].filetype ~= ft then vim.bo[buf].filetype = ft end
+end
+vim.api.nvim_create_autocmd({ 'BufRead', 'BufNewFile' }, {
+  group = vim.api.nvim_create_augroup('tradar_filetype', { clear = true }),
+  pattern = { '*.tdb', '*.mongo', '*.redis', '*.esq' },
+  callback = function(a) fix_filetype(a.buf) end,
+})
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) then fix_filetype(buf) end
+end
+
+-- Highlighting for `.tdb` must not depend on nvim-treesitter's own
+-- auto-start setup (versions differ, and without it the file is plain text):
+-- start the markdown parser here, falling back to the legacy markdown syntax
+-- so the fences at least look like fences.
+local function start_tdb_highlight(buf)
+  if vim.treesitter.highlighter and vim.treesitter.highlighter.active[buf] then return end
+  if not pcall(vim.treesitter.start, buf, 'markdown') then vim.bo[buf].syntax = 'markdown' end
+end
+vim.api.nvim_create_autocmd('FileType', {
+  group = vim.api.nvim_create_augroup('tradar_tdb_highlight', { clear = true }),
+  pattern = 'tdb',
+  callback = function(a) start_tdb_highlight(a.buf) end,
+})
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype == 'tdb' then start_tdb_highlight(buf) end
+end
+
 -- Keymaps, omnifunc and a quiet background connect on every SQL buffer, and
 -- on any buffer (whatever its filetype) that names a connection in a
 -- `-- tradar: name` / `// tradar: name` / `# tradar: name` line.
