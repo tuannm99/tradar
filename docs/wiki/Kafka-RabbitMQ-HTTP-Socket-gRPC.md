@@ -74,6 +74,6 @@ Chỉ **unary**, plaintext, chưa có metadata/header request.
 | `:TradarGrpcMethods <service>` | liệt kê method của một service |
 | `:TradarGrpcLoadProto <đường-dẫn>` | nạp file `.proto` khi server không bật reflection |
 
-Chọn method mở một buffer JSON trong tab mới, nội dung `{}` — gõ request vào đó. Trong buffer request: `<leader>rr` hoặc `:TradarGrpcSend` gọi thật (response hiện ở split riêng), `<leader>rx` hoặc `:TradarGrpcCancel` huỷ, `g?` xem phím. Buffer request không nhận `q` (đóng bằng `:q`/`:tabclose`). Chọn lại đúng connection/service/method đã mở sẽ nhảy về tab cũ. Chưa có skeleton request tự sinh theo shape message.
+Chọn method mở một buffer JSON trong tab mới, nội dung `{}` — gõ request vào đó. Trong buffer request: `<leader>rr` hoặc `:TradarGrpcSend` gọi thật (response hiện ở split riêng, JSON thụt lề), `<leader>rx` hoặc `:TradarGrpcCancel` huỷ, `g?` xem phím. Buffer request không nhận `q` (đóng bằng `:q`/`:tabclose`). Chọn lại đúng connection/service/method đã mở sẽ nhảy về tab cũ. Chưa có skeleton request tự sinh theo shape message.
 
 Nếu server không hỗ trợ reflection, `:TradarGrpcServices` trả rỗng cho tới khi bạn `:TradarGrpcLoadProto`.

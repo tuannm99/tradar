@@ -1,6 +1,6 @@
 # Cài đặt
 
-Cần Rust (edition 2024) và Neovim.
+Cần Rust (edition 2024) và Neovim ≥ 0.10.
 
 ## 1. Build `tradar-server`
 

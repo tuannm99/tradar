@@ -412,7 +412,7 @@ function M.schema_tree(entries, expanded)
         local marker = not has_columns and '  ' or (table_open and '▾ ' or '▸ ')
         local label = entry.name .. (entry.object_kind and ('  [' .. entry.object_kind .. ']') or '')
         lines[#lines + 1] = indent .. marker .. label
-        nodes[#lines] = { kind = 'table', key = qualified, insert = qualified }
+        nodes[#lines] = { kind = 'table', key = qualified, insert = qualified, entry = entry }
         if table_open then
           for _, col in ipairs(entry.columns) do
             local marks = (col.primary_key and ' pk' or '') .. (col.indexed and ' idx' or '')

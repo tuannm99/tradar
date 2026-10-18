@@ -100,6 +100,8 @@ pub struct Server {
     /// Fired by the `shutdown` method; `main` waits on it next to Ctrl-C.
     shutdown: Arc<Notify>,
     next_client_id: AtomicU64,
+    /// When this process started -- `version` compares it with the binary on disk.
+    started: std::time::SystemTime,
 }
 
 impl Server {
@@ -114,6 +116,7 @@ impl Server {
             extensions: crate::extension::all(),
             shutdown: Arc::new(Notify::new()),
             next_client_id: AtomicU64::new(1),
+            started: std::time::SystemTime::now(),
         }
     }
 
@@ -227,7 +230,32 @@ impl Server {
     /// own doc comment for what a mismatch means and why this never blocks
     /// a call.
     fn version(&self) -> Value {
-        json!({"major": PROTOCOL_VERSION.0, "minor": PROTOCOL_VERSION.1})
+        let (exe, stale) = self.binary_state();
+        json!({
+            "major": PROTOCOL_VERSION.0,
+            "minor": PROTOCOL_VERSION.1,
+            "exe": exe,
+            "stale": stale,
+        })
+    }
+
+    /// Which binary this process is, and whether it has been rebuilt since
+    /// it started -- the cause of "I fixed it and rebuilt but it still
+    /// behaves the old way", since this server outlives the editor session.
+    /// A replaced binary shows up either as a newer mtime or, on Linux, as
+    /// the `/proc/self/exe` target gaining a ` (deleted)` suffix.
+    fn binary_state(&self) -> (Option<String>, bool) {
+        let Ok(path) = std::env::current_exe() else {
+            return (None, false);
+        };
+        let shown = path.display().to_string();
+        if let Some(original) = shown.strip_suffix(" (deleted)") {
+            return (Some(original.to_string()), true);
+        }
+        let rebuilt = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|mtime| mtime > self.started);
+        (Some(shown), rebuilt)
     }
 
     fn connectors(&self) -> Value {
@@ -666,6 +694,10 @@ mod tests {
 
         assert_eq!(response["result"]["major"], PROTOCOL_VERSION.0);
         assert_eq!(response["result"]["minor"], PROTOCOL_VERSION.1);
+        // It names the running binary, and a server that has not been
+        // rebuilt since it started is not stale.
+        assert!(response["result"]["exe"].is_string());
+        assert_eq!(response["result"]["stale"], false);
     }
 
     #[tokio::test]

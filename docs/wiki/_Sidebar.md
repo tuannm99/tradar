@@ -5,6 +5,7 @@
 - [Kết nối](Ket-noi)
 - [Truy vấn SQL](Truy-van-SQL)
 - [Mongo / Redis / Elasticsearch](Mongo-Redis-Elasticsearch)
+- [Phím tắt](Phim-tat)
 - [File .tdb](File-tdb)
 - [Kafka / RabbitMQ / HTTP / Socket / gRPC](Kafka-RabbitMQ-HTTP-Socket-gRPC)
 - [TUI](TUI)
