@@ -57,7 +57,7 @@ Cách nhận dòng: theo **giá trị cột khoá** hiển thị trên dòng, kh
 - Dòng biến mất → `DELETE`; ô đổi → `UPDATE` (mỗi ô đổi là một câu, gõ `NULL` để đặt NULL); ô không đụng tới (kể cả ô bị cắt `…` hay có xuống dòng) thì giữ nguyên.
 - Dòng có khoá chưa từng có → `INSERT`. Ô để trống = bỏ cột đó (DB dùng `DEFAULT`), gõ `NULL` để đặt NULL tường minh. Sửa chính cột khoá của một dòng cũng hiện thành `DELETE` + `INSERT` — xem kỹ ở bước xem trước.
 - Plugin không đoán: dòng trùng khoá với dòng khác, dòng không tách được thành đủ cột (giá trị chứa ` │ `), hay sửa header/footer thì `:w` báo lỗi và dừng.
-- Lỗi giữa chừng: các câu đã chạy giữ nguyên (không bọc transaction), buffer xem trước mở lại với phần chưa chạy để `:w` chạy tiếp hoặc `q` bỏ.
+- **Một transaction**: với Postgres/MySQL/SQLite, commit chạy `BEGIN` → các câu → `COMMIT`. Một câu lỗi thì `ROLLBACK` (không câu nào được áp dụng), lưới vẽ lại từ DB và buffer xem trước mở lại với **toàn bộ** câu lệnh cùng thông báo lỗi để sửa rồi `:w` lại. Nếu bạn đã tự `BEGIN` trước đó, plugin cảnh báo và chạy bên trong transaction của bạn, không `COMMIT` hộ. Connector khác (Mongo/ES…) không có transaction: lỗi giữa chừng thì các câu đã chạy giữ nguyên và xem trước chỉ còn phần chưa chạy.
 - Trong lúc có sửa chưa commit, không tải thêm trang, không đổi view JSON, các phím theo ô (`gyc`, `K`, `gd`…) tạm tắt; chạy truy vấn mới sẽ bỏ các sửa đó (có cảnh báo).
 - Hộp xem trước thay cho bước hỏi của guard, nên connection `protected` chỉ bị hỏi một lần.
 

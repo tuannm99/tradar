@@ -22,7 +22,7 @@ Dòng mở fence là `` ```<dialect> [connection] ``. Thiếu `connection` thì 
 
 ## Hành vi
 
-- `rr`, `K`, `gd`, `re` và completion áp dụng cho **block đang chứa con trỏ**, không phải cả buffer. Đặt con trỏ ngoài mọi block thì `rr` báo "không ở trong block nào" thay vì chạy nhầm.
+- `rr`, `K`, `gd`, `re` và completion áp dụng cho **block đang chứa con trỏ**, không phải cả buffer. Con trỏ đứng trên **dòng fence** (``` mở hoặc đóng) của block cũng chạy block đó; đặt con trỏ ở giữa các block (văn bản thường) thì `rr` báo rõ thay vì chạy nhầm.
 - Chỉ **text của block đó** được gửi lên server — một block SQL cạnh một block Mongo trong cùng buffer không làm hỏng nhau.
 - `ra` (chạy cả file), `rx` (huỷ) và `rr` ở visual mode **chưa** theo block — vẫn dùng connection của buffer.
 - Tô màu dùng parser Markdown: `sql` tô đúng cú pháp, `mongo`/`esq` tô như JavaScript/JSON, `redis` hiện plain.

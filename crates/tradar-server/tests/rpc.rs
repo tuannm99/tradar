@@ -629,3 +629,30 @@ async fn shutdown_answers_and_signals_main_to_stop() {
         .await
         .expect("shutdown must wake whoever waits on the signal");
 }
+
+#[tokio::test]
+async fn status_answers_at_once_inside_a_held_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+    let q = |sql: &str| json!({"connection": "local", "query": sql});
+    let status = || json!({"connection": "local"});
+
+    let before = call(&server, "status", status()).await;
+    assert_eq!(ok(&before)["in_transaction"], false);
+
+    ok(&call(&server, "execute", q("BEGIN")).await);
+    // The transaction holds the connection: `status` must not wait for the
+    // pool (it used to block until the acquire timeout and report "dead").
+    let during = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        call(&server, "status", status()),
+    )
+    .await
+    .expect("status must not block while a transaction is open");
+    assert_eq!(ok(&during)["in_transaction"], true);
+    assert_eq!(ok(&during)["alive"], true);
+
+    ok(&call(&server, "execute", q("ROLLBACK")).await);
+    let after = call(&server, "status", status()).await;
+    assert_eq!(ok(&after)["in_transaction"], false);
+}

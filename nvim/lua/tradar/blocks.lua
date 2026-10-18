@@ -27,6 +27,7 @@ function M.parse(lines)
     if open then
       if line:match('^```%s*$') then
         open.finish = i - 1
+        open.close_line = i
         out[#out + 1] = open
         open = nil
       end
@@ -45,12 +46,16 @@ function M.parse(lines)
   return out
 end
 
---- The block whose body (not its opening/closing fence lines) contains
---- 1-based line `line` -- `nil` when `line` is outside every block (plain
---- prose between blocks, or a fence line itself).
-function M.at(lines, line)
+--- The block whose body contains 1-based line `line` -- `nil` when `line`
+--- is outside every block (plain prose between blocks). With `loose`, the
+--- block's own opening and closing fence lines count too: running a query
+--- with the cursor parked on its fence is as clear a request as running it
+--- from inside (the body is what runs either way).
+function M.at(lines, line, loose)
   for _, b in ipairs(M.parse(lines)) do
-    if line >= b.start and line <= b.finish then return b end
+    local first = loose and b.header_line or b.start
+    local last = loose and (b.close_line or b.finish) or b.finish
+    if line >= first and line <= last then return b end
   end
 end
 

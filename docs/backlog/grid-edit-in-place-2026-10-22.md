@@ -26,7 +26,7 @@ Thay luồng staged edit của `result-buffer-views-staged-edit-2026-10-20.md`: 
 ## Chưa làm / hạn chế
 
 - Một dòng đổi k ô sinh k câu `UPDATE` (gộp `SET a=…, b=…` cần `RowChange` nhiều cột ở mọi connector — Mongo/Cassandra/ES cũng khớp enum đó; chưa đáng).
-- Không transaction: pool kết nối của driver không giữ `BEGIN` qua nhiều `execute`; cần phương thức batch ở `QueryDriver`. Hiện tại lỗi giữa chừng dừng ở câu lỗi đầu tiên, giữ lại phần còn lại trong xem trước.
+- ~~Không transaction~~ — đã làm, xem `commit-transaction-json-view-fixes-2026-10-23.md`.
 - Lưới không tự căn lại cột khi gõ ô dài hơn (căn lại ở lần vẽ sau commit/revert).
 - Giá trị có khoảng trắng đầu/cuối bị cắt (trim) khi so và khi ghi.
 
