@@ -145,6 +145,10 @@ local function driver_of(conn, cb)
   end)
 end
 
+--- The driver id of `conn` if `connections.list` has been fetched already
+--- (nil otherwise) -- for callers that cannot wait for an async lookup.
+function M.cached_driver(conn) return state.drivers and state.drivers[conn] or nil end
+
 --- Whether the server has confirmed a connection (not merely a binding).
 function M.is_connected(name) return state.connected[name] == true end
 
@@ -1050,9 +1054,10 @@ end
 --- name into the SQL buffer you came from, or -- on a schema header, which
 --- has no name worth inserting -- also toggles.
 function M.schema()
-  M.schema_entries(function(entries, sql_buf)
+  M.schema_entries(function(entries, sql_buf, conn)
     local buf = scratch('tradar://schema', state.schema_buf)
     state.schema_buf, state.schema_entries, state.sql_buf = buf, entries, sql_buf
+    state.schema_conn = conn
 
     local function redraw()
       local win = vim.fn.bufwinid(buf)
@@ -1084,12 +1089,30 @@ function M.schema()
       local node = node_at_cursor()
       if node and node.key then toggle(node) end
     end, { buffer = buf, desc = 'tradar: expand/collapse the schema or table under the cursor' })
+    vim.keymap.set('n', 'o', function()
+      local node = node_at_cursor()
+      if not (node and node.entry) then return notify('put the cursor on a table', vim.log.levels.WARN) end
+      if state.sql_buf and vim.api.nvim_buf_is_valid(state.sql_buf) then M.open_table(state.sql_buf, node.entry) end
+    end, { buffer = buf, desc = 'tradar: open the table under the cursor (show its rows)' })
+    vim.keymap.set('n', 'r', function()
+      local c = state.schema_conn
+      if not c then return end
+      state.schema_cache[c] = nil
+      call('schema', { connection = c }, function(fresh)
+        state.schema_entries = fresh
+        redraw()
+        notify(('schema of %s refreshed (%d objects)'):format(c, #fresh))
+      end)
+    end, { buffer = buf, desc = 'tradar: refresh the schema' })
     vim.keymap.set('n', 'q', '<cmd>close<CR>', { buffer = buf, desc = 'close' })
     vim.keymap.set('n', 'g?', function()
       show_help({
         '# tradar: schema panel',
         '- `<CR>` insert name into the SQL buffer, or toggle a folder/table',
         '- `<Tab>` expand/collapse the schema or table under the cursor',
+        '- `o` open the table under the cursor (runs its "show rows" statement)',
+        '- `r` refresh the schema (after a migration / DDL elsewhere)',
+        '- `/` searches the tree like any buffer',
         '- `q` close',
       })
     end, { buffer = buf, desc = 'tradar: show keymap help' })
@@ -1098,6 +1121,8 @@ function M.schema()
       vim.api.nvim_win_set_buf(0, buf)
       vim.wo.wrap = false
     end
+    local win = vim.fn.bufwinid(buf)
+    if win ~= -1 and conn then vim.wo[win].winbar = ' schema · ' .. conn end
   end)
 end
 

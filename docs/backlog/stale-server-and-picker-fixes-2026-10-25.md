@@ -15,6 +15,12 @@ Sửa (để lần sau không phải đoán): `version` trả thêm `exe` (binar
 - Lịch sử `<C-r>` (chạy ngay) nối câu vào *cuối file* — trong `.tdb` đó nằm ngoài mọi block nên không chạy. Nay chèn ngay dưới con trỏ, như `<CR>`.
 - Completion (blink) đã theo block; không có vấn đề.
 
-## Chưa rà / còn lại
+## Rà tiếp (cùng đợt)
 
-Panel schema (cây, phím), gRPC, Redis, preview của lịch sử luôn tô `sql` kể cả query Mongo/ES, statusline.
+- Panel schema: thêm `o` (mở bảng dưới con trỏ — trước đó phải thoát ra dùng `gd`), `r` (làm mới schema — panel đang mở không thấy bảng mới), winbar `schema · <connection>`; `render.schema_tree` gắn `entry` vào node bảng.
+- Preview lịch sử tô theo dialect của câu (`mongo`/`esq`/`redis`/`sql`) qua `tradar.cached_driver`.
+- Viết `docs/wiki/Phim-tat.md`: bảng mọi phím/lệnh theo từng loại buffer (query, kết quả, xem trước commit, schema, telescope, Kafka/Socket/RabbitMQ/HTTP/gRPC) — nguồn là các `keymap.set` trong `nvim/lua/tradar/*.lua`; `setup{ keymaps = false }` chỉ tắt phím buffer query, nay ghi rõ.
+
+## Chưa rà
+
+gRPC (service/method picker, response), Redis, statusline.

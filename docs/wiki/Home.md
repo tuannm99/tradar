@@ -21,6 +21,7 @@ Có hai cách dùng, cùng chia sẻ một file connection và một bộ connec
 - [Kết nối](Ket-noi) — định dạng `connections.toml`, `target` của từng loại backend, gắn file với connection
 - [Truy vấn SQL trong Neovim](Truy-van-SQL) — chạy, kết quả, sửa dòng, schema, completion, an toàn
 - [Mongo, Redis, Elasticsearch](Mongo-Redis-Elasticsearch)
+- [Phím tắt](Phim-tat) — mọi phím và lệnh theo từng loại buffer
 - [File `.tdb`](File-tdb) — nhiều dialect/connection trong một file
 - [Kafka, RabbitMQ, HTTP, Socket, gRPC](Kafka-RabbitMQ-HTTP-Socket-gRPC) — các backend không có ngôn ngữ query
 - [TUI](TUI) và [cấu hình `config.toml`](TUI#cấu-hình)

@@ -117,7 +117,7 @@ Trong buffer kết quả: nếu kết quả sửa được (một bảng, có kh
 
 Buffer kết quả **không có sort/filter theo cột** như TUI — chủ đích: Neovim đã có sẵn editor SQL thật ngay cạnh, sửa `ORDER BY`/`WHERE` rồi `<leader>rr` chạy lại tiện hơn một UI tương tác riêng.
 
-Cần Neovim ≥ 0.10 (`:checkhealth tradar` kiểm tra). Statusline: `require('tradar').status()` (chuỗi rỗng ngoài buffer SQL).
+Cần Neovim ≥ 0.10 (`:checkhealth tradar` kiểm tra). Bảng đầy đủ mọi phím/lệnh theo từng buffer: `docs/wiki/Phim-tat.md`. Statusline: `require('tradar').status()` (chuỗi rỗng ngoài buffer SQL).
 Completion: nguồn `blink.cmp` `tradar.blink` (hoặc `omnifunc`).
 
 ## An toàn

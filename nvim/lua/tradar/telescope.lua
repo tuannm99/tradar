@@ -84,7 +84,9 @@ function M.history(opts)
       title = 'query',
       define_preview = function(self, entry)
         vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, vim.split(entry.value.text, '\n', { plain = true }))
-        vim.bo[self.state.bufnr].filetype = 'sql'
+        -- The query's own dialect, so a Mongo/ES/Redis entry is not tinted as SQL.
+        local ft = ({ mongo = 'mongo', elasticsearch = 'esq', redis = 'redis' })[tradar.cached_driver(entry.value.conn) or '']
+        vim.bo[self.state.bufnr].filetype = ft or 'sql'
       end,
     }),
     attach_mappings = function(prompt_bufnr, map)
