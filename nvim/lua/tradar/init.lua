@@ -1003,10 +1003,11 @@ end
 
 -- ── navigation helpers (also used by the telescope pickers) ──────────────
 
---- `cb(entries, buf)` for the current buffer's connection.
+--- `cb(entries, buf)` for the connection under the cursor (in a `.tdb`, the
+--- fenced block's own).
 function M.schema_entries(cb)
   local buf = vim.api.nvim_get_current_buf()
-  local conn = M.connection_for(buf)
+  local conn = M.block_connection(buf, vim.api.nvim_win_get_cursor(0)[1])
   if not conn then
     return M.connect(nil, function() M.schema_entries(cb) end)
   end
@@ -1024,7 +1025,8 @@ end
 
 --- Generates the driver's own "show me this table" statement and runs it.
 function M.open_table(buf, entry)
-  local conn = M.connection_for(buf)
+  local win = vim.fn.bufwinid(buf)
+  local conn = M.block_connection(buf, win ~= -1 and vim.api.nvim_win_get_cursor(win)[1] or 1)
   if not conn then return end
   call('snippet', { connection = conn, name = entry.name, schema = entry.schema, op = 'read' }, function(r)
     if not r.text then return notify('this connector has no snippet for that', vim.log.levels.WARN) end

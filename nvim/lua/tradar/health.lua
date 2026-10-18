@@ -20,6 +20,26 @@ function M.check()
     })
   end
 
+  -- `tradar-server` on PATH wins over a build next to the plugin, so a stale
+  -- install there silently shadows a fresh `cargo build`.
+  local on_path = vim.fn.exepath('tradar-server')
+  if on_path ~= '' then
+    local here = debug.getinfo(1, 'S').source:sub(2)
+    local repo = vim.fn.fnamemodify(here, ':p:h:h:h:h')
+    local path_stat = vim.uv.fs_stat(on_path)
+    for _, profile in ipairs({ 'release', 'debug' }) do
+      local built = repo .. '/target/' .. profile .. '/tradar-server'
+      local built_stat = vim.uv.fs_stat(built)
+      if built_stat and path_stat and vim.fn.resolve(built) ~= vim.fn.resolve(on_path)
+          and built_stat.mtime.sec > path_stat.mtime.sec then
+        vim.health.warn(('`tradar-server` on PATH (%s) is older than your build (%s) and is the one used'):format(on_path, built), {
+          'copy the fresh build over it, remove it from PATH, or set setup{ server_cmd = "' .. built .. '" }',
+        })
+        break
+      end
+    end
+  end
+
   local ok_rpc, err = false, nil
   rpc.ensure({ autostart = false }, function(e) ok_rpc, err = (e == nil), e end)
   vim.wait(500, function() return ok_rpc or err ~= nil end, 10)
@@ -43,6 +63,13 @@ function M.check()
       })
     else
       vim.health.ok(('protocol v%d.%d'):format(vresult.major, vresult.minor))
+    end
+    if vresult and vresult.exe then
+      if vresult.stale then
+        vim.health.warn('the running server is older than the binary on disk: ' .. vresult.exe, { ':TradarRestart (the next command starts the new build)' })
+      else
+        vim.health.ok('running server binary: ' .. vresult.exe)
+      end
     end
 
     local e, list = rpc.request_sync('connections.list', nil, 1000)

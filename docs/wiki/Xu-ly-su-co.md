@@ -23,7 +23,9 @@ Cảnh báo này chỉ nhắc, không chặn bạn dùng tiếp. Muốn chắc p
 
 ## Build lại server rồi mà hành vi vẫn cũ
 
-Server chạy nền và giữ nguyên binary cũ cho tới khi dừng. Chạy `:TradarRestart`; lệnh kế tiếp sẽ tự khởi động bản mới.
+Server chạy nền và giữ nguyên binary cũ cho tới khi dừng. Chạy `:TradarRestart`; lệnh kế tiếp sẽ tự khởi động bản mới. Plugin tự phát hiện: nếu binary trên đĩa đã được build lại sau khi server khởi động, lần kết nối kế tiếp báo "the running tradar-server … is older than the binary on disk" (và `:checkhealth tradar` cũng báo, kèm đường dẫn binary đang chạy).
+
+Nếu đã restart mà vẫn cũ: plugin chọn `server_cmd`, rồi **`tradar-server` trên `PATH`**, rồi mới tới `target/release|debug` trong repo — một bản cài cũ trên `PATH` (vd. `~/.cargo/bin`) che mất bản vừa build. `:checkhealth tradar` cảnh báo khi bản trên `PATH` cũ hơn bản build trong repo; cách xử lý: copy bản mới đè lên, bỏ nó khỏi `PATH`, hoặc đặt `setup{ server_cmd = "…/target/release/tradar-server" }`.
 
 ## "cannot reach tradar-server" / "no tradar-server binary found"
 

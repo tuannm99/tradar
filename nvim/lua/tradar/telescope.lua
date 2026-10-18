@@ -103,11 +103,12 @@ function M.history(opts)
         if entry then
           local win = vim.fn.bufwinid(buf)
           if win ~= -1 then vim.api.nvim_set_current_win(win) end
+          -- Below the cursor, like `<CR>` -- not at the end of the file, which
+          -- in a `.tdb` is outside every fenced block (nothing would run).
           local lines = vim.split(entry.value.text, '\n', { plain = true })
-          vim.api.nvim_buf_set_lines(buf, -1, -1, false, { '' })
-          vim.api.nvim_buf_set_lines(buf, -1, -1, false, lines)
-          local last = vim.api.nvim_buf_line_count(buf)
-          vim.api.nvim_win_set_cursor(0, { last - #lines + 1, 0 })
+          local row = vim.api.nvim_win_get_cursor(0)[1]
+          vim.api.nvim_buf_set_lines(buf, row, row, false, lines)
+          vim.api.nvim_win_set_cursor(0, { row + 1, 0 })
           tradar.run()
         end
       end)

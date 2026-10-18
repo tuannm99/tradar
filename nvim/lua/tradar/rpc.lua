@@ -104,6 +104,14 @@ local function check_version()
       if code == METHOD_NOT_FOUND then server_major = 0 end
     elseif result.major ~= CLIENT_PROTOCOL_MAJOR then
       server_major = result.major
+    elseif result.stale then
+      -- The binary on disk was rebuilt after this server started: it keeps
+      -- running the old code until restarted ("I fixed it, still broken").
+      warned_version = true
+      vim.notify(
+        ('tradar: the running tradar-server (%s) is older than the binary on disk -- :TradarRestart to use the new build'):format(result.exe or '?'),
+        vim.log.levels.WARN
+      )
     end
     if server_major ~= nil then
       warned_version = true
