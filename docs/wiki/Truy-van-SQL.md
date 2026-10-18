@@ -32,9 +32,9 @@ Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Cuộn tới cuối sẽ
 | Phím | Việc |
 |---|---|
 | `gK` | xem cả dòng hiện tại, mỗi trường một dòng |
-| `i` | xếp hàng việc sửa ô (gõ `NULL` để đặt NULL) |
-| `dd` | xếp hàng việc xoá dòng |
-| `rw` / `ru` | commit / bỏ các thay đổi đang chờ |
+| (mọi lệnh vim) | sửa thẳng trên lưới: `cw`, `dd`, `o`, `:s`, `:g`, `u`… — xem "Sửa trực tiếp" bên dưới |
+| `:w` (hoặc `rw`) | xem trước toàn bộ câu lệnh rồi commit một lượt |
+| `ru` | bỏ các sửa chưa commit, vẽ lại lưới |
 | `gyc` / `gyr` / `gyC` | copy ô / dòng (visual: nhiều dòng) / cột |
 | `gyj` / `gyv` / `gym` | copy cả kết quả dạng JSON / CSV / Markdown |
 | `K` | xem trọn giá trị một ô |
@@ -45,9 +45,23 @@ Xuất file: `:TradarExport csv|json|md|tsv [file]`.
 
 Cột rộng hơn 40 ký tự bị cắt và thêm `…`; dùng `K` hoặc `gyc` để lấy giá trị đầy đủ. Buffer kết quả không có sort/filter theo cột — sửa `ORDER BY`/`WHERE` rồi `rr` lại.
 
-### Sửa ô / xoá dòng
+### Sửa trực tiếp
 
-`i` và `dd` **không chạy ngay**: plugin sinh câu `UPDATE`/`DELETE` và xếp vào hàng đợi, dòng bị ảnh hưởng được đánh dấu (`● cột = giá trị`, `✗ delete`); sửa lại cùng ô thì thay thế, xoá dòng thì thay các sửa trước đó. Khi xong bấm `<leader>rw`: plugin liệt kê toàn bộ câu lệnh và chỉ chạy, lần lượt, sau khi bạn chọn `Commit` (dừng ở câu lỗi đầu tiên — không bọc transaction); `<leader>ru` bỏ hết. Commit xong tự chạy lại truy vấn gốc và giữ nguyên dòng đang đứng. Hộp xác nhận này thay cho bước hỏi của guard, nên connection `protected` chỉ bị hỏi một lần. Chỉ sửa được khi kết quả đến từ **một bảng có khoá chính** và cột khoá có trong kết quả; nếu không, plugin báo rõ lý do (không biết bảng nguồn, bảng không có khoá chính, cột khoá không có trong kết quả, hoặc giá trị khoá là NULL).
+Khi kết quả sửa được, lưới là một buffer sửa được như mọi buffer khác: gõ đè ô (`cw`, `ci"`…), xoá dòng (`dd`, `:g/pat/d`), thêm dòng (`o` / `yyp` rồi gõ giá trị), `:s`, macro, `u`/`Ctrl-r`… Chưa có gì chạy xuống DB cho tới khi bạn `:w`:
+
+1. `:w` so lưới với các dòng đã vẽ và mở **buffer xem trước** `tradar://commit` liệt kê mọi câu `UPDATE` / `DELETE` / `INSERT` (do server sinh, thứ tự: update → delete → insert).
+2. Trong buffer đó, `:w` hoặc `<CR>` chạy lần lượt, `q` huỷ. Xong tự chạy lại truy vấn gốc và giữ nguyên dòng đang đứng.
+
+Cách nhận dòng: theo **giá trị cột khoá** hiển thị trên dòng, không theo số dòng — nên `dd`, `yyp`, `:sort`, đổi chỗ dòng đều đúng.
+
+- Dòng biến mất → `DELETE`; ô đổi → `UPDATE` (mỗi ô đổi là một câu, gõ `NULL` để đặt NULL); ô không đụng tới (kể cả ô bị cắt `…` hay có xuống dòng) thì giữ nguyên.
+- Dòng có khoá chưa từng có → `INSERT`. Ô để trống = bỏ cột đó (DB dùng `DEFAULT`), gõ `NULL` để đặt NULL tường minh. Sửa chính cột khoá của một dòng cũng hiện thành `DELETE` + `INSERT` — xem kỹ ở bước xem trước.
+- Plugin không đoán: dòng trùng khoá với dòng khác, dòng không tách được thành đủ cột (giá trị chứa ` │ `), hay sửa header/footer thì `:w` báo lỗi và dừng.
+- Lỗi giữa chừng: các câu đã chạy giữ nguyên (không bọc transaction), buffer xem trước mở lại với phần chưa chạy để `:w` chạy tiếp hoặc `q` bỏ.
+- Trong lúc có sửa chưa commit, không tải thêm trang, không đổi view JSON, các phím theo ô (`gyc`, `K`, `gd`…) tạm tắt; chạy truy vấn mới sẽ bỏ các sửa đó (có cảnh báo).
+- Hộp xem trước thay cho bước hỏi của guard, nên connection `protected` chỉ bị hỏi một lần.
+
+Chỉ sửa được khi kết quả đến từ **một bảng có khoá chính** và cột khoá có trong kết quả (và connector hỗ trợ ghi: Postgres/MySQL/SQLite); nếu không, lưới giữ chế độ chỉ đọc và các phím sửa (`i`, `dd`, `o`…) báo rõ lý do thay vì "E21".
 
 ## Điều hướng theo schema
 

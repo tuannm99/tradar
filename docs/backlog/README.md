@@ -77,3 +77,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`http-request-buffer-2026-10-21.md`](http-request-buffer-2026-10-21.md) — `:TradarHttpSend` mở buffer request sửa được (`METHOD url` / headers / body nhiều dòng) thay chuỗi `vim.ui.input`
 - [`rabbitmq-publish-buffer-2026-10-21.md`](rabbitmq-publish-buffer-2026-10-21.md) — RabbitMQ publish bằng buffer sửa được (payload nhiều dòng), `r` làm mới split peek/bindings
 - [`kafka-tail-controls-2026-10-21.md`](kafka-tail-controls-2026-10-21.md) — Kafka tail: `p` tạm dừng, `f` lọc, `c` xoá, tự nối lại khi mất kết nối server (`R` thử lại), winbar trạng thái
+- [`grid-edit-in-place-2026-10-22.md`](grid-edit-in-place-2026-10-22.md) — sửa thẳng trên lưới kết quả bằng lệnh vim, `:w` → xem trước `UPDATE`/`DELETE`/`INSERT` → commit một lượt (khớp dòng theo khoá; `edit.sql` insert, protocol 1.2)

@@ -173,6 +173,27 @@ async fn edit_builds_a_statement_without_running_it() {
 
     let still = call(&server, "execute", q("SELECT v FROM n")).await;
     assert_eq!(ok(&still)["rows"], json!([["old"]]));
+
+    // An insert is built the same way: statement only, nothing written.
+    let insert = call(
+        &server,
+        "edit.sql",
+        json!({"connection": "local", "table": "n", "insert": {"id": "2", "v": "NULL"}}),
+    )
+    .await;
+    let insert = ok(&insert)["sql"].as_str().unwrap().to_string();
+    assert!(insert.starts_with("INSERT INTO \"n\""), "{insert}");
+    assert!(insert.ends_with("VALUES ('2', NULL)"), "{insert}");
+    let count = call(&server, "execute", q("SELECT count(*) FROM n")).await;
+    assert_eq!(ok(&count)["rows"], json!([["1"]]));
+
+    let empty = call(
+        &server,
+        "edit.sql",
+        json!({"connection": "local", "table": "n", "insert": {}}),
+    )
+    .await;
+    assert!(empty.get("error").is_some(), "{empty}");
 }
 
 #[tokio::test]

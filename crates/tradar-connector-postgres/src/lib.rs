@@ -238,6 +238,10 @@ impl QueryDriver for PostgresDriver {
         Some(query_driver::build_sql_edit(edit))
     }
 
+    fn insert_sql(&self, table: &str, values: &[(String, String)]) -> Option<String> {
+        Some(query_driver::build_sql_insert(table, values))
+    }
+
     fn table_ddl(&self, op: &query_driver::TableDesignerOp) -> Option<String> {
         Some(query_driver::build_table_ddl(op))
     }

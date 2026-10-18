@@ -1,5 +1,7 @@
 # Buffer kết quả: JSON view cho SQL, row view, sửa theo kiểu staged + commit
 
+> Phần staged edit (`i`/`dd` xếp hàng, `<leader>rw`/`<leader>ru`) đã được thay bằng sửa trực tiếp trên lưới — xem `grid-edit-in-place-2026-10-22.md`. JSON view và `gK` vẫn như mô tả dưới đây.
+
 Từ đợt rà UI/UX buffer kết quả của plugin (`nvim/lua/tradar/init.lua`).
 
 ## Đã làm

@@ -49,6 +49,7 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] Test end-to-end thật cho Kafka tail (connect/topics/tail từ earliest + live/stop/dọn khi client ngắt kết nối, trên broker `apache/kafka` thật) — `docs/backlog/kafka-e2e-test-2026-10-20.md`; chạy bằng `make test-kafka-server`
 - [x] Buffer kết quả: JSON view cho SQL, row view `gK`, sửa staged + commit — `docs/backlog/result-buffer-views-staged-edit-2026-10-20.md`
 - [x] `:TradarConnections` + sửa Socket tail/tail buffer — `docs/backlog/nvim-connections-tail-fixes-2026-10-20.md`
+- [x] Sửa trực tiếp trên lưới kết quả + INSERT, commit một lượt bằng `:w` — `docs/backlog/grid-edit-in-place-2026-10-22.md`
 - [x] HTTP: buffer request sửa được — `docs/backlog/http-request-buffer-2026-10-21.md`
 - [x] RabbitMQ publish buffer + refresh — `docs/backlog/rabbitmq-publish-buffer-2026-10-21.md`
 - [x] Kafka tail: tạm dừng/lọc/xoá/nối lại — `docs/backlog/kafka-tail-controls-2026-10-21.md`

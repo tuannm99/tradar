@@ -36,7 +36,7 @@ pub const APP_ERROR: i64 = -32000;
 /// minor bump had this scheme existed from the start -- this is the first
 /// breaking-change-shaped line in the wire surface's history, which is
 /// exactly why it's `(1, 0)` and not `(0, 1)`.
-pub const PROTOCOL_VERSION: (u32, u32) = (1, 1);
+pub const PROTOCOL_VERSION: (u32, u32) = (1, 2);
 
 pub struct RpcError {
     pub code: i64,
@@ -317,6 +317,26 @@ pub fn parse_row_edit(params: &Value) -> Result<RowEdit, RpcError> {
         }
     };
     Ok(RowEdit { table, key, change })
+}
+
+/// `"insert": {"name": "ann", "nickname": "NULL"}` -- column -> string
+/// value for the new row (needs at least one column).
+pub fn parse_insert_values(insert: &Value) -> Result<Vec<(String, String)>, RpcError> {
+    let values = insert
+        .as_object()
+        .ok_or_else(|| RpcError::invalid("`insert` must be an object of column -> value"))?
+        .iter()
+        .map(|(column, value)| {
+            let value = value
+                .as_str()
+                .ok_or_else(|| RpcError::invalid(format!("`insert.{column}` must be a string")))?;
+            Ok((column.clone(), value.to_string()))
+        })
+        .collect::<Result<Vec<_>, RpcError>>()?;
+    if values.is_empty() {
+        return Err(RpcError::invalid("`insert` needs at least one column"));
+    }
+    Ok(values)
 }
 
 pub(crate) fn str_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
