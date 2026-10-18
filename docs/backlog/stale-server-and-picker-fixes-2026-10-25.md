@@ -21,6 +21,8 @@ Sửa (để lần sau không phải đoán): `version` trả thêm `exe` (binar
 - Preview lịch sử tô theo dialect của câu (`mongo`/`esq`/`redis`/`sql`) qua `tradar.cached_driver`.
 - Viết `docs/wiki/Phim-tat.md`: bảng mọi phím/lệnh theo từng loại buffer (query, kết quả, xem trước commit, schema, telescope, Kafka/Socket/RabbitMQ/HTTP/gRPC) — nguồn là các `keymap.set` trong `nvim/lua/tradar/*.lua`; `setup{ keymaps = false }` chỉ tắt phím buffer query, nay ghi rõ.
 
+- gRPC: response hiện `vim.json.encode` một dòng → `render.pretty` (thụt lề, khoá sắp xếp), như JSON view của Mongo/ES. Buffer request vẫn mở trên `{}` (chưa sinh khung từ shape message — việc đã ghi trong backlog gRPC).
+
 ## Chưa rà
 
-gRPC (service/method picker, response), Redis, statusline.
+Redis, statusline.

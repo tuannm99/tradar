@@ -206,7 +206,9 @@ function M.send(buf)
         local suffix = data and data.grpc_code and (' (grpc_code=' .. tostring(data.grpc_code) .. ')') or ''
         return notify(e .. suffix, vim.log.levels.ERROR)
       end
-      show_response(buf, vim.json.encode(result.response))
+      -- Indented (and nested keys sorted) rather than one compact line: a real
+      -- response is nested, and unreadable as a single line.
+      show_response(buf, require('tradar.render').pretty(result.response))
     end)
   end)
 end
