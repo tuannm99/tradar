@@ -78,3 +78,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`rabbitmq-publish-buffer-2026-10-21.md`](rabbitmq-publish-buffer-2026-10-21.md) — RabbitMQ publish bằng buffer sửa được (payload nhiều dòng), `r` làm mới split peek/bindings
 - [`kafka-tail-controls-2026-10-21.md`](kafka-tail-controls-2026-10-21.md) — Kafka tail: `p` tạm dừng, `f` lọc, `c` xoá, tự nối lại khi mất kết nối server (`R` thử lại), winbar trạng thái
 - [`grid-edit-in-place-2026-10-22.md`](grid-edit-in-place-2026-10-22.md) — sửa thẳng trên lưới kết quả bằng lệnh vim, `:w` → xem trước `UPDATE`/`DELETE`/`INSERT` → commit một lượt (khớp dòng theo khoá; `edit.sql` insert, protocol 1.2)
+- [`commit-transaction-json-view-fixes-2026-10-23.md`](commit-transaction-json-view-fixes-2026-10-23.md) — commit lưới trong một transaction (rollback khi lỗi), JSON view Mongo/ES pretty-print có thứ tự, sửa comment trong query Mongo và `rr` trên dòng fence của `.tdb`

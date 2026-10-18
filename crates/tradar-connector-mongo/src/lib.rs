@@ -63,7 +63,60 @@ fn starts_mongo_statement(line: &str) -> bool {
         || line == "show databases"
 }
 
+/// `query` without its `// line` and `/* block */` comments -- mongosh
+/// accepts them anywhere inside the call, and a commented-out filter line is
+/// the most ordinary thing to leave in a query buffer. String contents
+/// (`"http://x"`, `'it\'s'`) are copied as they are, and a comment becomes
+/// nothing but whitespace so the line structure survives.
+fn strip_js_comments(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            quote @ ('"' | '\'') => {
+                out.push(quote);
+                i += 1;
+                while i < chars.len() {
+                    out.push(chars[i]);
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                        out.push(chars[i]);
+                    } else if chars[i] == quote {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'/') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                    // Keep newlines so error positions still point at the right line.
+                    if chars[i] == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+                i = (i + 2).min(chars.len());
+                out.push(' ');
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
+    let query = strip_js_comments(query);
     let query = query.trim();
     let rest = query.strip_prefix("db.").ok_or_else(|| {
         anyhow::anyhow!("expected a query starting with \"db.<collection>.<method>(...)\"")
@@ -652,7 +705,8 @@ impl QueryDriver for MongoDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
-        let trimmed = query.trim();
+        let stripped = strip_js_comments(query);
+        let trimmed = stripped.trim();
         if let Some(rest) = trimmed.strip_prefix("use ") {
             let name = rest.trim().trim_matches(['"', '\'']);
             if name.is_empty() {
@@ -1417,6 +1471,35 @@ pub fn connector() -> Box<dyn Connector> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_commented_out_line_inside_the_call_is_ignored() {
+        let parsed = parse_shell_query(
+            "db.users.find({\n  // _id: ObjectId(\"6ad4e4cc4c3ea1739d8b502f\")\n})",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.collection, "users");
+        assert_eq!(parsed.calls[0].name, "find");
+        assert_eq!(parsed.calls[0].args, vec![serde_json::json!({})]);
+    }
+
+    #[test]
+    fn comments_are_stripped_but_comment_markers_inside_strings_are_kept() {
+        assert_eq!(
+            strip_js_comments("a // gone\nb /* gone\ntoo */ c"),
+            "a \nb \n  c"
+        );
+        let parsed =
+            parse_shell_query("db.links.find({url: \"http://x/y\", /* skip */ n: 1}) // tail")
+                .unwrap();
+        assert_eq!(
+            parsed.calls[0].args,
+            vec![serde_json::json!({"url": "http://x/y", "n": 1})]
+        );
+        // An apostrophe in a comment does not open a string.
+        assert!(parse_shell_query("db.a.find({}) // don't").is_ok());
+    }
+
     #[test]
     fn relax_json_turns_shell_constructors_into_extended_json() {
         use serde_json::json;

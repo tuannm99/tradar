@@ -225,10 +225,55 @@ function M.flatten(items, order)
   return columns, rows
 end
 
---- One JSON document per line, so `/` search and `yy` work per document.
-function M.documents(items)
+local EMPTY_DICT = getmetatable(vim.empty_dict())
+
+local function is_array(t)
+  if getmetatable(t) == EMPTY_DICT then return false end
+  return next(t) == nil or vim.islist(t)
+end
+
+--- `value` as indented JSON lines. Object keys come out sorted, except that
+--- the top-level object follows `order` (the server's own `field_order`
+--- for it: Lua tables remember no insertion order, so without that hint
+--- `_id` would land wherever the sort puts it). Nested objects have no such
+--- hint and stay alphabetical.
+function M.pretty(value, order, indent)
+  indent = indent or ''
+  if type(value) ~= 'table' then return vim.json.encode(value) end
+  local inner = indent .. '  '
+  if is_array(value) then
+    if #value == 0 then return '[]' end
+    local parts = {}
+    for i, item in ipairs(value) do parts[i] = inner .. M.pretty(item, nil, inner) end
+    return '[\n' .. table.concat(parts, ',\n') .. '\n' .. indent .. ']'
+  end
+  local keys, seen = {}, {}
+  for _, k in ipairs(order or {}) do
+    if value[k] ~= nil and not seen[k] then keys[#keys + 1], seen[k] = k, true end
+  end
+  local rest = {}
+  for k in pairs(value) do
+    if not seen[k] then rest[#rest + 1] = k end
+  end
+  table.sort(rest)
+  vim.list_extend(keys, rest)
+  if #keys == 0 then return '{}' end
+  local parts = {}
+  for i, k in ipairs(keys) do
+    parts[i] = inner .. vim.json.encode(tostring(k)) .. ': ' .. M.pretty(value[k], nil, inner)
+  end
+  return '{\n' .. table.concat(parts, ',\n') .. '\n' .. indent .. '}'
+end
+
+--- Documents as pretty-printed JSON, a blank line between them. `orders`
+--- (optional, one key list per item -- the server's `field_order`) keeps
+--- each document's top-level fields in their stored order.
+function M.documents(items, orders)
   local out = {}
-  for _, item in ipairs(items) do out[#out + 1] = vim.json.encode(item) end
+  for i, item in ipairs(items) do
+    if i > 1 then out[#out + 1] = '' end
+    vim.list_extend(out, vim.split(M.pretty(item, orders and orders[i]), '\n', { plain = true }))
+  end
   return out
 end
 

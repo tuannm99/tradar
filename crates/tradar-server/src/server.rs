@@ -324,8 +324,12 @@ impl Server {
 
     async fn status(&self, params: &Value) -> Result<Value, RpcError> {
         let driver = self.driver(params)?;
-        let alive = driver.ping().await.is_ok();
-        Ok(json!({"alive": alive, "in_transaction": driver.in_transaction()}))
+        let in_transaction = driver.in_transaction();
+        // A held transaction owns the connection, so a pool-based ping would
+        // wait for it (and report "dead" after the acquire timeout): the open
+        // transaction is itself proof the connection is up.
+        let alive = in_transaction || driver.ping().await.is_ok();
+        Ok(json!({"alive": alive, "in_transaction": in_transaction}))
     }
 
     async fn schema(&self, params: &Value) -> Result<Value, RpcError> {

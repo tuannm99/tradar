@@ -109,11 +109,12 @@ end
 
 --- The fenced block (see `tradar.blocks`) 1-based `row` falls inside, for
 --- a `.tdb` buffer -- `nil` for every other filetype (block syntax is
---- `.tdb`-only) and for a `.tdb` row that isn't inside any block.
-function M.block_at(buf, row)
+--- `.tdb`-only) and for a `.tdb` row that isn't inside any block. `loose`:
+--- a fence line belongs to its block too (what `M.run` wants).
+function M.block_at(buf, row, loose)
   buf = resolve_buf(buf)
   if vim.bo[buf].filetype ~= 'tdb' then return nil end
-  return blocks.at(vim.api.nvim_buf_get_lines(buf, 0, -1, false), row)
+  return blocks.at(vim.api.nvim_buf_get_lines(buf, 0, -1, false), row, loose)
 end
 
 --- `M.connection_for(buf)`, except a `.tdb` block that names its own
@@ -382,13 +383,15 @@ local function paint_results(new_from)
     r.tcols, r.trows = render.flatten(r.rows, r.field_order)
     lines, r.spans, r.twidths = render.table(r.tcols, r.trows)
   else
-    lines = render.documents(r.rows)
+    lines = render.documents(r.rows, r.field_order)
   end
   lines[#lines + 1] = ''
   lines[#lines + 1] = results_title(r)
   local win = vim.fn.bufwinid(buf)
   local pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
   set_lines(buf, lines)
+  -- JSON highlighting by `syntax` only: no `filetype`, so no JSON ftplugins/LSP attach to a scratch buffer.
+  vim.bo[buf].syntax = ((r.kind == 'documents' and r.view == 'json') or (r.kind == 'table' and r.view == 'json')) and 'json' or ''
   if pos then pcall(vim.api.nvim_win_set_cursor, win, { math.min(pos[1], #lines), pos[2] }) end
   sync_editable(r)
 end
@@ -531,7 +534,16 @@ local function export_text(fmt, r)
   if r.kind == 'documents' then
     -- Documents keep their real structure as JSON; the flat formats use the
     -- same flattened columns as the table view.
-    if fmt == 'json' then return vim.json.encode(r.rows) .. '\n' end
+    if fmt == 'json' then
+      local text = render.pretty(r.rows)
+      if r.field_order then
+        -- Rebuild per item so each keeps its stored top-level order.
+        local parts = {}
+        for i, item in ipairs(r.rows) do parts[i] = render.pretty(item, r.field_order[i], '  ') end
+        text = '[\n' .. table.concat(vim.tbl_map(function(p) return '  ' .. p end, parts), ',\n') .. '\n]'
+      end
+      return text .. '\n'
+    end
     columns, rows = render.flatten(r.rows, r.field_order)
   end
   if fmt == 'csv' then return render.csv(columns, rows) end
@@ -798,9 +810,9 @@ function M.run(range_start, range_end, all, transform)
   local lines
   if vim.bo[buf].filetype == 'tdb' then
     local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
-    local block = M.block_at(buf, cursor_row)
+    local block = M.block_at(buf, cursor_row, true)
     if not block then
-      return notify('cursor is not inside a ```sql/```mongo/```redis block', vim.log.levels.WARN)
+      return notify('cursor is between blocks — put it inside a ```sql/```mongo/```redis block (or on its fence line)', vim.log.levels.WARN)
     end
     base_row = block.start - 1
     local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
@@ -967,6 +979,7 @@ function M.edit_connections()
     vim.api.nvim_create_autocmd('BufWritePost', {
       buffer = buf,
       callback = function()
+        state.drivers = nil -- re-read: a connection may have been added or retargeted
         call('connections.list', nil, function(list)
           notify(('saved — %d connection(s)'):format(#list))
         end, function(err) notify('connections.toml: ' .. err, vim.log.levels.ERROR) end)
@@ -1404,6 +1417,10 @@ end
 
 local preview_buf = nil
 
+--- Drivers that hold a manual transaction (BEGIN/COMMIT/ROLLBACK) on their
+--- one connection -- see `transaction_control` in the connector crates.
+local TRANSACTIONAL = { postgres = true, mysql = true, sqlite = true }
+
 --- The commit preview: every statement, one per line, in a split. `:w` or
 --- `<CR>` runs them in order (stopping at the first error, then showing
 --- the ones that did not run); `q` cancels. `ctx` = { conn, query, sqls,
@@ -1428,7 +1445,7 @@ local function open_preview(ctx)
     -- Confirmed: from here the grid's text is no longer "unsaved".
     if state.results_buf and vim.api.nvim_buf_is_valid(state.results_buf) then vim.bo[state.results_buf].modified = false end
     local total = #ctx.sqls
-    local function reload()
+    local function reload(after_reload)
       run_text(ctx.sql_buf, ctx.query, 0, 0, {
         confirmed = true,
         after = function()
@@ -1437,26 +1454,75 @@ local function open_preview(ctx)
             local lines = vim.api.nvim_buf_line_count(state.results_buf)
             pcall(vim.api.nvim_win_set_cursor, w, { math.min(ctx.pos[1], lines), ctx.pos[2] })
           end
+          if after_reload then after_reload() end
         end,
+        on_error = after_reload,
       })
     end
-    local function step(i)
-      if i > total then
-        notify(('committed %d statement(s)'):format(total))
-        return reload()
-      end
-      run_text(ctx.sql_buf, ctx.sqls[i], 0, 0, {
-        confirmed = true, -- this preview *is* the confirmation
-        after = function() step(i + 1) end,
-        on_error = function(err)
+    --- Runs the statements in order; `wrapped` brackets them in
+    --- BEGIN ... COMMIT (the driver holds that transaction on its one
+    --- connection), so a failure rolls everything back.
+    local function run(wrapped)
+      local function fail(i, err)
+        local first = err:gsub('\n.*', '')
+        if wrapped then
+          -- Roll back whatever ran, show the real table again, and offer the
+          -- whole batch back so a fix can be re-run from the start.
+          run_text(ctx.sql_buf, 'ROLLBACK', 0, 0, {
+            confirmed = true,
+            after = function()
+              reload(function()
+                open_preview(vim.tbl_extend('force', ctx, {
+                  note = ('-- rolled back, nothing was applied; statement %d of %d failed: %s'):format(i, total, first),
+                }))
+              end)
+            end,
+            on_error = function() notify('ROLLBACK failed — check the connection (status line shows an open transaction)', vim.log.levels.ERROR) end,
+          })
+        else
           open_preview(vim.tbl_extend('force', ctx, {
             sqls = vim.list_slice(ctx.sqls, i),
-            note = ('-- %d of %d applied; stopped at the first statement below: %s'):format(i - 1, total, err:gsub('\n.*', '')),
+            note = ('-- %d of %d applied (not in a transaction); stopped at the first statement below: %s'):format(i - 1, total, first),
           }))
-        end,
-      })
+        end
+      end
+      local function step(i)
+        if i > total then
+          if not wrapped then
+            notify(('committed %d statement(s)'):format(total))
+            return reload()
+          end
+          return run_text(ctx.sql_buf, 'COMMIT', 0, 0, {
+            confirmed = true,
+            after = function()
+              notify(('committed %d statement(s) in one transaction'):format(total))
+              reload()
+            end,
+            on_error = function(err) fail(total, err) end,
+          })
+        end
+        run_text(ctx.sql_buf, ctx.sqls[i], 0, 0, {
+          confirmed = true, -- this preview *is* the confirmation
+          after = function() step(i + 1) end,
+          on_error = function(err) fail(i, err) end,
+        })
+      end
+      if not wrapped then return step(1) end
+      run_text(ctx.sql_buf, 'BEGIN', 0, 0, { confirmed = true, after = function() step(1) end })
     end
-    step(1)
+    -- One transaction wherever the driver can hold one -- unless the user is
+    -- already inside their own (a second BEGIN would be a no-op, and our
+    -- COMMIT/ROLLBACK would then settle *their* work): then run inside it.
+    driver_of(ctx.conn, function(driver)
+      if not TRANSACTIONAL[driver] then return run(false) end
+      call('status', { connection = ctx.conn }, function(st)
+        if st.in_transaction then
+          notify('a transaction is already open on this connection — running inside it (not committing it for you)', vim.log.levels.WARN)
+          return run(false)
+        end
+        run(true)
+      end)
+    end)
   end
   local lines = { ctx.note or ('-- tradar [%s]: %d statement(s) — :w or <CR> to run, q to cancel'):format(ctx.conn, #ctx.sqls) }
   for _, sql in ipairs(ctx.sqls) do lines[#lines + 1] = sql .. ';' end
@@ -1511,12 +1577,15 @@ function M.write()
   local sql_buf = state.sql_buf
   if not (sql_buf and vim.api.nvim_buf_is_valid(sql_buf)) then sql_buf = vim.api.nvim_get_current_buf() end
   build_statements(r, d, cols, rows, key_idx, function(sqls, counts)
-    open_preview({
-      conn = r.conn, query = r.query, sqls = sqls, sql_buf = sql_buf,
-      pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil,
-      note = ('-- tradar [%s]: %d update(s), %d delete(s), %d insert(s) — :w or <CR> to run, q to cancel'):format(
-        r.conn, counts.update, counts.delete, counts.insert),
-    })
+    driver_of(r.conn, function(driver)
+      open_preview({
+        conn = r.conn, query = r.query, sqls = sqls, sql_buf = sql_buf,
+        pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil,
+        note = ('-- tradar [%s]: %d update(s), %d delete(s), %d insert(s)%s — :w or <CR> to run, q to cancel'):format(
+          r.conn, counts.update, counts.delete, counts.insert,
+          TRANSACTIONAL[driver] and ', all in one transaction' or ' (no transaction on this connector)'),
+      })
+    end)
   end)
 end
 
