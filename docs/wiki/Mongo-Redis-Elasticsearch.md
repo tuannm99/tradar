@@ -26,7 +26,7 @@ Dạng `db.<collection>.<method>(<args>)`. Hỗ trợ `find` (kèm projection, v
 
 ## Redis
 
-Một dòng lệnh mỗi lần chạy, tách theo khoảng trắng (không hỗ trợ quoting). `HGETALL` và `ZRANGE`/`ZREVRANGE … WITHSCORES` được format nhận biết kiểu; các lệnh khác dùng chuyển đổi tổng quát sang JSON. Không có pipelining, `MULTI`/`EXEC`, pub/sub hay xử lý riêng cho stream.
+Một dòng lệnh mỗi lần chạy, tách theo khoảng trắng như `redis-cli`: giá trị có dấu cách đặt trong nháy — `SET greeting "hello world"`, `SET k 'it\'s'`. Trong `"…"` hiểu `\n \r \t \b \a \\ \" \xHH`; trong `'…'` chỉ `\'`; nháy chỉ có nghĩa khi mở đầu một token (`SET k it's` vẫn chạy), nháy không đóng hoặc ký tự dính sau nháy đóng báo lỗi. Snippet do navigator sinh tự đặt nháy cho key có dấu cách. `HGETALL` và `ZRANGE`/`ZREVRANGE … WITHSCORES` được format nhận biết kiểu; các lệnh khác dùng chuyển đổi tổng quát sang JSON. Không có pipelining, `MULTI`/`EXEC`, pub/sub hay xử lý riêng cho stream.
 
 ## Elasticsearch
 
