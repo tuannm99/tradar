@@ -43,7 +43,7 @@ GET /my-index/_search
 
 ## Kết quả dạng tài liệu
 
-Kết quả mặc định hiện **bảng** (cột phẳng `address.city`) để dùng được `i`/`dd`/`gyc`/export như SQL; `<leader>rv` đổi sang JSON. Câu trả lời đơn giản (một chuỗi Redis, danh sách số) vẫn hiện dạng JSON. Ép một kiểu bằng `setup{ documents_view = "table" | "json" }`.
+Kết quả mặc định hiện **bảng** (cột phẳng `address.city`) để sửa trực tiếp như SQL (sửa ô/xoá dòng rồi `:w` → xem trước → commit; chưa có thêm dòng mới cho Mongo/ES) và dùng `gyc`/export; `<leader>rv` đổi sang JSON. Câu trả lời đơn giản (một chuỗi Redis, danh sách số) vẫn hiện dạng JSON. Ép một kiểu bằng `setup{ documents_view = "table" | "json" }`.
 
 Sửa/xoá dòng hoạt động cho Mongo (`find()` đơn giản, khoá `_id`) và Elasticsearch (`_search` trên một index, khoá `_id`); Redis chỉ đọc. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 

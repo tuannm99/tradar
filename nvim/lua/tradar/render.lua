@@ -37,6 +37,24 @@ local function pad_or_truncate(text, width)
   return vim.fn.strcharpart(text, 0, math.max(width - 1, 0)) .. '…'
 end
 
+--- One value as the grid shows it in a column of `width`: whitespace
+--- flattened, truncated with `…` past the width, trimmed of padding. What
+--- an unedited cell reads back as, so a diff can tell "untouched" from
+--- "retyped" without being fooled by truncation.
+function M.display_cell(value, width)
+  return vim.trim(pad_or_truncate(cell(value), width))
+end
+
+--- Splits a grid line back into its `ncols` trimmed cell texts; `nil` when
+--- the line does not have exactly that many (a value containing the column
+--- separator, or a separator typed/deleted by hand).
+function M.split_line(line, ncols)
+  local parts = vim.split(line, SEP, { plain = true })
+  if #parts ~= ncols then return nil end
+  for i, part in ipairs(parts) do parts[i] = vim.trim(part) end
+  return parts
+end
+
 --- Each column's display width (header vs. every cell in `rows`, whichever
 --- is wider), clamped to `MAX_COLUMN_WIDTH`. `prev` (optional, the same
 --- shape this returns) seeds the running max instead of starting from the

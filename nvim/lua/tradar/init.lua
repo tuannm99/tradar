@@ -1,6 +1,7 @@
 -- tradar.nvim: the editor is a real Neovim buffer, tradar-server does the
 -- querying. See "Server headless" in docs/architecture.md.
 local rpc = require('tradar.rpc')
+local gridedit = require('tradar.gridedit')
 local render = require('tradar.render')
 local guard = require('tradar.guard')
 local blocks = require('tradar.blocks')
@@ -303,21 +304,31 @@ local function tabular(r)
   if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.trows end
 end
 
+--- What the editable grid is made of: `columns, rows, widths` for a SQL
+--- table or documents shown as a table; nil in the JSON view / other kinds.
+local function grid_of(r)
+  if not r then return nil end
+  if r.kind == 'table' and r.view ~= 'json' then return r.columns, r.rows, r.widths end
+  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.trows, r.twidths end
+end
+
 local attach_results
 
---- Marks rows with staged (uncommitted) edits: `● col = value` / `✗ delete`
---- at the end of the row's line. Cleared and redrawn on every paint, so it
---- also survives a repaint after a page loads.
-local function decorate_pending(r)
+--- The results buffer is a real, editable buffer only while the result is
+--- a single-table SELECT whose rows can be addressed (`r.edit`, resolved
+--- asynchronously by `resolve_edit`) and is shown as a table; otherwise it
+--- stays read-only. A (re)paint is by definition a clean buffer.
+local function sync_editable(r)
   local buf = state.results_buf
-  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-  if not r.pending or r.view == 'json' then return end
-  for _, p in ipairs(r.pending) do
-    local text = p.delete and '✗ delete' or ('● %s = %s'):format(p.column, p.value)
-    pcall(vim.api.nvim_buf_set_extmark, buf, ns, p.row + 1, 0, {
-      virt_text = { { '  ' .. text, p.delete and 'DiagnosticError' or 'DiagnosticWarn' } },
-    })
-  end
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
+  vim.bo[buf].modifiable = (grid_of(r) ~= nil and r.edit ~= nil) or false
+  vim.bo[buf].modified = false
+end
+
+--- Unsaved edits in the grid (`:w` commits them, `<leader>ru` reverts).
+local function dirty()
+  local buf = state.results_buf
+  return buf ~= nil and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified and state.result ~= nil
 end
 
 --- `new_from` (1-based index into `r.rows`), when given, means "only rows
@@ -356,7 +367,7 @@ local function paint_results(new_from)
       vim.bo[buf].modifiable = true
       vim.api.nvim_buf_set_lines(buf, footer_at, total, false, new_lines)
       vim.bo[buf].modifiable = false
-      decorate_pending(r)
+      sync_editable(r)
       return
     end
   end
@@ -369,7 +380,7 @@ local function paint_results(new_from)
     lines, r.spans, r.widths = render.table(r.columns, r.rows)
   elseif r.view == 'table' then
     r.tcols, r.trows = render.flatten(r.rows, r.field_order)
-    lines, r.spans = render.table(r.tcols, r.trows)
+    lines, r.spans, r.twidths = render.table(r.tcols, r.trows)
   else
     lines = render.documents(r.rows)
   end
@@ -379,7 +390,7 @@ local function paint_results(new_from)
   local pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
   set_lines(buf, lines)
   if pos then pcall(vim.api.nvim_win_set_cursor, win, { math.min(pos[1], #lines), pos[2] }) end
-  decorate_pending(r)
+  sync_editable(r)
 end
 
 local function show_message(text, height)
@@ -403,9 +414,16 @@ local function default_view(items)
   return 'json'
 end
 
+local resolve_edit
+--- The last successful `resolve_edit`, so re-running the same query (after a
+--- commit, say) is editable at once instead of read-only until the server answers.
+local edit_cache = nil
+
 local function show_result(r, meta)
+  if dirty() then notify('discarded unsaved grid edits', vim.log.levels.WARN) end
   local buf = scratch('tradar://results', state.results_buf)
   state.results_buf = buf
+  vim.bo[buf].buftype = 'acwrite' -- so `:w` reaches BufWriteCmd
   attach_results(buf)
   if r.kind == 'affected' then
     state.result = nil
@@ -421,12 +439,18 @@ local function show_result(r, meta)
     -- a server new enough to send it.
     field_order = r.field_order,
     view = r.kind == 'documents' and default_view(r.rows) or 'table',
-    pending = {}, -- staged edits, applied only by `M.commit`
+    -- Row editing: `edit` = { table, keys } once `resolve_edit`
+    -- has found the source table; until then (or if it never does) the grid
+    -- is read-only, with `edit_reason` saying why.
+    edit = edit_cache and edit_cache.conn == (meta and meta.conn) and edit_cache.query == (meta and meta.query)
+      and edit_cache.edit or nil,
+    edit_reason = 'still checking whether these rows can be edited…',
     conn = meta and meta.conn, query = meta and meta.query,
   }
   paint_results()
   local win = show(buf)
   pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+  if not state.result.edit then resolve_edit(state.result) end
 end
 
 --- `<leader>rv`: the result as a table (editable) or raw JSON -- documents
@@ -435,6 +459,7 @@ end
 function M.toggle_view()
   local r = state.result
   if not r or (r.kind ~= 'documents' and r.kind ~= 'table') then return notify('no result to switch views on') end
+  if dirty() then return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert', vim.log.levels.WARN) end
   r.view = r.view == 'table' and 'json' or 'table'
   paint_results()
 end
@@ -444,6 +469,11 @@ end
 --- there is nothing more).
 function M.more(cb)
   local r = state.result
+  if dirty() then
+    -- Appending a page repaints the grid, which would drop the edits.
+    if cb then notify('unsaved grid edits — :w to commit or <leader>ru to revert first', vim.log.levels.WARN) end
+    return
+  end
   if not r or r.shown >= r.total or r.fetching then
     if cb then cb() end
     return
@@ -487,6 +517,10 @@ local function cell_at()
   local r = state.result
   local cols, rows = tabular(r)
   if not cols then return nil end
+  if dirty() then
+    notify('unsaved grid edits (line numbers no longer match the rows) — :w to commit or <leader>ru to revert', vim.log.levels.WARN)
+    return nil
+  end
   local row = vim.api.nvim_win_get_cursor(0)[1] - 2
   if row < 1 or row > #rows then return nil end
   return row, render.column_at(r.spans, vim.fn.virtcol('.'))
@@ -577,12 +611,23 @@ attach_results = function(buf)
   -- prefix every other tradar action already uses, kept out of the
   -- plain-`g`-prefixed family on purpose for that reason.
   map('n', (opts.prefix or '<leader>r') .. 'v', function() M.toggle_view() end, 'result: table <-> JSON')
-  map('n', (opts.prefix or '<leader>r') .. 'w', function() M.commit() end, 'commit staged edits')
-  map('n', (opts.prefix or '<leader>r') .. 'u', function() M.discard() end, 'discard staged edits')
+  map('n', (opts.prefix or '<leader>r') .. 'w', function() M.write() end, 'commit grid edits (same as :w)')
+  map('n', (opts.prefix or '<leader>r') .. 'u', function() M.revert() end, 'revert grid edits')
   map('n', 'gK', function() M.row_view() end, 'show this row, one field per line')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
-  map('n', 'i', function() M.edit_cell() end, 'stage an edit of this cell')
-  map('n', 'dd', function() M.delete_row() end, 'stage deleting this row')
+  -- The grid is edited with plain vim; these keys only differ when the
+  -- result cannot be edited, where they say why instead of "E21".
+  for _, key in ipairs({ 'i', 'a', 'o', 'O', 'dd', 'cc', 'cw', 'x', 'D', 'C', 's', 'S', 'p', 'P' }) do
+    vim.keymap.set('n', key, function()
+      if vim.bo[buf].modifiable then return key end
+      local r = state.result
+      local reason = (r and r.view == 'json') and 'read-only in the JSON view — ' .. (opts.prefix or '<leader>r') .. 'v for the table'
+        or (r and r.edit_reason) or 'this result cannot be edited'
+      notify(reason, vim.log.levels.WARN)
+      return ''
+    end, { buffer = buf, expr = true, remap = false, desc = 'tradar: edit the grid in place' })
+  end
+  vim.api.nvim_create_autocmd('BufWriteCmd', { buffer = buf, callback = function() M.write() end })
   -- `K` is free here (the SQL buffer's own `K` is schema hover, a
   -- different buffer) -- same "K = more about what's under the cursor"
   -- idiom, useful once a cell is wider than the grid's own column cap
@@ -606,9 +651,9 @@ attach_results = function(buf)
       ('- `%sv` table <-> JSON (SQL rows and documents)'):format(opts.prefix or '<leader>r'),
       '- `gK` show the current row, one field per line',
       '- `gd` follow foreign key under cursor',
-      '- `i` / `dd` stage an edit of this cell / deleting this row (nothing runs yet)',
-      ('- `%sw` commit the staged edits (lists the statements, asks first) / `%su` discard them'):format(
-        opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
+      '- edit the grid like any buffer (`cw`, `dd`, `o` + a new row, `:s`, `:g`, `u`…); nothing runs until `:w`',
+      '- `:w` lists the UPDATE/DELETE/INSERT statements in a preview; `:w` / `<CR>` there applies them, `q` cancels',
+      ('- `%su` revert the grid to the query result'):format(opts.prefix or '<leader>r'),
       '- `K` preview the full value of this cell',
       '- `q` close',
     })
@@ -724,6 +769,7 @@ local function run_text(buf, text, base_row, base_col, flags)
       end
       state.last = 'error'
       show_message(err)
+      if flags.on_error then flags.on_error(err) end
       if vim.api.nvim_buf_is_valid(buf) then set_diagnostic(buf, base_row, base_col, err, data) end
     end)
   end, function(err)
@@ -1224,43 +1270,62 @@ function M.follow_fk()
   end, function(err) notify(err, vim.log.levels.ERROR) end)
 end
 
--- ── editing rows from the results buffer ─────────────────────────────────
+-- ── editing rows in the results buffer ───────────────────────────────────
+--
+-- The grid is edited like any buffer. `:w` diffs its text against the rows
+-- it was painted from (`gridedit.diff`: rows are matched by their key
+-- cells, so dd / yyp / :g / :sort / cc all just work), shows every
+-- UPDATE / DELETE / INSERT the server generates in a preview, and runs them
+-- only when that preview is confirmed -- one commit for the whole batch.
 
---- Works out what the cursor's row *is*: the table it came from and the
---- primary-key values that name exactly that row. Read-only (with a reason)
---- when it can't be done -- the same rule as the TUI's row edit: a statement
---- that might hit several rows is not one to write on the user's behalf.
-local function edit_target(cb)
-  local r = state.result
-  local row, col = cell_at()
-  if not (r and r.conn and row) then
-    return notify('put the cursor on a cell of a table result', vim.log.levels.WARN)
+--- Works out, once per result, whether its rows can be addressed: the one
+--- table they came from and the primary-key columns (which must be in the
+--- result). Until it answers -- or if it never can -- the grid stays
+--- read-only with `r.edit_reason` saying why, the same rule as the TUI's
+--- row edit: a statement that might hit several rows is not one to write
+--- on the user's behalf.
+--- Indices in `cols` of the key columns `keys` (case-insensitive), or nil if
+--- one is missing. Looked up at each write: the flattened columns of a
+--- documents grid can change as pages load.
+local function key_indices(cols, keys)
+  local idx = {}
+  for _, k in ipairs(keys) do
+    local found
+    for i, c in ipairs(cols) do
+      if c:lower() == k:lower() then found = i break end
+    end
+    if not found then return nil end
+    idx[#idx + 1] = found
+  end
+  return idx
+end
+
+resolve_edit = function(r)
+  if (r.kind ~= 'table' and r.kind ~= 'documents') or not r.conn then
+    r.edit_reason = 'this result cannot be edited'
+    return
+  end
+  local function fail(reason)
+    if state.result == r then r.edit, r.edit_reason = nil, reason end
   end
   call('edit.source', { connection = r.conn, query = r.query }, function(src)
+    if state.result ~= r then return end
     if not src.table then
-      return notify('read-only: cannot tell which table these rows come from (single-table SELECTs only)', vim.log.levels.WARN)
+      return fail('read-only: cannot tell which table these rows come from (single-table SELECTs only)')
     end
     local function with_keys(keys)
+      if state.result ~= r then return end
       if not keys or #keys == 0 then
-        return notify(('read-only: `%s` has no primary key, so a row cannot be addressed'):format(src.table), vim.log.levels.WARN)
+        return fail(('read-only: `%s` has no primary key, so a row cannot be addressed'):format(src.table))
       end
-      local key = {}
-      local cols, rows = tabular(r)
-      for _, k in ipairs(keys) do
-        local idx
-        for i, c in ipairs(cols) do
-          if c:lower() == k:lower() then idx = i break end
-        end
-        if not idx then
-          return notify(('the key column `%s` is not in this result — select it too'):format(k), vim.log.levels.WARN)
-        end
-        local v = rows[row][idx]
-        if v == nil or v == 'NULL' then
-          return notify(('cannot address the row: key `%s` is NULL'):format(k), vim.log.levels.WARN)
-        end
-        key[k] = v
+      -- Documents in the JSON view have no columns yet: checked at `:w`.
+      local cols = grid_of(r)
+      if cols and not key_indices(cols, keys) then
+        return fail(('read-only: a key column (%s) is not in this result — select it too'):format(table.concat(keys, ', ')))
       end
-      cb(r, row, col, src, key)
+      r.edit, r.edit_reason = { table = src.table, keys = keys }, nil
+      edit_cache = { conn = r.conn, query = r.query, edit = r.edit }
+      sync_editable(r)
     end
     if src.key_columns and #src.key_columns > 0 then return with_keys(src.key_columns) end
     get_schema(r.conn, function(entries)
@@ -1271,107 +1336,187 @@ local function edit_target(cb)
       end
       with_keys(keys)
     end)
-  end, function(err) notify(err, vim.log.levels.ERROR) end)
+  end, function(err) fail(err) end)
 end
 
---- Stages `change` (the statement the server generated for it) on the
---- result: nothing runs until `M.commit`. One entry per cell / per row --
---- editing the same cell again replaces it, deleting a row supersedes its
---- edits, and a row staged for deletion cannot be edited.
-local function stage(r, entry)
-  if not entry.sql then return notify('this connector cannot edit rows (read-only)', vim.log.levels.WARN) end
-  local kept = {}
-  for _, p in ipairs(r.pending) do
-    if p.row ~= entry.row then
-      kept[#kept + 1] = p
-    elseif p.delete then
-      return notify('this row is staged for deletion — discard first (' .. (opts.prefix or '<leader>r') .. 'u)', vim.log.levels.WARN)
-    elseif not entry.delete and p.column ~= entry.column then
-      kept[#kept + 1] = p
+--- `<leader>ru`: drops the unsaved edits, repainting the grid from the rows.
+function M.revert()
+  local r = state.result
+  if not r then return notify('no result', vim.log.levels.WARN) end
+  paint_results()
+  notify('grid reverted')
+end
+
+--- Asks the server for the statement of every change in `d` (a
+--- `gridedit.diff`), in the order they should run -- updates, deletes,
+--- inserts -- and calls `cb(statements, counts)`; nothing is run.
+local function build_statements(r, d, cols, rows, key_idx, cb)
+  local e = r.edit
+  local jobs, counts = {}, { update = 0, delete = 0, insert = 0 }
+  local function key_of(row)
+    local key = {}
+    for j, idx in ipairs(key_idx) do
+      local v = rows[row][idx]
+      if v == nil or v == 'NULL' then return nil, e.keys[j] end
+      key[e.keys[j]] = v
+    end
+    return key
+  end
+  for _, u in ipairs(d.updates) do
+    local key, bad = key_of(u.row)
+    if not key then return notify(('cannot address row %d: key `%s` is NULL'):format(u.row, bad), vim.log.levels.ERROR) end
+    local changed = vim.tbl_keys(u.cells)
+    table.sort(changed)
+    for _, c in ipairs(changed) do
+      counts.update = counts.update + 1
+      jobs[#jobs + 1] = { connection = r.conn, table = e.table, key = key, change = { set = { column = cols[c], value = u.cells[c] } } }
     end
   end
-  kept[#kept + 1] = entry
-  table.sort(kept, function(x, y) return x.row < y.row end)
-  r.pending = kept
-  decorate_pending(r)
-  notify(('%d change(s) staged — %sw to commit, %su to discard'):format(#kept, opts.prefix or '<leader>r', opts.prefix or '<leader>r'))
-end
-
---- `i` on a cell: type the new value (the literal `NULL` sets NULL, as the
---- grid shows it); the `UPDATE` is staged, not run.
-function M.edit_cell()
-  edit_target(function(r, row, col, src, key)
-    local cols, rows = tabular(r)
-    local column, current = cols[col], rows[row][col]
-    for _, p in ipairs(r.pending) do
-      if p.row == row and p.column == column then current = p.value end
-    end
-    vim.ui.input({ prompt = ('%s.%s = '):format(src.table, column), default = current }, function(value)
-      if value == nil then return end
-      if value == current then return notify('unchanged') end
-      call('edit.sql', {
-        connection = r.conn, table = src.table, key = key,
-        change = { set = { column = column, value = value } },
-      }, function(res) stage(r, { row = row, column = column, value = value, sql = res.sql }) end)
+  for _, x in ipairs(d.deletes) do
+    local key, bad = key_of(x.row)
+    if not key then return notify(('cannot address row %d: key `%s` is NULL'):format(x.row, bad), vim.log.levels.ERROR) end
+    counts.delete = counts.delete + 1
+    jobs[#jobs + 1] = { connection = r.conn, table = e.table, key = key, change = 'delete' }
+  end
+  for _, ins in ipairs(d.inserts) do
+    local values = {}
+    for c, v in pairs(ins.values) do values[cols[c]] = v end
+    counts.insert = counts.insert + 1
+    jobs[#jobs + 1] = { connection = r.conn, table = e.table, insert = values }
+  end
+  local sqls, left, failed = {}, #jobs, false
+  for i, params in ipairs(jobs) do
+    call('edit.sql', params, function(res)
+      if failed then return end
+      if not res.sql or res.sql == vim.NIL then
+        failed = true
+        return notify('this connector cannot ' .. (params.insert and 'insert rows' or 'edit rows') .. ' (read-only)', vim.log.levels.WARN)
+      end
+      sqls[i] = res.sql
+      left = left - 1
+      if left == 0 then cb(sqls, counts) end
+    end, function(err)
+      if not failed then notify(err, vim.log.levels.ERROR) end
+      failed = true
     end)
-  end)
+  end
 end
 
---- `dd` on a row: the `DELETE` for exactly that row is staged, not run.
-function M.delete_row()
-  edit_target(function(r, row, _, src, key)
-    call('edit.sql', { connection = r.conn, table = src.table, key = key, change = 'delete' },
-      function(res) stage(r, { row = row, delete = true, sql = res.sql }) end)
-  end)
-end
+local preview_buf = nil
 
---- Throws the staged edits away.
-function M.discard()
-  local r = state.result
-  if not (r and r.pending and #r.pending > 0) then return notify('nothing staged') end
-  local n = #r.pending
-  r.pending = {}
-  decorate_pending(r)
-  notify(('discarded %d staged change(s)'):format(n))
-end
-
---- Applies the staged edits: lists every statement and runs them, in order,
---- only on an explicit "Commit" (this prompt replaces the usual dangerous-
---- query guard, so a protected connection is asked once, here). Stops at
---- the first failure; then re-runs the original query so the grid shows
---- what is really in the table, with the cursor where it was.
-function M.commit()
-  local r = state.result
-  if not (r and r.pending and #r.pending > 0) then return notify('nothing staged') end
-  local pending, conn, query = vim.deepcopy(r.pending), r.conn, r.query
-  local win = vim.fn.bufwinid(state.results_buf)
-  local pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
-  local buf = state.sql_buf
-  if not (buf and vim.api.nvim_buf_is_valid(buf)) then buf = vim.api.nvim_get_current_buf() end
-  local statements = {}
-  for _, p in ipairs(pending) do statements[#statements + 1] = '  ' .. p.sql end
-  local label = ('Commit %d change(s)'):format(#pending)
-  vim.ui.select({ 'Cancel', label }, {
-    prompt = ('tradar [%s] run these?\n%s'):format(conn, table.concat(statements, '\n')),
-  }, function(choice)
-    if choice ~= label then return end
+--- The commit preview: every statement, one per line, in a split. `:w` or
+--- `<CR>` runs them in order (stopping at the first error, then showing
+--- the ones that did not run); `q` cancels. `ctx` = { conn, query, sqls,
+--- sql_buf, pos, note }.
+local function open_preview(ctx)
+  local buf = preview_buf
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    buf = vim.api.nvim_create_buf(false, true)
+    preview_buf = buf
+    vim.bo[buf].buftype = 'acwrite'
+    vim.bo[buf].bufhidden = 'wipe'
+    vim.bo[buf].swapfile = false
+    vim.bo[buf].filetype = 'sql'
+    pcall(vim.api.nvim_buf_set_name, buf, 'tradar://commit')
+  end
+  local function close()
+    local win = vim.fn.bufwinid(buf)
+    if win ~= -1 then vim.api.nvim_win_close(win, true) end
+  end
+  local function apply()
+    close()
+    -- Confirmed: from here the grid's text is no longer "unsaved".
+    if state.results_buf and vim.api.nvim_buf_is_valid(state.results_buf) then vim.bo[state.results_buf].modified = false end
+    local total = #ctx.sqls
     local function reload()
-      run_text(buf, query, 0, 0, {
+      run_text(ctx.sql_buf, ctx.query, 0, 0, {
         confirmed = true,
         after = function()
           local w = vim.fn.bufwinid(state.results_buf)
-          if w ~= -1 and pos then
+          if w ~= -1 and ctx.pos then
             local lines = vim.api.nvim_buf_line_count(state.results_buf)
-            pcall(vim.api.nvim_win_set_cursor, w, { math.min(pos[1], lines), pos[2] })
+            pcall(vim.api.nvim_win_set_cursor, w, { math.min(ctx.pos[1], lines), ctx.pos[2] })
           end
         end,
       })
     end
     local function step(i)
-      if i > #pending then return reload() end
-      run_text(buf, pending[i].sql, 0, 0, { confirmed = true, after = function() step(i + 1) end })
+      if i > total then
+        notify(('committed %d statement(s)'):format(total))
+        return reload()
+      end
+      run_text(ctx.sql_buf, ctx.sqls[i], 0, 0, {
+        confirmed = true, -- this preview *is* the confirmation
+        after = function() step(i + 1) end,
+        on_error = function(err)
+          open_preview(vim.tbl_extend('force', ctx, {
+            sqls = vim.list_slice(ctx.sqls, i),
+            note = ('-- %d of %d applied; stopped at the first statement below: %s'):format(i - 1, total, err:gsub('\n.*', '')),
+          }))
+        end,
+      })
     end
     step(1)
+  end
+  local lines = { ctx.note or ('-- tradar [%s]: %d statement(s) — :w or <CR> to run, q to cancel'):format(ctx.conn, #ctx.sqls) }
+  for _, sql in ipairs(ctx.sqls) do lines[#lines + 1] = sql .. ';' end
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].modified = false
+  local win = vim.fn.bufwinid(buf)
+  if win == -1 then
+    vim.cmd(('botright %dsplit'):format(math.min(#lines + 1, 15)))
+    win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(win, buf)
+    vim.wo[win].wrap = false
+  else
+    vim.api.nvim_set_current_win(win)
+  end
+  pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+  if not vim.b[buf].tradar_preview_attached then
+    vim.b[buf].tradar_preview_attached = true
+    vim.keymap.set('n', 'q', close, { buffer = buf, desc = 'tradar: cancel the commit' })
+    vim.keymap.set('n', '<CR>', function() vim.b[buf].tradar_apply() end, { buffer = buf, desc = 'tradar: run these statements' })
+    vim.api.nvim_create_autocmd('BufWriteCmd', { buffer = buf, callback = function() vim.b[buf].tradar_apply() end })
+  end
+  vim.b[buf].tradar_apply = apply
+end
+
+--- `:w` in the results buffer: diffs the grid against the rows it shows and
+--- opens the commit preview. Writes nothing itself.
+function M.write()
+  local r = state.result
+  local buf = state.results_buf
+  local cols, rows, widths = grid_of(r)
+  if not cols then return notify('nothing to write here', vim.log.levels.WARN) end
+  if not r.edit then return notify(r.edit_reason or 'this result cannot be edited', vim.log.levels.WARN) end
+  local key_idx = key_indices(cols, r.edit.keys)
+  if not key_idx then
+    return notify(('a key column (%s) is not in this result — select it too'):format(table.concat(r.edit.keys, ', ')), vim.log.levels.WARN)
+  end
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local head = render.header_lines(cols, widths)
+  local n = #lines
+  if n < 4 or lines[1] ~= head[1] or lines[2] ~= head[2] or lines[n - 1] ~= '' or lines[n] ~= results_title(r) then
+    return notify('only the data rows can change — the header, rule or footer line was edited (' .. (opts.prefix or '<leader>r') .. 'u reverts)', vim.log.levels.ERROR)
+  end
+  local d = gridedit.diff(cols, rows, widths, key_idx, vim.list_slice(lines, 3, n - 2))
+  if #d.errors > 0 then return notify(table.concat(d.errors, '\n'), vim.log.levels.ERROR) end
+  if #d.updates + #d.deletes + #d.inserts == 0 then
+    vim.bo[buf].modified = false
+    return notify('no changes')
+  end
+  local win = vim.fn.bufwinid(buf)
+  local sql_buf = state.sql_buf
+  if not (sql_buf and vim.api.nvim_buf_is_valid(sql_buf)) then sql_buf = vim.api.nvim_get_current_buf() end
+  build_statements(r, d, cols, rows, key_idx, function(sqls, counts)
+    open_preview({
+      conn = r.conn, query = r.query, sqls = sqls, sql_buf = sql_buf,
+      pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil,
+      note = ('-- tradar [%s]: %d update(s), %d delete(s), %d insert(s) — :w or <CR> to run, q to cancel'):format(
+        r.conn, counts.update, counts.delete, counts.insert),
+    })
   end)
 end
 

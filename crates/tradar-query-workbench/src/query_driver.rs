@@ -445,6 +445,26 @@ pub fn build_sql_edit(edit: &RowEdit) -> String {
     }
 }
 
+/// `INSERT` for a new row: `values` are the columns to set (an omitted
+/// column takes its default); same literal rules as `build_sql_edit` --
+/// everything a string literal except the unquoted `NULL`.
+pub fn build_sql_insert(table: &str, values: &[(String, String)]) -> String {
+    let columns = values
+        .iter()
+        .map(|(column, _)| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let literals = values
+        .iter()
+        .map(|(_, value)| sql_literal(value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {} ({columns}) VALUES ({literals})",
+        quote_identifier(table)
+    )
+}
+
 /// One column in a `TableDesignerOp::CreateTable`'s definition -- the
 /// table-designer form's own fields (name/type free text, nullable/primary
 /// key toggles), not yet turned into SQL.
@@ -1418,6 +1438,13 @@ pub trait QueryDriver: Send + Sync {
         None
     }
 
+    /// This driver's statement for inserting a new row into `table` with
+    /// `values` (column, value) -- `None`, the default, means the connector
+    /// cannot add rows. The SQL connectors delegate to `build_sql_insert`.
+    fn insert_sql(&self, _table: &str, _values: &[(String, String)]) -> Option<String> {
+        None
+    }
+
     /// This driver's statement for a table-designer change (see
     /// `TableDesignerOp`). `None` -- the default -- means the table
     /// designer form can be filled in and confirmed, but running it reports
@@ -2051,6 +2078,19 @@ mod tests {
         assert_eq!(
             sql,
             "UPDATE \"users\" SET \"name\" = 'Ada' WHERE \"id\" = '7'"
+        );
+    }
+
+    #[test]
+    fn an_insert_lists_columns_and_literals_and_leaves_null_unquoted() {
+        let sql = build_sql_insert(
+            "public.users",
+            &key(&[("name", "O'Brien"), ("nickname", "NULL")]),
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO \"public\".\"users\" (\"name\", \"nickname\") VALUES ('O''Brien', NULL)"
         );
     }
 

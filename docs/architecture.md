@@ -73,6 +73,7 @@ pub trait QueryDriver: Send + Sync {
     fn export_curl(&self, _query: &str) -> Option<String> { None }
     fn edit_source(&self, _query: &str) -> Option<String> { None }
     fn edit_sql(&self, _edit: &RowEdit) -> Option<String> { None }
+    fn insert_sql(&self, _table: &str, _values: &[(String, String)]) -> Option<String> { None }
     async fn ping(&self) -> anyhow::Result<()> { Ok(()) }
     fn in_transaction(&self) -> bool { false }
     fn cancel_query(&self) -> anyhow::Result<()> { Ok(()) }
@@ -128,7 +129,7 @@ Mỗi module implement trait `Extension` (`extension.rs`): tự giữ state củ
 | `execute` | `connection`, `query`, `page_size?`, `query_id?` | `kind` = `table`/`documents`/`affected`, trang đầu `rows` |
 | `fetch` | `cursor`, `offset?`, `limit?` | trang tiếp theo |
 | `cancel` | `query_id` | huỷ (client ngừng chờ + `cancel_query` phía DB nếu có) |
-| `edit.source` / `edit.sql` | tuỳ method | bảng nguồn + cột khoá / câu lệnh sửa dòng (chỉ sinh, không chạy) |
+| `edit.source` / `edit.sql` | tuỳ method | bảng nguồn + cột khoá / câu lệnh sửa dòng (chỉ sinh, không chạy); `edit.sql` nhận `insert: {cột: giá trị}` (không `key`/`change`) để sinh `INSERT` — `sql: null` nếu connector không thêm dòng được |
 | `complete` / `snippet` / `split` / `keywords` | tuỳ method | completion / CRUD snippet / tách statement / từ vựng |
 | `shutdown` | — | server dừng sau khi reply (dùng để thay binary không cần `kill`) |
 
@@ -144,7 +145,7 @@ Lỗi: `-32601` method lạ, `-32602` params sai, `-32000` lỗi driver/server (
 
 **Push-channel (notification server→client).** Kafka tail/Socket cần server tự gửi dữ liệu mới bất cứ lúc nào, không đợi client hỏi. Cơ chế: mỗi connection có sẵn một channel riêng (`ClientConnection`, id + `outbox`); push là một JSON-RPC notification thường (có `method`/`params`, **không có** `id`) gửi qua cùng dòng chảy — không transport mới. Mỗi subscription một task nền riêng, không share/dedup giữa nhiều subscriber. Bounded cap 500, drop-oldest khi client đọc chậm. Dọn theo connection: client đóng socket thì mọi subscription nó chưa tự dừng bị abort theo (`client_disconnected`). Phía plugin, `rpc.lua`'s `on_line` phân biệt reply (có `id`) với notification (không `id`, route theo `method` qua `rpc.on(method, cb)`).
 
-**Phiên bản hoá protocol.** `protocol::PROTOCOL_VERSION: (u32, u32)` (bắt đầu `1.0`, hiện `1.1` sau khi thêm `connections.path`) — bump major khi một client cũ có thể hiểu sai (method xoá, param bắt buộc đổi, field kết quả đổi kiểu); bump minor khi thêm thuần tuý, an toàn bỏ qua. Method `version` không sau feature gate nào. Chỉ cảnh báo (`vim.notify`/`:checkhealth`), không chặn lời gọi — công cụ một người dùng cục bộ, server/plugin thường cùng commit.
+**Phiên bản hoá protocol.** `protocol::PROTOCOL_VERSION: (u32, u32)` (bắt đầu `1.0`, hiện `1.2`: `connections.path`, `edit.sql` với `insert`) — bump major khi một client cũ có thể hiểu sai (method xoá, param bắt buộc đổi, field kết quả đổi kiểu); bump minor khi thêm thuần tuý, an toàn bỏ qua. Method `version` không sau feature gate nào. Chỉ cảnh báo (`vim.notify`/`:checkhealth`), không chặn lời gọi — công cụ một người dùng cục bộ, server/plugin thường cùng commit.
 
 **Plugin (`nvim/`).** Cài qua `lazy.nvim`. Gắn connection theo file (dòng `-- tradar: <tên>`, file `.tradar`, hoặc `:TradarConnect`). `<leader>rr`/`<leader>ra`/`<leader>rx` chạy/chạy hết/huỷ — async hoàn toàn. Kết quả trong buffer thường, cuộn tới cuối tự tải trang kế. Completion qua `blink.cmp`/omnifunc. `<leader>rt`/`<leader>rh`/`<leader>rs`/`<leader>rc` điều hướng bảng/lịch sử/schema/connection. Sửa dòng (`i`/`dd`) hiện câu lệnh, chạy sau khi xác nhận. Bảo vệ: `UPDATE`/`DELETE` thiếu `WHERE`, `DROP`, `TRUNCATE`, connection `protected` luôn hỏi. Định dạng `.tdb` gộp nhiều dialect/connection trong một file (block fenced-code kiểu Markdown). Mỗi connector phi-`QueryDriver` có module Lua riêng (`kafka.lua`/`socket.lua`/`rabbitmq.lua`/`http.lua`/`grpc.lua`) và command riêng — xem `nvim/README.md` để biết chi tiết dùng.
 

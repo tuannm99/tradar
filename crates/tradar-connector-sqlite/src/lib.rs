@@ -241,6 +241,10 @@ impl QueryDriver for SqliteDriver {
         Some(query_driver::build_sql_edit(edit))
     }
 
+    fn insert_sql(&self, table: &str, values: &[(String, String)]) -> Option<String> {
+        Some(query_driver::build_sql_insert(table, values))
+    }
+
     fn edit_source(&self, query: &str) -> Option<String> {
         query_driver::single_table_source(query)
     }
