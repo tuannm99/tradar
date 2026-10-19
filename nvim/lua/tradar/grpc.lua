@@ -209,7 +209,12 @@ local function parse_request(buf)
     end
     first = first + 1
   end
-  local text = table.concat(lines, '\n', first)
+  -- Whole-line `//` comments are the skeleton's hints, not JSON.
+  local body_lines = {}
+  for i = first, #lines do
+    if not lines[i]:match('^%s*//') then table.insert(body_lines, lines[i]) end
+  end
+  local text = table.concat(body_lines, '\n')
   local ok, body = pcall(vim.json.decode, text, { luanil = { object = true, array = true } })
   if not ok then return nil, nil, nil, 'request is not valid JSON: ' .. tostring(body) end
   return body, next(metadata) and metadata or nil, timeout_ms
@@ -456,6 +461,7 @@ function M.open_request(connection, service, method, kind)
       '- `<leader>rr` / `:TradarGrpcSend` send this request (streaming: start the call; client/bidi: run again to send another message)',
       '- `<leader>rc` / `:TradarGrpcClose` client/bidi stream: close the send side',
       '- `<leader>rx` / `:TradarGrpcCancel` cancel if still running / stop the stream',
+      '- whole-line `// ...` comments (the skeleton\'s hints) are ignored when sending',
       '- leading `# name: value` lines are request metadata (headers); `# deadline: 5s` sets the call deadline',
       '- `:q`/`:tabclose` close (this buffer is editable -- `q` is left as vim\'s own macro-record)',
     }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
@@ -467,7 +473,7 @@ function M.open_request(connection, service, method, kind)
   -- Replace the bare `{}` with every field of the input message at its
   -- default. Quiet on failure (an older server has no `grpc.skeleton`), and
   -- never over something the user already started typing.
-  rpc.request('grpc.skeleton', { connection = connection, service = service, method = method }, function(e, result)
+  rpc.request('grpc.skeleton', { connection = connection, service = service, method = method, comments = true }, function(e, result)
     if e or not result or not vim.api.nvim_buf_is_valid(buf) then return end
     local current = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
     if #current == 1 and vim.trim(current[1]) == '{}' then

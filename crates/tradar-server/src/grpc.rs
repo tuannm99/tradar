@@ -149,12 +149,43 @@ fn get_method(
 /// order the `.proto` declares them. Only the first member of a `oneof` is
 /// included (the others would make the request invalid), and a message
 /// that contains itself stops being expanded at the second level.
-pub fn skeleton(pool: &DescriptorPool, service: &str, method: &str) -> anyhow::Result<String> {
+///
+/// With `comments`, a `// ...` line goes above a field that has something to
+/// say: its `.proto` doc comment (only known for a `.proto` loaded by hand --
+/// reflection does not carry comments), the values of an enum, the other
+/// members of a `oneof`. That is no longer valid JSON; the plugin drops
+/// whole-line `//` comments before sending.
+pub fn skeleton(
+    pool: &DescriptorPool,
+    service: &str,
+    method: &str,
+    comments: bool,
+) -> anyhow::Result<String> {
     let method = get_method(pool, service, method)?;
-    Ok(message_skeleton(&method.input(), &mut Vec::new(), 0))
+    Ok(message_skeleton(
+        &method.input(),
+        &mut Vec::new(),
+        0,
+        comments,
+    ))
 }
 
-fn message_skeleton(desc: &MessageDescriptor, stack: &mut Vec<String>, depth: usize) -> String {
+/// The leading doc comment of `field` as `.proto` source wrote it, if the
+/// file was loaded with source info.
+fn field_doc(field: &FieldDescriptor) -> Option<String> {
+    let file = field.parent_file();
+    let info = file.file_descriptor_proto().source_code_info.as_ref()?;
+    let location = info.location.iter().find(|l| l.path == field.path())?;
+    let text = location.leading_comments.as_deref()?.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn message_skeleton(
+    desc: &MessageDescriptor,
+    stack: &mut Vec<String>,
+    depth: usize,
+    comments: bool,
+) -> String {
     // Well-known types have a fixed JSON shape of their own.
     match desc.full_name() {
         "google.protobuf.Timestamp" => return "\"1970-01-01T00:00:00Z\"".into(),
@@ -184,28 +215,65 @@ fn message_skeleton(desc: &MessageDescriptor, stack: &mut Vec<String>, depth: us
     }
     stack.push(name);
     let indent = "  ".repeat(depth + 1);
-    let mut lines = Vec::new();
+    // (comment lines, the field itself) -- commas go on the field line only.
+    let mut fields: Vec<(Vec<String>, String)> = Vec::new();
     for field in desc.fields() {
+        let mut notes = Vec::new();
         if let Some(oneof) = field.containing_oneof() {
             let first = oneof.fields().next().map(|f| f.number());
             if first != Some(field.number()) {
                 continue;
             }
+            if comments && oneof.fields().count() > 1 {
+                let names: Vec<_> = oneof.fields().map(|f| f.json_name().to_string()).collect();
+                notes.push(format!(
+                    "oneof {}: {} (only one)",
+                    oneof.name(),
+                    names.join(" | ")
+                ));
+            }
         }
-        lines.push(format!(
-            "{indent}{}: {}",
-            serde_json::Value::String(field.json_name().to_string()),
-            field_skeleton(&field, stack, depth)
+        if comments {
+            if let Some(doc) = field_doc(&field) {
+                notes.splice(0..0, doc.lines().map(|l| l.trim().to_string()));
+            }
+            if let Kind::Enum(e) = field.kind() {
+                let values: Vec<_> = e.values().map(|v| v.name().to_string()).collect();
+                notes.push(format!("enum {}: {}", e.name(), values.join(" | ")));
+            }
+        }
+        fields.push((
+            notes,
+            format!(
+                "{indent}{}: {}",
+                serde_json::Value::String(field.json_name().to_string()),
+                field_skeleton(&field, stack, depth, comments)
+            ),
         ));
     }
     stack.pop();
-    if lines.is_empty() {
+    if fields.is_empty() {
         return "{}".into();
     }
-    format!("{{\n{}\n{}}}", lines.join(",\n"), "  ".repeat(depth))
+    let last = fields.len() - 1;
+    let mut lines = Vec::new();
+    for (i, (notes, field)) in fields.into_iter().enumerate() {
+        lines.extend(notes.into_iter().map(|n| format!("{indent}// {n}")));
+        lines.push(if i == last {
+            field
+        } else {
+            format!("{field},")
+        });
+    }
+    format!("{{\n{}\n{}}}", lines.join("\n"), "  ".repeat(depth))
 }
 
-fn field_skeleton(field: &FieldDescriptor, stack: &mut Vec<String>, depth: usize) -> String {
+fn field_skeleton(
+    field: &FieldDescriptor,
+    stack: &mut Vec<String>,
+    depth: usize,
+    comments: bool,
+) -> String {
     if field.is_map() {
         return "{}".into();
     }
@@ -234,7 +302,7 @@ fn field_skeleton(field: &FieldDescriptor, stack: &mut Vec<String>, depth: usize
                 .map_or(String::new(), |v| v.name().to_string());
             serde_json::Value::String(first).to_string()
         }
-        Kind::Message(m) => message_skeleton(&m, stack, depth + 1),
+        Kind::Message(m) => message_skeleton(&m, stack, depth + 1, comments),
     }
 }
 
@@ -306,7 +374,12 @@ pub async fn discover_via_reflection(channel: Channel) -> anyhow::Result<Descrip
 pub fn load_proto(pool: &mut DescriptorPool, path: &str) -> anyhow::Result<Vec<String>> {
     let path = Path::new(path);
     let include = path.parent().unwrap_or_else(|| Path::new("."));
-    let fds = protox::compile([path], [include])?;
+    // Source info is what carries the `.proto`'s comments, which the request
+    // skeleton shows as hints.
+    let mut compiler = protox::Compiler::new([include])?;
+    compiler.include_source_info(true).include_imports(true);
+    compiler.open_file(path)?;
+    let fds = compiler.file_descriptor_set();
     let before: std::collections::HashSet<String> = list_services(pool).into_iter().collect();
     pool.add_file_descriptor_set(fds)?;
     Ok(list_services(pool)
@@ -849,7 +922,11 @@ impl crate::extension::Extension for GrpcExtension {
                 let conn = connections
                     .get(name)
                     .ok_or_else(|| not_connected("grpc", name))?;
-                let text = skeleton(&conn.pool, service, rpc_method)
+                let comments = params
+                    .get("comments")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let text = skeleton(&conn.pool, service, rpc_method, comments)
                     .map_err(|e| RpcError::app(e.to_string()))?;
                 Ok(json!({"skeleton": text}))
             }
@@ -987,7 +1064,7 @@ service Svc { rpc Do (Req) returns (Address); }
 
     #[test]
     fn skeleton_has_every_field_at_its_default_in_declared_order() {
-        let text = skeleton(&pool(), "demo.Svc", "Do").unwrap();
+        let text = skeleton(&pool(), "demo.Svc", "Do", false).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
         assert_eq!(
@@ -1020,7 +1097,7 @@ service Svc { rpc Do (Req) returns (Address); }
     #[test]
     fn the_skeleton_is_a_request_the_server_would_accept() {
         let pool = pool();
-        let text = skeleton(&pool, "demo.Svc", "Do").unwrap();
+        let text = skeleton(&pool, "demo.Svc", "Do", false).unwrap();
         let method = get_method(&pool, "demo.Svc", "Do").unwrap();
         let mut deserializer = serde_json::Deserializer::from_str(&text);
         DynamicMessage::deserialize(method.input(), &mut deserializer)
@@ -1028,8 +1105,55 @@ service Svc { rpc Do (Req) returns (Address); }
     }
 
     #[test]
+    fn comments_in_the_skeleton_are_hints_that_do_not_change_the_json() {
+        let proto = r#"
+syntax = "proto3";
+package demo;
+enum Level { LEVEL_UNSET = 0; LEVEL_HIGH = 1; }
+message Req {
+  // Display name of the user.
+  // Shown in the UI.
+  string name = 1;
+  Level level = 2;
+  oneof pick {
+    string by_name = 3;
+    int32 by_id = 4;
+  }
+}
+service Svc { rpc Do (Req) returns (Req); }
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.proto");
+        std::fs::write(&path, proto).unwrap();
+        let mut pool = DescriptorPool::new();
+        load_proto(&mut pool, path.to_str().unwrap()).unwrap();
+
+        let with = skeleton(&pool, "demo.Svc", "Do", true).unwrap();
+        assert!(with.contains("// Display name of the user.\n"), "{with}");
+        assert!(with.contains("// Shown in the UI."), "{with}");
+        assert!(
+            with.contains("// enum Level: LEVEL_UNSET | LEVEL_HIGH"),
+            "{with}"
+        );
+        assert!(
+            with.contains("// oneof pick: byName | byId (only one)"),
+            "{with}"
+        );
+
+        // Dropping the comment lines gives exactly the plain skeleton.
+        let stripped: String = with
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let plain = skeleton(&pool, "demo.Svc", "Do", false).unwrap();
+        assert_eq!(stripped, plain);
+        serde_json::from_str::<serde_json::Value>(&plain).unwrap();
+    }
+
+    #[test]
     fn an_unknown_method_is_an_error() {
-        assert!(skeleton(&pool(), "demo.Svc", "Nope").is_err());
-        assert!(skeleton(&pool(), "demo.Nope", "Do").is_err());
+        assert!(skeleton(&pool(), "demo.Svc", "Nope", false).is_err());
+        assert!(skeleton(&pool(), "demo.Nope", "Do", false).is_err());
     }
 }

@@ -78,6 +78,8 @@ Chọn method mở một buffer JSON trong tab mới, đã **điền sẵn khung
 
 Nếu server không hỗ trợ reflection, `:TradarGrpcServices` trả rỗng cho tới khi bạn `:TradarGrpcLoadProto`.
 
+**Gợi ý trong khung request.** Khung sinh ra có các dòng `// …` phía trên những trường cần chú thích: comment trong `.proto` (chỉ có khi nạp bằng `:TradarGrpcLoadProto`; server reflection không mang comment), các giá trị của enum (`// enum Level: LEVEL_UNSET | LEVEL_HIGH`), các nhánh của `oneof`. Dòng nào bắt đầu bằng `//` đều bị bỏ khi gửi, nên cứ để nguyên hoặc xoá tuỳ ý.
+
 **Metadata.** Các dòng `# tên: giá trị` ở đầu buffer request là header gửi kèm (`# x-token: abc`); dòng `#` khác và dòng trống ở đầu là comment; JSON bắt đầu từ dòng đầu tiên không phải `#`. Key tự chuyển về chữ thường; key `-bin` (giá trị nhị phân) chưa hỗ trợ. Dòng đặc biệt `# deadline: 5s` (`500ms`, `2m`, hoặc số trần = giây) không gửi như header mà đặt **deadline** của call (`grpc-timeout`); hết hạn thì server trả lỗi (`DEADLINE_EXCEEDED`, hoặc `CANCELLED` với server tonic). Với unary, header của response hiện thành các dòng `# tên: giá trị` phía trên JSON trả về.
 
 **Streaming.** Danh sách method ghi rõ `[server stream]`, `[client stream]` hoặc `[bidi stream]`. Response là một transcript chỉ-đọc (`‹` reply, `›` message đã gửi, `#` header/trailer/trạng thái), giữ 5000 dòng gần nhất:
