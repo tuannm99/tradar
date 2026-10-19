@@ -138,6 +138,7 @@ enum ShellCommand {
     ShowCollections,
     ShowUsers,
     ShowRoles,
+    ShowProfile,
     DbName,
     DbCall(MethodCall),
     Query(ParsedQuery),
@@ -156,6 +157,28 @@ const DB_METHODS: &[&str] = &[
     "adminCommand",
 ];
 
+/// `db.getSiblingDB("other").rest` -> (`Some("other")`, `db.rest`): the same
+/// command aimed at another database for this one statement, without the
+/// `use` that would switch the session. A plain command comes back as
+/// `(None, text)`.
+fn split_sibling_db(text: &str) -> anyhow::Result<(Option<String>, String)> {
+    let cleaned = clean_command(text);
+    let Some(after) = cleaned.strip_prefix("db.getSiblingDB(") else {
+        return Ok((None, cleaned));
+    };
+    let close = find_matching_close_paren(after)
+        .ok_or_else(|| anyhow::anyhow!("missing closing parenthesis"))?;
+    let name = after[..close].trim().trim_matches(['"', '\'']).to_string();
+    if name.is_empty() {
+        anyhow::bail!("getSiblingDB needs a database name");
+    }
+    let tail = after[close + 1..].trim_start();
+    if !tail.starts_with('.') {
+        anyhow::bail!("expected a call after getSiblingDB(...), e.g. .getCollectionNames()");
+    }
+    Ok((Some(name), format!("db{tail}")))
+}
+
 fn parse_shell_command(text: &str) -> anyhow::Result<ShellCommand> {
     let text = clean_command(text);
     if let Some(rest) = text.strip_prefix("use ") {
@@ -171,13 +194,14 @@ fn parse_shell_command(text: &str) -> anyhow::Result<ShellCommand> {
             "collections" | "tables" => Ok(ShellCommand::ShowCollections),
             "users" => Ok(ShellCommand::ShowUsers),
             "roles" => Ok(ShellCommand::ShowRoles),
+            "profile" => Ok(ShellCommand::ShowProfile),
             other => anyhow::bail!(
-                "unsupported `show {other}` (supported: show dbs, show collections, show users, show roles)"
+                "unsupported `show {other}` (supported: show dbs, show collections, show users, show roles, show profile)"
             ),
         };
     }
     if text == "show" {
-        anyhow::bail!("`show` needs an argument: dbs, collections, users or roles");
+        anyhow::bail!("`show` needs an argument: dbs, collections, users, roles or profile");
     }
     if text == "db" {
         return Ok(ShellCommand::DbName);
@@ -533,8 +557,11 @@ impl MongoDriver {
     /// calls (`db.getCollectionNames()`, `db.stats()`, `db.runCommand({..})`
     /// ...). Replies are shaped like `mongosh` prints them -- a list is one
     /// array value, a command's reply one document.
-    async fn run_db_helper(&self, command: ShellCommand) -> anyhow::Result<QueryResult> {
-        let db = self.database();
+    async fn run_db_helper(
+        &self,
+        command: ShellCommand,
+        db: mongodb::Database,
+    ) -> anyhow::Result<QueryResult> {
         let one = |value: serde_json::Value| QueryResult::Documents {
             items: vec![value],
             truncated: false,
@@ -568,6 +595,32 @@ impl MongoDriver {
             ShellCommand::ShowRoles => {
                 let reply = run(mongodb::bson::doc! { "rolesInfo": 1 }).await?;
                 one(extjson(reply))
+            }
+            // mongosh lists the latest few slow operations; the profiler
+            // writes them to `system.profile` (empty until profiling is on).
+            ShellCommand::ShowProfile => {
+                let collection = db.collection::<Document>("system.profile");
+                let find = MethodCall {
+                    name: "find".into(),
+                    args: vec![serde_json::json!({})],
+                };
+                let chain = [
+                    MethodCall {
+                        name: "sort".into(),
+                        args: vec![serde_json::json!({ "ts": -1 })],
+                    },
+                    MethodCall {
+                        name: "limit".into(),
+                        args: vec![serde_json::json!(20)],
+                    },
+                ];
+                let mut result = run_method(&collection, &find, &chain).await?;
+                if let QueryResult::Documents { items, .. } = &mut result {
+                    for doc in items {
+                        simplify_extjson(doc);
+                    }
+                }
+                result
             }
             ShellCommand::DbCall(call) => {
                 let arg = |i: usize| -> anyhow::Result<Document> {
@@ -666,6 +719,8 @@ impl QueryDriver for MongoDriver {
             "db",
             "use",
             "show",
+            "profile",
+            "getSiblingDB",
             "dbs",
             "databases",
             "find",
@@ -908,7 +963,16 @@ impl QueryDriver for MongoDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
-        let parsed = match parse_shell_command(query)? {
+        let (sibling, command_text) = split_sibling_db(query)?;
+        let db = match &sibling {
+            Some(name) => self
+                .client
+                .as_ref()
+                .expect("connect() must be called first")
+                .database(name),
+            None => self.database(),
+        };
+        let parsed = match parse_shell_command(&command_text)? {
             ShellCommand::Use(name) => {
                 *self.current_db.lock().unwrap() = Some(name.clone());
                 return Ok(QueryResult::Documents {
@@ -939,9 +1003,8 @@ impl QueryDriver for MongoDriver {
                 });
             }
             ShellCommand::Query(parsed) => parsed,
-            helper => return self.run_db_helper(helper).await,
+            helper => return self.run_db_helper(helper, db).await,
         };
-        let db = self.database();
         let collection = db.collection::<Document>(&parsed.collection);
         let mut result = run_method(&collection, parsed.primary(), parsed.chain()).await?;
         // Every arm of `run_method` produces `Documents` via either
@@ -972,6 +1035,11 @@ impl QueryDriver for MongoDriver {
     /// the result, but that's caught generically downstream (`editable_row`
     /// errors "the key column '_id' isn't in this result"), not here.
     fn edit_source(&self, query: &str) -> Option<String> {
+        // A `getSiblingDB` query reads another database than the session's,
+        // and a generated `updateOne` would run against the wrong one.
+        if clean_command(query).starts_with("db.getSiblingDB(") {
+            return None;
+        }
         let parsed = parse_shell_query(query.trim()).ok()?;
         if parsed.primary().name != "find" {
             return None;
@@ -1780,9 +1848,35 @@ mod tests {
 
     #[test]
     fn an_unknown_show_is_a_clear_error_not_a_query_parse_error() {
-        let err = parse_shell_command("show profile").unwrap_err().to_string();
+        let err = parse_shell_command("show nothing").unwrap_err().to_string();
         assert!(err.contains("show collections"), "{err}");
+        assert!(matches!(
+            parse_shell_command("show profile;").unwrap(),
+            ShellCommand::ShowProfile
+        ));
         assert!(parse_shell_command("show").is_err());
+    }
+
+    #[test]
+    fn get_sibling_db_retargets_one_statement_at_another_database() {
+        let (db, rest) =
+            split_sibling_db("db.getSiblingDB(\"shop\").getCollectionNames();").unwrap();
+        assert_eq!(db.as_deref(), Some("shop"));
+        assert_eq!(rest, "db.getCollectionNames()");
+        let (db, rest) = split_sibling_db("db.getSiblingDB('shop').orders.find({})").unwrap();
+        assert_eq!(db.as_deref(), Some("shop"));
+        assert_eq!(parse_shell_query(&rest).unwrap().collection, "orders");
+        // An ordinary statement is left alone.
+        let (db, rest) = split_sibling_db("db.users.find()").unwrap();
+        assert!(db.is_none());
+        assert_eq!(rest, "db.users.find()");
+        assert!(split_sibling_db("db.getSiblingDB(\"\").stats()").is_err());
+        assert!(split_sibling_db("db.getSiblingDB(\"x\")").is_err());
+        assert!(
+            MongoDriver::new("mongodb://x")
+                .edit_source("db.getSiblingDB(\"shop\").orders.find({})")
+                .is_none()
+        );
     }
 
     #[test]

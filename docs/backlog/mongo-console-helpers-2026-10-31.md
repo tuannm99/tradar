@@ -12,3 +12,7 @@ Chỉ `use` và `show dbs` chạy được; `show collections`, `db.getCollectio
 ## Bổ sung: `distinct`, `getIndexes`, `estimatedDocumentCount`
 
 Thêm vào `run_method` (không chain, không editable). Chỉ unit-test phần parse; phần thực thi chưa chạy trên Mongo thật (Docker Hub 429 trong sandbox).
+
+## Bổ sung: `show profile`, `getSiblingDB`
+
+`show profile` đọc 20 dòng mới nhất của `system.profile` (sort `ts` giảm dần). `db.getSiblingDB("x").<lệnh>` được tách ở `split_sibling_db` rồi chạy lệnh còn lại trên database `x` cho đúng câu đó (không đổi `current_db`); `edit_source` từ chối câu kiểu này. Chỉ unit-test phần parse; chưa chạy trên Mongo thật.
