@@ -28,3 +28,7 @@ Chi phí nằm ở **đọc, stringify và giữ** 10 000 dòng dù chỉ hiện
 - Postgres/MySQL/Cassandra/ClickHouse chưa đo thật (không có backend trong sandbox); chúng dùng cùng cơ chế giới hạn nên lợi ích về số dòng và bộ nhớ như nhau.
 - TUI (`tradar-app`) giữ trần 10 000 dòng: đóng băng, chưa đổi hành vi.
 - `glibc` có thể không trả bộ nhớ đã giải phóng về hệ điều hành ngay, nên RSS có thể không giảm sau khi cursor bị loại.
+
+## Bổ sung: Elasticsearch cũng theo `max_rows`
+
+`_search` với `size` lớn (ES cho tới 10 000) trước đây giữ hết hit; giờ cắt ở `max_rows` và báo `truncated` như các driver khác (test `a_search_with_more_hits_than_the_row_cap_is_cut_and_marked`).

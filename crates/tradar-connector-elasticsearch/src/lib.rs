@@ -217,10 +217,17 @@ fn handle_response(status: reqwest::StatusCode, text: String) -> anyhow::Result<
     // response is shown then, hits included, as JSON.
     let keeps_whole_response = json.get("aggregations").is_some() || json.get("suggest").is_some();
     match unwrap_search_hits(&json).filter(|_| !keeps_whole_response) {
-        Some(docs) => Ok(QueryResult::Documents {
-            items: docs,
-            truncated: false,
-        }),
+        Some(mut docs) => {
+            // A `size` of thousands is legal for ES; the row cap still holds
+            // for what we keep (and the stored copy).
+            let cap = tradar_query_workbench::query_driver::max_rows();
+            let truncated = docs.len() > cap;
+            docs.truncate(cap);
+            Ok(QueryResult::Documents {
+                items: docs,
+                truncated,
+            })
+        }
         None => Ok(QueryResult::Documents {
             items: vec![json],
             truncated: false,
@@ -991,6 +998,23 @@ mod tests {
                 serde_json::json!({"_id": "2", "title": "b"}),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_search_with_more_hits_than_the_row_cap_is_cut_and_marked() {
+        let hits: Vec<_> = (0..20)
+            .map(|i| serde_json::json!({"_id": i.to_string(), "_source": {"n": i}}))
+            .collect();
+        let body = serde_json::json!({"hits": {"hits": hits}}).to_string();
+        let result = tradar_query_workbench::query_driver::with_max_rows(5, async {
+            handle_response(reqwest::StatusCode::OK, body).unwrap()
+        })
+        .await;
+        let QueryResult::Documents { items, truncated } = result else {
+            panic!("expected Documents");
+        };
+        assert_eq!(items.len(), 5);
+        assert!(truncated);
     }
 
     #[test]
