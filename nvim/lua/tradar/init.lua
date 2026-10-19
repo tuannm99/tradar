@@ -14,7 +14,7 @@ local ns = vim.api.nvim_create_namespace('tradar')
 
 --- Rows fetched per page (`setup{ page_size = N }`); the next page is an
 --- explicit `<leader>rm`, never a side effect of scrolling.
-local DEFAULT_PAGE = 100
+local DEFAULT_PAGE = 20
 local SPINNER = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local HISTORY_MAX = 200
 

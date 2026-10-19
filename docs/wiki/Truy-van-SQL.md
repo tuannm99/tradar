@@ -27,7 +27,7 @@ Ranh giới statement do chính driver quyết định. Chạy hoàn toàn async
 
 ## Buffer kết quả
 
-Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Mỗi trang 100 dòng (`setup{ page_size }`); trang kế tải bằng `<leader>rm` chứ không tự tải khi cuộn (`setup{ auto_load_more = true }` để như cũ). Query chạy lâu: thanh trên cùng của cửa sổ kết quả hiện spinner + thời gian + cách huỷ.
+Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Mỗi trang 20 dòng (`setup{ page_size }`); trang kế tải bằng `<leader>rm` chứ không tự tải khi cuộn (`setup{ auto_load_more = true }` để như cũ). Query chạy lâu: thanh trên cùng của cửa sổ kết quả hiện spinner + thời gian + cách huỷ.
 
 | Phím | Việc |
 |---|---|
