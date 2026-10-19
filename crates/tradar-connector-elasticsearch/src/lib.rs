@@ -201,7 +201,13 @@ fn handle_response(status: reqwest::StatusCode, text: String) -> anyhow::Result<
     // `_cat`, `_cluster/health`, a single `_doc` fetch) stays exactly as
     // it always has, the whole response as one `Documents` entry, since
     // there's no per-row structure to unwrap.
-    match unwrap_search_hits(&json) {
+    //
+    // Except when the response also carries `aggregations` or `suggest`:
+    // those are the answer (often with `"size": 0`, so no hits at all), and
+    // unwrapping would throw them away and leave an empty grid. The whole
+    // response is shown then, hits included, as JSON.
+    let keeps_whole_response = json.get("aggregations").is_some() || json.get("suggest").is_some();
+    match unwrap_search_hits(&json).filter(|_| !keeps_whole_response) {
         Some(docs) => Ok(QueryResult::Documents {
             items: docs,
             truncated: false,
@@ -976,6 +982,30 @@ mod tests {
                 serde_json::json!({"_id": "2", "title": "b"}),
             ]
         );
+    }
+
+    #[test]
+    fn a_search_with_aggregations_keeps_the_whole_response() {
+        let body = serde_json::json!({
+            "took": 3,
+            "hits": {"total": {"value": 0}, "hits": []},
+            "aggregations": {"by_tag": {"buckets": [{"key": "a", "doc_count": 2}]}}
+        });
+        let QueryResult::Documents { items, .. } =
+            handle_response(reqwest::StatusCode::OK, body.to_string()).unwrap()
+        else {
+            panic!("expected Documents");
+        };
+        assert_eq!(items, vec![body]);
+
+        // A plain search still unwraps into one row per hit.
+        let plain = serde_json::json!({"hits": {"hits": [{"_id": "1", "_source": {"a": 1}}]}});
+        let QueryResult::Documents { items, .. } =
+            handle_response(reqwest::StatusCode::OK, plain.to_string()).unwrap()
+        else {
+            panic!("expected Documents");
+        };
+        assert_eq!(items, vec![serde_json::json!({"_id": "1", "a": 1})]);
     }
 
     #[test]

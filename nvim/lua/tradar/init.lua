@@ -511,6 +511,13 @@ end
 --- forces either.
 local function default_view(items)
   if opts.documents_view then return opts.documents_view end
+  -- One deeply nested document (an Elasticsearch aggregation response, a
+  -- `serverStatus`) flattens into a very wide one-row table; JSON reads better.
+  if #items == 1 and type(items[1]) == 'table' and not vim.islist(items[1]) then
+    for _, value in pairs(items[1]) do
+      if type(value) == 'table' then return 'json' end
+    end
+  end
   for _, item in ipairs(items) do
     if type(item) == 'table' and not vim.islist(item) then return 'table' end
   end
