@@ -688,12 +688,19 @@ local function export_text(fmt, r)
   return nil, 'unknown format `' .. tostring(fmt) .. '` (csv, json, md, tsv)'
 end
 
+--- " — NOT the whole result …" when the server stopped reading early: an
+--- export or yank of a cut-short result must not look complete.
+local function cut_note(r)
+  if not r.truncated then return '' end
+  return (' — NOT the whole result: stopped at %d rows (setup{ max_rows } reads more)'):format(#r.rows)
+end
+
 --- Yanks the whole result (every row, loading what's missing) in `fmt`.
 function M.yank_all(fmt)
   all_rows(function(r)
     local text, err = export_text(fmt, r)
     if not text then return notify(err, vim.log.levels.WARN) end
-    yank(text, ('%d rows as %s'):format(#r.rows, fmt))
+    yank(text, ('%d rows as %s%s'):format(#r.rows, fmt, cut_note(r)))
   end)
 end
 
@@ -709,7 +716,7 @@ function M.export(fmt, path)
       if not f then return notify(open_err, vim.log.levels.ERROR) end
       f:write(text)
       f:close()
-      notify(('wrote %d rows to %s'):format(#r.rows, target))
+      notify(('wrote %d rows to %s%s'):format(#r.rows, target, cut_note(r)), r.truncated and vim.log.levels.WARN or nil)
     end
     if path and path ~= '' then return write(path) end
     vim.ui.input({ prompt = 'Export to: ', default = 'result.' .. fmt, completion = 'file' }, write)

@@ -32,3 +32,7 @@ Chi phí nằm ở **đọc, stringify và giữ** 10 000 dòng dù chỉ hiện
 ## Bổ sung: Elasticsearch cũng theo `max_rows`
 
 `_search` với `size` lớn (ES cho tới 10 000) trước đây giữ hết hit; giờ cắt ở `max_rows` và báo `truncated` như các driver khác (test `a_search_with_more_hits_than_the_row_cap_is_cut_and_marked`).
+
+## Bổ sung: export/yank không được trông như đầy đủ
+
+`:TradarExport` và `gyj`/`gyv`/`gym` trên kết quả bị cắt bởi `max_rows` giờ ghi `NOT the whole result: stopped at N rows (setup{ max_rows } reads more)` (mức WARN khi ghi file), thay vì chỉ nói `N rows`.
