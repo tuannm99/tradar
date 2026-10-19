@@ -85,3 +85,5 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`grpc-request-skeleton-2026-10-27.md`](grpc-request-skeleton-2026-10-27.md) — buffer request gRPC điền sẵn khung từ message đầu vào (`grpc.skeleton`, protocol 1.4)
 - [`cancel-reconnect-fixes-2026-10-28.md`](cancel-reconnect-fixes-2026-10-28.md) — huỷ query chậm báo `cancelled` thay vì lỗi (`biased` select), plugin tự kết nối lại và lặp một lần khi server đã khởi động lại
 - [`update-multi-cell-2026-10-29.md`](update-multi-cell-2026-10-29.md) — các ô đổi của một dòng gộp thành một câu `UPDATE` (`RowChange::SetValues`, protocol 1.5; SQL, Cassandra, Mongo, ES)
+- [`results-paging-progress-selection-2026-10-30.md`](results-paging-progress-selection-2026-10-30.md) — bỏ tự tải trang khi cuộn (`<leader>rm`, `page_size`), thanh tiến trình query bằng winbar (bớt lag statusline), Mongo khỏi `list_schema` sau mỗi kết quả, visual `<leader>rr` tách theo `;`
+- [`mongo-console-helpers-2026-10-31.md`](mongo-console-helpers-2026-10-31.md) — Mongo: `show collections/users/roles`, `db`, `db.getCollectionNames()/stats()/runCommand()...`, `db.getCollection("x")`, dấu `;` cuối câu

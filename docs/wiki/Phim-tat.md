@@ -9,7 +9,7 @@ Quy ước: `<leader>r` là **tiền tố** mặc định, đổi bằng `setup{
 | Phím | Chế độ | Việc |
 |---|---|---|
 | `rr` | n | chạy câu lệnh dưới con trỏ (trong `.tdb`: của block đang đứng — kể cả khi con trỏ trên dòng fence) |
-| `rr` | x | chạy đoạn đang chọn |
+| `rr` | x | chạy các dòng đang chọn — tách theo dấu `;` (SQL) và chạy lần lượt như `ra` |
 | `ra` | n | chạy tất cả câu lệnh (dừng ở lỗi đầu tiên) |
 | `rx` | n | huỷ câu đang chạy |
 | `rc` | n | chọn connection (cũng có dòng `+ edit connections file…`) |
@@ -24,12 +24,13 @@ Quy ước: `<leader>r` là **tiền tố** mặc định, đổi bằng `setup{
 
 ## 2. Buffer kết quả (`tradar://results`)
 
-Là buffer Neovim bình thường: `j`/`k`/`gg`/`G`, `/`, `yy`… đều dùng được; cuộn tới cuối tự tải trang kế.
+Là buffer Neovim bình thường: `j`/`k`/`gg`/`G`, `/`, `yy`… đều dùng được. Trang kế **không** tự tải khi cuộn — bấm `rm` (đặt `auto_load_more = true` nếu muốn như cũ). Khi query đang chạy, thanh trên cùng của cửa sổ kết quả hiện `⠋ running 3.2s on <conn> — <leader>rx cancels`.
 
 | Phím | Việc |
 |---|---|
 | `gyc` / `gyr` / `gyC` | copy ô / dòng / cột (`gyr` ở visual: nhiều dòng, tab-separated) |
 | `gyj` / `gyv` / `gym` | copy **cả** kết quả dạng JSON / CSV / Markdown |
+| `rm` | tải trang kế của kết quả (không tự tải khi cuộn) |
 | `rv` | đổi bảng ↔ JSON (SQL: mảng object; tài liệu: JSON in thụt lề) |
 | `gK` | xem cả dòng hiện tại, mỗi trường một dòng |
 | `K` | xem trọn giá trị một ô (khi ô bị cắt `…`) |

@@ -12,7 +12,9 @@ local M = {}
 local opts = {}
 local ns = vim.api.nvim_create_namespace('tradar')
 
-local PAGE = 200
+--- Rows fetched per page (`setup{ page_size = N }`); the next page is an
+--- explicit `<leader>rm`, never a side effect of scrolling.
+local DEFAULT_PAGE = 20
 local SPINNER = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local HISTORY_MAX = 200
 
@@ -232,10 +234,42 @@ function M.status()
   return table.concat(parts, ' · ')
 end
 
+local show_message -- defined with the results buffer below
+
+--- Shown on the results window while a query runs (and nowhere else): a
+--- spinner, the elapsed time and how to cancel. It is a `winbar`, so each
+--- tick repaints one window -- not the whole statusline, which is what the
+--- old 10 Hz `redrawstatus` did to a heavy statusline (typing lagged for
+--- as long as a query ran).
+local function progress_text()
+  local frame = SPINNER[(math.floor(uv.hrtime() / 1e8) % #SPINNER) + 1]
+  return (' %s running %s on %s — %sx cancels'):format(
+    frame, elapsed_text(state.running.started), state.running.conn, opts.prefix or '<leader>r')
+end
+
+local function set_progress_bar()
+  local buf = state.results_buf
+  local win = buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) or -1
+  if win == -1 then return end
+  vim.wo[win].winbar = state.running and progress_text():gsub('%%', '%%%%') or ''
+end
+
 local function start_spinner()
   if state.spinner then return end
+  -- If the results window is closed, open it so a long query shows *something*.
+  local buf = state.results_buf
+  if not (buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) ~= -1) then
+    show_message('running…', 4)
+  end
+  set_progress_bar()
   state.spinner = uv.new_timer()
-  state.spinner:start(100, 100, vim.schedule_wrap(function() vim.cmd.redrawstatus() end))
+  local ticks = 0
+  state.spinner:start(200, 200, vim.schedule_wrap(function()
+    set_progress_bar()
+    ticks = ticks + 1
+    -- The statusline (lualine & co.) only needs a nudge once a second.
+    if ticks % 5 == 0 then vim.cmd.redrawstatus() end
+  end))
 end
 
 local function stop_spinner()
@@ -244,6 +278,7 @@ local function stop_spinner()
     state.spinner:close()
     state.spinner = nil
   end
+  set_progress_bar() -- state.running is nil by now: clears the bar
   vim.cmd.redrawstatus()
 end
 
@@ -331,7 +366,9 @@ end
 
 local function results_title(r)
   local text = ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and ' (server cap reached)' or '')
-  if r.shown < r.total then text = text .. '  — scroll down or <leader>rm for more' end
+  if r.shown < r.total then
+    text = text .. ('  — %d more: %sm loads the next page'):format(r.total - r.shown, opts.prefix or '<leader>r')
+  end
   return text
 end
 
@@ -423,12 +460,16 @@ local function paint_results(new_from)
   local pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
   set_lines(buf, lines)
   -- JSON highlighting by `syntax` only: no `filetype`, so no JSON ftplugins/LSP attach to a scratch buffer.
-  vim.bo[buf].syntax = ((r.kind == 'documents' and r.view == 'json') or (r.kind == 'table' and r.view == 'json')) and 'json' or ''
+  -- Regex syntax highlighting of a big JSON buffer is slow, so it is capped:
+  -- only the first 200 columns of a line, and not at all past 3000 lines.
+  vim.bo[buf].synmaxcol = 200
+  local json_view = (r.kind == 'documents' or r.kind == 'table') and r.view == 'json'
+  vim.bo[buf].syntax = (json_view and #lines <= 3000) and 'json' or ''
   if pos then pcall(vim.api.nvim_win_set_cursor, win, { math.min(pos[1], #lines), pos[2] }) end
   sync_editable(r)
 end
 
-local function show_message(text, height)
+show_message = function(text, height)
   local buf = scratch('tradar://results', state.results_buf)
   state.results_buf = buf
   attach_results(buf)
@@ -514,7 +555,7 @@ function M.more(cb)
     return
   end
   r.fetching = true
-  call('fetch', { cursor = r.id, offset = r.shown, limit = cb and 2000 or PAGE }, function(page)
+  call('fetch', { cursor = r.id, offset = r.shown, limit = cb and 2000 or (opts.page_size or DEFAULT_PAGE) }, function(page)
     r.fetching = false
     if state.result ~= r then return end
     local new_from = #r.rows + 1
@@ -693,6 +734,7 @@ attach_results = function(buf)
       '- `gyc` / `gyr` / `gyC` yank cell / row (visual: many rows) / column',
       '- `gyj` / `gyv` / `gym` yank all as JSON / CSV / Markdown table',
       ('- `%sv` table <-> JSON (SQL rows and documents)'):format(opts.prefix or '<leader>r'),
+      ('- `%sm` load the next page of rows'):format(opts.prefix or '<leader>r'),
       '- `gK` show the current row, one field per line',
       '- `gd` follow foreign key under cursor',
       '- edit the grid like any buffer (`cw`, `dd`, `o` + a new row, `:s`, `:g`, `u`…); nothing runs until `:w`',
@@ -703,12 +745,17 @@ attach_results = function(buf)
     })
   end, 'show keymap help')
 
-  -- Scrolling to the end loads the next page: no key to remember.
+  -- The next page is a key (`<leader>rm`), not a side effect of moving the
+  -- cursor: auto-loading on scroll re-rendered the whole grid under the
+  -- user's hands (and `gg` could land on a repaint). `setup{ auto_load_more
+  -- = true }` brings the old behaviour back.
+  map('n', (opts.prefix or '<leader>r') .. 'm', function() M.more() end, 'load the next page')
   vim.api.nvim_create_autocmd('CursorMoved', {
     buffer = buf,
     callback = function()
       local r = state.result
-      if r and r.shown < r.total and vim.api.nvim_win_get_cursor(0)[1] >= vim.api.nvim_buf_line_count(buf) - 3 then
+      if opts.auto_load_more and r and r.shown < r.total
+          and vim.api.nvim_win_get_cursor(0)[1] >= vim.api.nvim_buf_line_count(buf) - 3 then
         M.more()
       end
     end,
@@ -792,7 +839,7 @@ local function run_text(buf, text, base_row, base_col, flags)
       state.running = nil
       stop_spinner()
     end
-    call('execute', { connection = conn, query = text, page_size = PAGE, query_id = id }, function(r)
+    call('execute', { connection = conn, query = text, page_size = opts.page_size or DEFAULT_PAGE, query_id = id }, function(r)
       finish()
       local ms = (uv.hrtime() - started) / 1e6
       local took = ms < 1000 and ('%dms'):format(ms) or ('%.1fs'):format(ms / 1000)
@@ -838,9 +885,14 @@ end
 --- not a regex here). `all`: every statement in the buffer, in order.
 function M.run(range_start, range_end, all, transform)
   local buf = vim.api.nvim_get_current_buf()
+  -- A visual selection is run the way "run all" runs a buffer: the server
+  -- splits it on the dialect's own statement boundaries (`;` for SQL), so
+  -- several statements run one after another instead of being sent as one
+  -- text the driver might refuse.
+  local selection
   if range_start then
-    local lines = vim.api.nvim_buf_get_lines(buf, range_start - 1, range_end, false)
-    return run_text(buf, table.concat(lines, '\n'), range_start - 1, 0)
+    selection = vim.api.nvim_buf_get_lines(buf, range_start - 1, range_end, false)
+    all = true
   end
 
   -- `.tdb`: scoped to the fenced block under the cursor, not the whole
@@ -852,7 +904,9 @@ function M.run(range_start, range_end, all, transform)
   -- of which only know real buffer coordinates.
   local base_row = 0
   local lines
-  if M.is_tdb(buf) then
+  if selection then
+    base_row, lines = range_start - 1, selection
+  elseif M.is_tdb(buf) then
     local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
     local block = M.block_at(buf, cursor_row, true)
     if not block then
@@ -1790,7 +1844,7 @@ function M.attach(buf)
         ('- `%sa` / `%sx` run all / cancel'):format(p, p),
         ('- `%sc` / `%ss` choose connection / schema panel'):format(p, p),
         ('- `%st` / `%sh` tables / history (telescope)'):format(p, p),
-        ('- `%sm` load more rows (scrolling to the end also does this)'):format(p),
+        ('- `%sm` load the next page of rows (scrolling does not)'):format(p),
         ('- `%se` explain statement under cursor'):format(p),
         '- `K` table/column info under cursor (falls back to LSP hover)',
         '- `gd` open table under cursor (falls back to LSP go-to-definition)',

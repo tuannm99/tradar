@@ -25,11 +25,13 @@ use tradar_query_workbench::query_engine::QueryEngine;
 
 /// One `.method(args)` call in a chain -- `db.users.find({}).sort({name: 1})`
 /// parses to two of these, `find` and `sort`.
+#[derive(Debug)]
 struct MethodCall {
     name: String,
     args: Vec<serde_json::Value>,
 }
 
+#[derive(Debug)]
 struct ParsedQuery {
     collection: String,
     /// Always at least one call -- the first is the primary operation
@@ -57,10 +59,11 @@ impl ParsedQuery {
 /// `tradar-connector-elasticsearch`'s `starts_request`; see
 /// `split_statements`.
 fn starts_mongo_statement(line: &str) -> bool {
-    line.starts_with("db.")
+    line == "db"
+        || line.starts_with("db.")
         || line.starts_with("use ")
-        || line == "show dbs"
-        || line == "show databases"
+        || line == "show"
+        || line.starts_with("show ")
 }
 
 /// `query` without its `// line` and `/* block */` comments -- mongosh
@@ -115,18 +118,121 @@ fn strip_js_comments(input: &str) -> String {
     out
 }
 
+/// `text` as the shell would take it: comments gone, surrounding space gone,
+/// and trailing `;` dropped (mongosh accepts `db.users.find();`).
+fn clean_command(text: &str) -> String {
+    strip_js_comments(text)
+        .trim()
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+        .to_string()
+}
+
+/// Everything one line of the Mongo console can be: the shell helpers
+/// (`use`, `show ...`, bare `db`), a database-level call
+/// (`db.getCollectionNames()`, `db.runCommand({...})`), or the usual
+/// `db.<collection>.<method>(...)` query.
+#[derive(Debug)]
+enum ShellCommand {
+    Use(String),
+    ShowDbs,
+    ShowCollections,
+    ShowUsers,
+    ShowRoles,
+    DbName,
+    DbCall(MethodCall),
+    Query(ParsedQuery),
+}
+
+/// The database-level methods supported -- anything else after `db.` and
+/// before a `(` is a collection name.
+const DB_METHODS: &[&str] = &[
+    "getName",
+    "getCollectionNames",
+    "getCollectionInfos",
+    "stats",
+    "version",
+    "serverStatus",
+    "runCommand",
+    "adminCommand",
+];
+
+fn parse_shell_command(text: &str) -> anyhow::Result<ShellCommand> {
+    let text = clean_command(text);
+    if let Some(rest) = text.strip_prefix("use ") {
+        let name = rest.trim().trim_matches(['"', '\'']);
+        if name.is_empty() {
+            anyhow::bail!("use requires a database name");
+        }
+        return Ok(ShellCommand::Use(name.to_string()));
+    }
+    if let Some(what) = text.strip_prefix("show ") {
+        return match what.trim() {
+            "dbs" | "databases" => Ok(ShellCommand::ShowDbs),
+            "collections" | "tables" => Ok(ShellCommand::ShowCollections),
+            "users" => Ok(ShellCommand::ShowUsers),
+            "roles" => Ok(ShellCommand::ShowRoles),
+            other => anyhow::bail!(
+                "unsupported `show {other}` (supported: show dbs, show collections, show users, show roles)"
+            ),
+        };
+    }
+    if text == "show" {
+        anyhow::bail!("`show` needs an argument: dbs, collections, users or roles");
+    }
+    if text == "db" {
+        return Ok(ShellCommand::DbName);
+    }
+    if let Some(rest) = text.strip_prefix("db.") {
+        let head = rest.split('(').next().unwrap_or("").trim();
+        if DB_METHODS.contains(&head) && rest.contains('(') {
+            let open = rest.find('(').unwrap_or(0);
+            let after_paren = &rest[open + 1..];
+            let close = find_matching_close_paren(after_paren)
+                .ok_or_else(|| anyhow::anyhow!("missing closing parenthesis"))?;
+            if !after_paren[close + 1..].trim().is_empty() {
+                anyhow::bail!("unexpected text after db.{head}(...)");
+            }
+            let args = split_top_level_args(&after_paren[..close])?
+                .into_iter()
+                .map(|arg| serde_json::from_str(&relax_json(arg.trim())))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| anyhow::anyhow!("invalid JSON argument: {e}"))?;
+            return Ok(ShellCommand::DbCall(MethodCall {
+                name: head.to_string(),
+                args,
+            }));
+        }
+    }
+    Ok(ShellCommand::Query(parse_shell_query(&text)?))
+}
+
 fn parse_shell_query(query: &str) -> anyhow::Result<ParsedQuery> {
-    let query = strip_js_comments(query);
-    let query = query.trim();
+    let query = clean_command(query);
+    let query = query.as_str();
     let rest = query.strip_prefix("db.").ok_or_else(|| {
         anyhow::anyhow!("expected a query starting with \"db.<collection>.<method>(...)\"")
     })?;
 
-    let dot = rest
-        .find('.')
-        .ok_or_else(|| anyhow::anyhow!("missing collection name"))?;
-    let collection = rest[..dot].to_string();
-    let mut rest = &rest[dot + 1..];
+    // `db.getCollection("name").find()` -- how mongosh addresses a collection
+    // whose name is not a plain identifier.
+    let (collection, mut rest) = if let Some(after) = rest.strip_prefix("getCollection(") {
+        let close = find_matching_close_paren(after)
+            .ok_or_else(|| anyhow::anyhow!("missing closing parenthesis"))?;
+        let name = after[..close].trim().trim_matches(['"', '\'']).to_string();
+        if name.is_empty() {
+            anyhow::bail!("getCollection needs a collection name");
+        }
+        let tail = after[close + 1..].trim_start();
+        let tail = tail
+            .strip_prefix('.')
+            .ok_or_else(|| anyhow::anyhow!("expected a method after getCollection(...)"))?;
+        (name, tail)
+    } else {
+        let dot = rest
+            .find('.')
+            .ok_or_else(|| anyhow::anyhow!("missing collection name"))?;
+        (rest[..dot].to_string(), &rest[dot + 1..])
+    };
 
     let mut calls = Vec::new();
     loop {
@@ -422,6 +528,100 @@ impl MongoDriver {
             .unwrap_or_else(|| "test".to_string())
     }
 
+    /// The console helpers that are not `db.<collection>.<method>()`:
+    /// `show collections|users|roles`, bare `db`, and the database-level
+    /// calls (`db.getCollectionNames()`, `db.stats()`, `db.runCommand({..})`
+    /// ...). Replies are shaped like `mongosh` prints them -- a list is one
+    /// array value, a command's reply one document.
+    async fn run_db_helper(&self, command: ShellCommand) -> anyhow::Result<QueryResult> {
+        let db = self.database();
+        let one = |value: serde_json::Value| QueryResult::Documents {
+            items: vec![value],
+            truncated: false,
+        };
+        let extjson = |doc: Document| {
+            let mut value = Bson::Document(doc).into_relaxed_extjson();
+            simplify_extjson(&mut value);
+            value
+        };
+        let run = |doc: Document| {
+            let db = db.clone();
+            async move { db.run_command(doc).await }
+        };
+        Ok(match command {
+            ShellCommand::DbName => one(serde_json::json!(db.name())),
+            ShellCommand::ShowCollections => {
+                let mut names = db.list_collection_names().await?;
+                names.sort_unstable();
+                QueryResult::Documents {
+                    items: names
+                        .into_iter()
+                        .map(|name| serde_json::json!({ "name": name }))
+                        .collect(),
+                    truncated: false,
+                }
+            }
+            ShellCommand::ShowUsers => {
+                let reply = run(mongodb::bson::doc! { "usersInfo": 1 }).await?;
+                one(extjson(reply))
+            }
+            ShellCommand::ShowRoles => {
+                let reply = run(mongodb::bson::doc! { "rolesInfo": 1 }).await?;
+                one(extjson(reply))
+            }
+            ShellCommand::DbCall(call) => {
+                let arg = |i: usize| -> anyhow::Result<Document> {
+                    let value = call.args.get(i).ok_or_else(|| {
+                        anyhow::anyhow!("db.{}() requires a command document", call.name)
+                    })?;
+                    json_to_document(value.clone())
+                };
+                match call.name.as_str() {
+                    "getName" => one(serde_json::json!(db.name())),
+                    "getCollectionNames" => {
+                        let mut names = db.list_collection_names().await?;
+                        names.sort_unstable();
+                        one(serde_json::json!(names))
+                    }
+                    "getCollectionInfos" => {
+                        let specs: Vec<_> = db.list_collections().await?.try_collect().await?;
+                        QueryResult::Documents {
+                            items: specs
+                                .iter()
+                                .map(|spec| serde_json::to_value(spec).unwrap_or_default())
+                                .collect(),
+                            truncated: false,
+                        }
+                    }
+                    "stats" => one(extjson(run(mongodb::bson::doc! { "dbStats": 1 }).await?)),
+                    "serverStatus" => one(extjson(
+                        run(mongodb::bson::doc! { "serverStatus": 1 }).await?,
+                    )),
+                    "version" => {
+                        let info = run(mongodb::bson::doc! { "buildInfo": 1 }).await?;
+                        one(serde_json::json!(
+                            info.get_str("version").unwrap_or("unknown")
+                        ))
+                    }
+                    "runCommand" => one(extjson(run(arg(0)?).await?)),
+                    "adminCommand" => {
+                        let client = self
+                            .client
+                            .as_ref()
+                            .expect("connect() must be called first");
+                        one(extjson(
+                            client.database("admin").run_command(arg(0)?).await?,
+                        ))
+                    }
+                    other => anyhow::bail!("unsupported db.{other}()"),
+                }
+            }
+            ShellCommand::Use(_) | ShellCommand::ShowDbs | ShellCommand::Query(_) => {
+                unreachable!("handled by `execute`")
+            }
+        })
+    }
+
     fn database(&self) -> mongodb::Database {
         let client = self
             .client
@@ -705,43 +905,39 @@ impl QueryDriver for MongoDriver {
     }
 
     async fn execute(&self, query: &str) -> anyhow::Result<QueryResult> {
-        let stripped = strip_js_comments(query);
-        let trimmed = stripped.trim();
-        if let Some(rest) = trimmed.strip_prefix("use ") {
-            let name = rest.trim().trim_matches(['"', '\'']);
-            if name.is_empty() {
-                anyhow::bail!("use requires a database name");
+        let parsed = match parse_shell_command(query)? {
+            ShellCommand::Use(name) => {
+                *self.current_db.lock().unwrap() = Some(name.clone());
+                return Ok(QueryResult::Documents {
+                    items: vec![serde_json::json!({ "switched to db": name })],
+                    truncated: false,
+                });
             }
-            *self.current_db.lock().unwrap() = Some(name.to_string());
-            return Ok(QueryResult::Documents {
-                items: vec![serde_json::json!({ "switched to db": name })],
-                truncated: false,
-            });
-        }
-        if trimmed == "show dbs" || trimmed == "show databases" {
-            let client = self
-                .client
-                .as_ref()
-                .expect("connect() must be called first");
-            let docs = client
-                .list_databases()
-                .await?
-                .into_iter()
-                .map(|spec| {
-                    serde_json::json!({
-                        "name": spec.name,
-                        "sizeOnDisk": spec.size_on_disk,
-                        "empty": spec.empty,
+            ShellCommand::ShowDbs => {
+                let client = self
+                    .client
+                    .as_ref()
+                    .expect("connect() must be called first");
+                let docs = client
+                    .list_databases()
+                    .await?
+                    .into_iter()
+                    .map(|spec| {
+                        serde_json::json!({
+                            "name": spec.name,
+                            "sizeOnDisk": spec.size_on_disk,
+                            "empty": spec.empty,
+                        })
                     })
-                })
-                .collect();
-            return Ok(QueryResult::Documents {
-                items: docs,
-                truncated: false,
-            });
-        }
-
-        let parsed = parse_shell_query(trimmed)?;
+                    .collect();
+                return Ok(QueryResult::Documents {
+                    items: docs,
+                    truncated: false,
+                });
+            }
+            ShellCommand::Query(parsed) => parsed,
+            helper => return self.run_db_helper(helper).await,
+        };
         let db = self.database();
         let collection = db.collection::<Document>(&parsed.collection);
         let mut result = run_method(&collection, parsed.primary(), parsed.chain()).await?;
@@ -782,6 +978,13 @@ impl QueryDriver for MongoDriver {
             .iter()
             .all(|call| matches!(call.name.as_str(), "sort" | "limit" | "skip"));
         chain_is_safe.then(|| parsed.collection.clone())
+    }
+
+    /// Always `_id` -- said outright so the plugin does not have to run
+    /// `list_schema` (which samples a document from *every* collection) after
+    /// each result just to learn it.
+    fn edit_key_columns(&self, _source: &str) -> Option<Vec<String>> {
+        Some(vec!["_id".to_string()])
     }
 
     /// Builds the `updateOne`/`deleteOne` this driver would run for `edit`,
@@ -1484,6 +1687,108 @@ pub fn connector() -> Box<dyn Connector> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn show_helpers_parse_with_aliases_and_a_trailing_semicolon() {
+        assert!(matches!(
+            parse_shell_command("show dbs").unwrap(),
+            ShellCommand::ShowDbs
+        ));
+        assert!(matches!(
+            parse_shell_command("show databases;").unwrap(),
+            ShellCommand::ShowDbs
+        ));
+        assert!(matches!(
+            parse_shell_command("show collections").unwrap(),
+            ShellCommand::ShowCollections
+        ));
+        assert!(matches!(
+            parse_shell_command("  show tables ; ").unwrap(),
+            ShellCommand::ShowCollections
+        ));
+        assert!(matches!(
+            parse_shell_command("show users").unwrap(),
+            ShellCommand::ShowUsers
+        ));
+        assert!(matches!(
+            parse_shell_command("show roles // who").unwrap(),
+            ShellCommand::ShowRoles
+        ));
+        assert!(matches!(
+            parse_shell_command("db").unwrap(),
+            ShellCommand::DbName
+        ));
+        assert!(matches!(
+            parse_shell_command("db;").unwrap(),
+            ShellCommand::DbName
+        ));
+        match parse_shell_command("use \"shop\";").unwrap() {
+            ShellCommand::Use(name) => assert_eq!(name, "shop"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_show_is_a_clear_error_not_a_query_parse_error() {
+        let err = parse_shell_command("show profile").unwrap_err().to_string();
+        assert!(err.contains("show collections"), "{err}");
+        assert!(parse_shell_command("show").is_err());
+    }
+
+    #[test]
+    fn database_level_calls_are_not_mistaken_for_a_collection() {
+        match parse_shell_command("db.getCollectionNames();").unwrap() {
+            ShellCommand::DbCall(call) => {
+                assert_eq!(call.name, "getCollectionNames");
+                assert!(call.args.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_shell_command("db.runCommand({ping: 1})").unwrap() {
+            ShellCommand::DbCall(call) => {
+                assert_eq!(call.name, "runCommand");
+                assert_eq!(call.args, vec![serde_json::json!({"ping": 1})]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // A collection that merely starts like a db method is still a collection.
+        match parse_shell_command("db.stats.find({})").unwrap() {
+            ShellCommand::Query(q) => assert_eq!(q.collection, "stats"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_collection_addresses_a_collection_by_name() {
+        match parse_shell_command("db.getCollection(\"my-coll\").find({a: 1})").unwrap() {
+            ShellCommand::Query(q) => {
+                assert_eq!(q.collection, "my-coll");
+                assert_eq!(q.calls[0].name, "find");
+                assert_eq!(q.calls[0].args, vec![serde_json::json!({"a": 1})]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_query_with_a_trailing_semicolon_parses() {
+        match parse_shell_command("db.users.find({});").unwrap() {
+            ShellCommand::Query(q) => assert_eq!(q.collection, "users"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn show_and_bare_db_lines_start_their_own_statements() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+        let statements =
+            driver.split_statements("show collections\ndb.users.find({})\ndb\nshow users");
+        let texts: Vec<_> = statements.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["show collections", "db.users.find({})", "db", "show users"]
+        );
+    }
+
+    #[test]
     fn a_commented_out_line_inside_the_call_is_ignored() {
         let parsed = parse_shell_query(
             "db.users.find({\n  // _id: ObjectId(\"6ad4e4cc4c3ea1739d8b502f\")\n})",
@@ -1891,6 +2196,15 @@ mod tests {
 
     fn id_key(id: &str) -> Vec<(String, String)> {
         vec![("_id".to_string(), id.to_string())]
+    }
+
+    #[test]
+    fn edit_key_columns_is_always_id() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+        assert_eq!(
+            driver.edit_key_columns("users"),
+            Some(vec!["_id".to_string()])
+        );
     }
 
     #[test]
@@ -2922,6 +3236,59 @@ mod tests {
             panic!("expected Documents");
         };
         assert!(docs.is_empty(), "docs were: {docs:?}");
+    }
+
+    #[tokio::test]
+    async fn execute_runs_the_console_helpers_against_a_real_mongo() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        driver
+            .execute(r#"db.users.insertOne({"n": 1});"#)
+            .await
+            .unwrap();
+        driver
+            .execute(r#"db.orders.insertOne({"n": 2})"#)
+            .await
+            .unwrap();
+
+        let docs = |result: QueryResult| match result {
+            QueryResult::Documents { items, .. } => items,
+            _ => panic!("expected Documents"),
+        };
+        assert_eq!(
+            docs(driver.execute("show collections").await.unwrap()),
+            vec![
+                serde_json::json!({"name": "orders"}),
+                serde_json::json!({"name": "users"})
+            ]
+        );
+        assert_eq!(
+            docs(driver.execute("db.getCollectionNames();").await.unwrap()),
+            vec![serde_json::json!(["orders", "users"])]
+        );
+        assert_eq!(
+            docs(driver.execute("db").await.unwrap()),
+            vec![serde_json::json!("test")]
+        );
+        assert_eq!(
+            docs(driver.execute("db.getName()").await.unwrap()),
+            vec![serde_json::json!("test")]
+        );
+        let ping = docs(driver.execute("db.runCommand({ping: 1})").await.unwrap());
+        assert_eq!(ping[0]["ok"], serde_json::json!(1.0));
+        assert!(!docs(driver.execute("show dbs;").await.unwrap()).is_empty());
+        assert!(docs(driver.execute("db.version()").await.unwrap())[0].is_string());
+        assert_eq!(
+            docs(
+                driver
+                    .execute(r#"db.getCollection("users").countDocuments({})"#)
+                    .await
+                    .unwrap()
+            ),
+            vec![serde_json::json!({"count": 1})]
+        );
     }
 
     #[tokio::test]

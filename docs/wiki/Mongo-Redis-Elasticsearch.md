@@ -19,8 +19,11 @@ Hoặc gom nhiều ngôn ngữ vào một file với [`.tdb`](File-tdb).
 Dạng `db.<collection>.<method>(<args>)`. Hỗ trợ `find` (kèm projection, và chain `.sort()`/`.limit()`/`.skip()`/`.count()`), `findOne`, `countDocuments`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`. Đây là parser tối giản chứ không phải JS engine thật: không có `$where`, bulk operation hay transaction; thứ gì ngoài các dạng trên trả lỗi "unsupported query".
 
 - Nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`, `ISODate(…)`), không chỉ JSON chặt, và cả comment `// …` / `/* … */` ở bất kỳ đâu trong lời gọi (dòng filter đang tạm tắt không làm query hỏng).
-- `use <db>` đổi database đang thao tác, `show dbs` liệt kê database. `target` không cần kèm `/db`.
-- Câu lệnh trải nhiều dòng được hiểu đúng: dòng bắt đầu bằng `db.`/`use`/`show dbs` mở câu mới, dòng khác nối vào câu phía trên.
+- Dấu `;` ở cuối câu được chấp nhận như trong mongosh (`db.users.find();`).
+- **Lệnh console** (không cần collection): `use <db>` đổi database đang thao tác (`target` không cần kèm `/db`); `show dbs` / `show databases`; `show collections` / `show tables`; `show users`; `show roles`; `db` (tên database hiện tại). Các `show` khác báo lỗi và gợi ý danh sách trên.
+- **Lời gọi cấp database**: `db.getName()`, `db.getCollectionNames()`, `db.getCollectionInfos()`, `db.stats()`, `db.version()`, `db.serverStatus()`, `db.runCommand({…})`, `db.adminCommand({…})`. Danh sách trả về là một giá trị mảng; `runCommand`/`adminCommand` trả document phản hồi của server.
+- `db.getCollection("tên-lạ").find(…)` dùng cho collection có tên không phải định danh thường.
+- Câu lệnh trải nhiều dòng được hiểu đúng: dòng bắt đầu bằng `db`, `db.`, `use`, `show` mở câu mới, dòng khác nối vào câu phía trên.
 - `find`/`aggregate` dừng ở 10.000 document đầu và báo "truncated" nếu còn nhiều hơn; `.count()` vẫn trả số thật.
 - Schema (navigator, completion) suy ra bằng cách đọc mẫu một document mỗi collection; field lồng nhau hiện dạng `address.city`. Cột trong bảng kết quả theo đúng thứ tự field của document.
 
