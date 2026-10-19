@@ -2,7 +2,7 @@
 
 Công cụ khám phá và truy vấn database trong terminal, theo tinh thần [LazyGit](https://github.com/jesseduffield/lazygit) / [k9s](https://k9scli.io/) nhưng dành cho database. Tradar giữ nguyên ngôn ngữ query gốc của từng backend — SQL thật, Mongo Shell JS thật, Elasticsearch Query DSL thật — thay vì bịa ra một ngôn ngữ chung.
 
-**Giao diện chính: Neovim + `tradar-server`.** `tradar-server` là server JSON-RPC (unix socket) giữ mọi connection đang mở; Neovim là lớp soạn thảo/điều hướng/vim-motion bên trên, và nhiều phiên Neovim dùng chung một server. TUI (`tradar`) đã **đóng băng**: chỉ sửa lỗi, không thêm tính năng.
+**Giao diện chính: Neovim + `tradar-server`.** `tradar-server` là server JSON-RPC (unix socket) giữ mọi connection đang mở; Neovim là lớp soạn thảo/điều hướng/vim-motion bên trên, và nhiều phiên Neovim dùng chung một server. TUI (`tradar`) đã **deprecated**: không phát triển thêm và không sửa chủ động; ai cần dùng thì yêu cầu.
 
 ## Backend
 
@@ -31,7 +31,7 @@ cargo build -p tradar-server --no-default-features --features mongo,elasticsearc
 | Kiến trúc, protocol, trait `QueryDriver`/`Connector`/`Session` | [`docs/architecture.md`](docs/architecture.md) |
 | Việc đang mở | [`docs/roadmap.md`](docs/roadmap.md) |
 | Việc đã xong, vì sao, kiểm chứng thế nào | [`docs/backlog/`](docs/backlog/README.md) |
-| TUI (đóng băng) | [`docs/wiki/TUI.md`](docs/wiki/TUI.md) |
+| TUI (deprecated) | [`docs/wiki/TUI.md`](docs/wiki/TUI.md) |
 
 ## Triết lý
 

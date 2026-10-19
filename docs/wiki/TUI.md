@@ -1,6 +1,6 @@
 # TUI
 
-> TUI đóng băng: chỉ sửa lỗi, không thêm tính năng mới. Tính năng mới đi vào Neovim. Trang này chỉ nêu những gì cần để dùng.
+> **TUI đã deprecated**: không phát triển thêm và không sửa chủ động (chỉ làm khi có người yêu cầu). Dùng plugin Neovim + `tradar-server`. Chạy `tradar` sẽ in cảnh báo này ra stderr. Trang này chỉ nêu những gì cần để dùng.
 
 Build và chạy:
 

@@ -7,7 +7,7 @@ Mô tả **kiến trúc hiện tại** của tradar — hình dạng thật củ
 `tradar` có hai client dùng chung đúng một bộ connector crate:
 
 - **Neovim + `tradar-server`** — giao diện chính. `tradar-server` là một JSON-RPC server headless giữ mọi connection đã mở; nhiều session Neovim dùng chung một tiến trình server. Xem "Server headless" bên dưới.
-- **TUI (`tradar-app`)** — đóng băng (chỉ sửa lỗi, không thêm tính năng mới). Vẫn phải build/test qua, vẫn là một client hợp lệ của cùng connector.
+- **TUI (`tradar-app`)** — **deprecated** (không phát triển thêm, không sửa chủ động; chỉ làm khi có người yêu cầu). Vẫn phải build/test qua, vẫn là một client hợp lệ của cùng connector.
 
 Cả hai không phụ thuộc lẫn nhau — chúng chỉ cùng phụ thuộc `tradar-query-workbench`/`tradar-connector-spi`/các connector crate.
 

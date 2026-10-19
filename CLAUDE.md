@@ -6,7 +6,7 @@ Guidance for Claude Code (claude.ai/code) in this repository.
 
 **Primary interface: Neovim + `tradar-server`** (`nvim/`, `crates/tradar-server`) — not the TUI. `tradar-server` is a headless JSON-RPC server (unix socket) that holds every open connection; Neovim is the editor/navigation/vim-motion layer, and several Neovim sessions share one server. Shape, traits and protocol: `docs/architecture.md`. What's open: `docs/roadmap.md`.
 
-**The TUI (`tradar-app`, `tradar-query-workbench`'s `components/`) is frozen** — bug fixes only, no new features; it must keep building and passing `make check`. This is decided; it is not being removed. The connector crates and the `QueryDriver` trait are shared by both interfaces and are *not* frozen. New user-facing features go into the Neovim plugin/server.
+**The TUI (`tradar-app`, `tradar-query-workbench`'s `components/`) is deprecated** — no new features and no proactive fixes; touch it only if the user asks (someone requests it). It stays in the tree and must keep building and passing `make check`. The connector crates and the `QueryDriver` trait are shared by both interfaces and are *not* deprecated. New user-facing features go into the Neovim plugin/server.
 
 ## Workspace
 
