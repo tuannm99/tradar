@@ -56,20 +56,34 @@ local function show_help(lines)
   vim.lsp.util.open_floating_preview(lines, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
 end
 
+local ensure_connected -- defined below; `call` re-connects through it
+
 local function call(method, params, cb, on_error)
-  rpc.ensure(opts, function(err)
-    if err then
-      if on_error then return on_error(err) end
-      return notify(err, vim.log.levels.ERROR)
-    end
-    rpc.request(method, params, function(e, result, data)
-      if e then
-        if on_error then return on_error(e, data) end
-        return notify(e, vim.log.levels.ERROR)
+  local function attempt(retried)
+    rpc.ensure(opts, function(err)
+      if err then
+        if on_error then return on_error(err) end
+        return notify(err, vim.log.levels.ERROR)
       end
-      cb(result)
+      rpc.request(method, params, function(e, result, data)
+        if e then
+          -- The server was restarted (or crashed) behind our back: it no
+          -- longer knows a connection we still believe in. Connect again and
+          -- repeat the call once, instead of making the user retry by hand.
+          local conn = type(params) == 'table' and params.connection or nil
+          if conn and not retried and method ~= 'connect' and state.connected[conn]
+              and e:find('not connected', 1, true) then
+            state.connected[conn] = nil
+            return ensure_connected(conn, function() attempt(true) end, on_error or function(err2) notify(err2, vim.log.levels.ERROR) end)
+          end
+          if on_error then return on_error(e, data) end
+          return notify(e, vim.log.levels.ERROR)
+        end
+        cb(result)
+      end)
     end)
-  end)
+  end
+  attempt(false)
 end
 
 local function resolve_buf(buf)
@@ -158,7 +172,7 @@ function M.is_protected(name)
   return guard.is_protected(name, opts.protected or { 'prod' })
 end
 
-local function ensure_connected(name, cb, on_error)
+ensure_connected = function(name, cb, on_error)
   if state.connected[name] then return cb() end
   if state.connecting[name] then
     table.insert(state.connecting[name], { cb, on_error })

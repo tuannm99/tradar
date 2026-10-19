@@ -390,9 +390,14 @@ impl Server {
                 .running
                 .insert(id.to_string(), (Arc::clone(&cancel), Arc::clone(&driver)));
         }
+        // `biased`, cancel first: `cancel` stores its permit *before* it asks
+        // the driver to interrupt, so when the interrupted statement fails
+        // (SQLite: "interrupted") both branches are ready at once -- and a
+        // random pick would report the user's own cancel as a database error.
         let outcome = tokio::select! {
-            result = driver.execute(query) => Some(result),
+            biased;
             () = cancel.notified() => None,
+            result = driver.execute(query) => Some(result),
         };
         if let Some(id) = query_id {
             self.state.lock().unwrap().running.remove(id);

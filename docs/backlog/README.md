@@ -83,3 +83,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`stale-server-and-picker-fixes-2026-10-25.md`](stale-server-and-picker-fixes-2026-10-25.md) — phát hiện server chạy ngầm bản cũ (`version.stale`/`exe`, cảnh báo, health, `PATH` che bản build); picker tables/lịch sử trong `.tdb` dùng đúng connection và vị trí
 - [`redis-quoting-statusline-2026-10-26.md`](redis-quoting-statusline-2026-10-26.md) — Redis nhận giá trị có dấu cách trong nháy (`SET k "a b"`); statusline đúng connection trong buffer kết quả, cờ sửa chưa commit, badge `tx` tức thì
 - [`grpc-request-skeleton-2026-10-27.md`](grpc-request-skeleton-2026-10-27.md) — buffer request gRPC điền sẵn khung từ message đầu vào (`grpc.skeleton`, protocol 1.4)
+- [`cancel-reconnect-fixes-2026-10-28.md`](cancel-reconnect-fixes-2026-10-28.md) — huỷ query chậm báo `cancelled` thay vì lỗi (`biased` select), plugin tự kết nối lại và lặp một lần khi server đã khởi động lại
