@@ -34,7 +34,7 @@ async-trait = "0.1"
 # `registry`/`State::drivers` entirely and lives in its own `grpc` module
 # instead of a `tradar-connector-grpc` crate -- that trait contract exists
 # to feed the TUI's registry, which gRPC deliberately does not target.
-tonic = { version = "0.12", optional = true }
+tonic = { version = "0.12", optional = true, features = ["tls", "tls-webpki-roots"] }
 tonic-reflection = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
 prost-reflect = { version = "0.14", optional = true, features = ["serde"] }

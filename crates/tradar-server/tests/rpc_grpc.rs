@@ -35,6 +35,9 @@ impl greeter::greeter_server::Greeter for GreeterSvc {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         let name = request.into_inner().name;
+        if name == "slow" {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
         if name == "boom" {
             return Err(tonic::Status::invalid_argument("name must not be 'boom'"));
         }
@@ -599,4 +602,49 @@ async fn a_bidi_call_echoes_while_it_stays_open() {
         json!({"subscription": subscription, "message": {"name": "two"}}),
     )
     .await);
+}
+
+#[tokio::test]
+async fn timeout_ms_becomes_a_deadline_the_server_enforces() {
+    let addr = spawn_greeter(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &addr.to_string());
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+
+    let started = std::time::Instant::now();
+    let invoked = call(
+        &server,
+        "grpc.invoke",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "SayHello",
+               "request": {"name": "slow"}, "timeout_ms": 200}),
+    )
+    .await;
+    // Go/Java servers answer DEADLINE_EXCEEDED (4); tonic's own server
+    // answers CANCELLED (1) -- either way the call ends well before the 3 s
+    // the handler sleeps.
+    let code = err(&invoked)["data"]["grpc_code"].as_i64().unwrap();
+    assert!(code == 1 || code == 4, "unexpected code {code}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+    err(&call(
+        &server,
+        "grpc.invoke",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "SayHello",
+               "request": {}, "timeout_ms": "soon"}),
+    )
+    .await);
+}
+
+#[tokio::test]
+async fn an_https_target_does_a_tls_handshake_and_fails_against_a_plaintext_server() {
+    let addr = spawn_greeter(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &format!("https://{addr}"));
+    let connected = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        call(&server, "grpc.connect", json!({"connection": "g"})),
+    )
+    .await
+    .expect("connect hung");
+    err(&connected);
 }

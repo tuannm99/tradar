@@ -65,7 +65,7 @@ Content-Type: application/json
 
 ## gRPC
 
-Plaintext (chưa TLS). Hỗ trợ **unary, server-streaming, client-streaming và bidi**, cùng **metadata (header) của request**.
+`target` dạng `host:port` hoặc `http://…` là plaintext; `https://host:port` bật **TLS** (chứng chỉ server được kiểm tra theo bộ root CA webpki đi kèm; chưa hỗ trợ CA riêng/mTLS). Hỗ trợ **unary, server-streaming, client-streaming và bidi**, cùng **metadata (header) của request**.
 
 | Lệnh | Việc |
 |---|---|
@@ -78,7 +78,7 @@ Chọn method mở một buffer JSON trong tab mới, đã **điền sẵn khung
 
 Nếu server không hỗ trợ reflection, `:TradarGrpcServices` trả rỗng cho tới khi bạn `:TradarGrpcLoadProto`.
 
-**Metadata.** Các dòng `# tên: giá trị` ở đầu buffer request là header gửi kèm (`# x-token: abc`); dòng `#` khác và dòng trống ở đầu là comment; JSON bắt đầu từ dòng đầu tiên không phải `#`. Key tự chuyển về chữ thường; key `-bin` (giá trị nhị phân) chưa hỗ trợ. Với unary, header của response hiện thành các dòng `# tên: giá trị` phía trên JSON trả về.
+**Metadata.** Các dòng `# tên: giá trị` ở đầu buffer request là header gửi kèm (`# x-token: abc`); dòng `#` khác và dòng trống ở đầu là comment; JSON bắt đầu từ dòng đầu tiên không phải `#`. Key tự chuyển về chữ thường; key `-bin` (giá trị nhị phân) chưa hỗ trợ. Dòng đặc biệt `# deadline: 5s` (`500ms`, `2m`, hoặc số trần = giây) không gửi như header mà đặt **deadline** của call (`grpc-timeout`); hết hạn thì server trả lỗi (`DEADLINE_EXCEEDED`, hoặc `CANCELLED` với server tonic). Với unary, header của response hiện thành các dòng `# tên: giá trị` phía trên JSON trả về.
 
 **Streaming.** Danh sách method ghi rõ `[server stream]`, `[client stream]` hoặc `[bidi stream]`. Response là một transcript chỉ-đọc (`‹` reply, `›` message đã gửi, `#` header/trailer/trạng thái), giữ 5000 dòng gần nhất:
 

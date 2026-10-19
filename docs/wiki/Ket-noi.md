@@ -27,7 +27,7 @@ Thêm/sửa/xoá được ngay trong connection picker của TUI (`a`/`e`/`d`), 
 | `rabbitmq` | URL tới Management API kèm credentials: `http://user:pass@host:15672/%2f` (`%2f` là vhost mặc định `/`) |
 | `http` | base URL tuỳ chọn (có thể để trống nếu luôn gõ URL đầy đủ) |
 | `socket` | `host:port` trần |
-| `grpc` | `host:port` trần hoặc URL đầy đủ, plaintext (chưa hỗ trợ TLS) |
+| `grpc` | `host:port` trần hoặc URL đầy đủ, `https://…` bật TLS (root CA webpki), còn lại plaintext |
 
 Chỉ những `driver` mà bản `tradar-server`/`tradar` của bạn đã compile vào mới dùng được — xem [Cài đặt](Cai-dat).
 
