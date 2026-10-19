@@ -40,7 +40,7 @@ local state = {
   schema_nodes = {}, -- parallel to the schema buffer's lines, from the last render
   -- Keyed by a node's own key (see `render.schema_tree`), not by connection
   -- -- the schema buffer is shared across connections (same name, reused),
-  -- so switching connections can coincidentally ctx.show a same-named table
+  -- so switching connections can coincidentally show a same-named table
   -- pre-expanded from a previous one. Cosmetic only, not worth a
   -- per-connection key for.
   schema_expanded = {},

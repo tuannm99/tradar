@@ -162,9 +162,9 @@ local TRANSACTIONAL = { postgres = true, mysql = true, sqlite = true }
 
 --- The commit preview: every statement, one per line, in a split. `:w` or
 --- `<CR>` runs them in order (stopping at the first error, then showing
---- the ones that did not run); `q` cancels. `ctx` = { conn, query, sqls,
+--- the ones that did not run); `q` cancels. `edit` = { conn, query, sqls,
 --- sql_buf, pos, note }.
-local function open_preview(ctx)
+local function open_preview(edit)
   local buf = preview_buf
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then
     buf = vim.api.nvim_create_buf(false, true)
@@ -183,15 +183,15 @@ local function open_preview(ctx)
     close()
     -- Confirmed: from here the grid's text is no longer "unsaved".
     if state.results_buf and vim.api.nvim_buf_is_valid(state.results_buf) then vim.bo[state.results_buf].modified = false end
-    local total = #ctx.sqls
+    local total = #edit.sqls
     local function reload(after_reload)
-      ctx.run_text(ctx.sql_buf, ctx.query, 0, 0, {
+      ctx.run_text(edit.sql_buf, edit.query, 0, 0, {
         confirmed = true,
         after = function()
           local w = vim.fn.bufwinid(state.results_buf)
-          if w ~= -1 and ctx.pos then
+          if w ~= -1 and edit.pos then
             local lines = vim.api.nvim_buf_line_count(state.results_buf)
-            pcall(vim.api.nvim_win_set_cursor, w, { math.min(ctx.pos[1], lines), ctx.pos[2] })
+            pcall(vim.api.nvim_win_set_cursor, w, { math.min(edit.pos[1], lines), edit.pos[2] })
           end
           if after_reload then after_reload() end
         end,
@@ -205,13 +205,13 @@ local function open_preview(ctx)
       local function fail(i, err)
         local first = err:gsub('\n.*', '')
         if wrapped then
-          -- Roll back whatever ran, ctx.show the real table again, and offer the
+          -- Roll back whatever ran, show the real table again, and offer the
           -- whole batch back so a fix can be re-run from the start.
-          ctx.run_text(ctx.sql_buf, 'ROLLBACK', 0, 0, {
+          ctx.run_text(edit.sql_buf, 'ROLLBACK', 0, 0, {
             confirmed = true,
             after = function()
               reload(function()
-                open_preview(vim.tbl_extend('force', ctx, {
+                open_preview(vim.tbl_extend('force', edit, {
                   note = ('-- rolled back, nothing was applied; statement %d of %d failed: %s'):format(i, total, first),
                 }))
               end)
@@ -219,8 +219,8 @@ local function open_preview(ctx)
             on_error = function() notify('ROLLBACK failed — check the connection (status line shows an open transaction)', vim.log.levels.ERROR) end,
           })
         else
-          open_preview(vim.tbl_extend('force', ctx, {
-            sqls = vim.list_slice(ctx.sqls, i),
+          open_preview(vim.tbl_extend('force', edit, {
+            sqls = vim.list_slice(edit.sqls, i),
             note = ('-- %d of %d applied (not in a transaction); stopped at the first statement below: %s'):format(i - 1, total, first),
           }))
         end
@@ -231,7 +231,7 @@ local function open_preview(ctx)
             notify(('committed %d statement(s)'):format(total))
             return reload()
           end
-          return ctx.run_text(ctx.sql_buf, 'COMMIT', 0, 0, {
+          return ctx.run_text(edit.sql_buf, 'COMMIT', 0, 0, {
             confirmed = true,
             after = function()
               notify(('committed %d statement(s) in one transaction'):format(total))
@@ -240,21 +240,21 @@ local function open_preview(ctx)
             on_error = function(err) fail(total, err) end,
           })
         end
-        ctx.run_text(ctx.sql_buf, ctx.sqls[i], 0, 0, {
+        ctx.run_text(edit.sql_buf, edit.sqls[i], 0, 0, {
           confirmed = true, -- this preview *is* the confirmation
           after = function() step(i + 1) end,
           on_error = function(err) fail(i, err) end,
         })
       end
       if not wrapped then return step(1) end
-      ctx.run_text(ctx.sql_buf, 'BEGIN', 0, 0, { confirmed = true, after = function() step(1) end })
+      ctx.run_text(edit.sql_buf, 'BEGIN', 0, 0, { confirmed = true, after = function() step(1) end })
     end
     -- One transaction wherever the driver can hold one -- unless the user is
     -- already inside their own (a second BEGIN would be a no-op, and our
     -- COMMIT/ROLLBACK would then settle *their* work): then run inside it.
-    ctx.driver_of(ctx.conn, function(driver)
+    ctx.driver_of(edit.conn, function(driver)
       if not TRANSACTIONAL[driver] then return run(false) end
-      call('status', { connection = ctx.conn }, function(st)
+      call('status', { connection = edit.conn }, function(st)
         if st.in_transaction then
           notify('a transaction is already open on this connection — running inside it (not committing it for you)', vim.log.levels.WARN)
           return run(false)
@@ -263,8 +263,8 @@ local function open_preview(ctx)
       end)
     end)
   end
-  local lines = { ctx.note or ('-- tradar [%s]: %d statement(s) — :w or <CR> to run, q to cancel'):format(ctx.conn, #ctx.sqls) }
-  for _, sql in ipairs(ctx.sqls) do lines[#lines + 1] = sql .. ';' end
+  local lines = { edit.note or ('-- tradar [%s]: %d statement(s) — :w or <CR> to run, q to cancel'):format(edit.conn, #edit.sqls) }
+  for _, sql in ipairs(edit.sqls) do lines[#lines + 1] = sql .. ';' end
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
