@@ -36,7 +36,7 @@ pub const APP_ERROR: i64 = -32000;
 /// minor bump had this scheme existed from the start -- this is the first
 /// breaking-change-shaped line in the wire surface's history, which is
 /// exactly why it's `(1, 0)` and not `(0, 1)`.
-pub const PROTOCOL_VERSION: (u32, u32) = (1, 6);
+pub const PROTOCOL_VERSION: (u32, u32) = (1, 8);
 
 pub struct RpcError {
     pub code: i64,
@@ -365,6 +365,28 @@ pub fn parse_insert_values(insert: &Value) -> Result<Vec<(String, String)>, RpcE
         return Err(RpcError::invalid("`insert` needs at least one column"));
     }
     Ok(values)
+}
+
+/// `insert_columns` (optional, an array of names) fixes the column order of
+/// a generated `INSERT`: JSON objects carry no order a client can rely on,
+/// and the result would otherwise follow whichever order the object
+/// happened to arrive in. Columns it does not name keep their relative
+/// order after the named ones.
+pub fn order_insert_values(
+    mut values: Vec<(String, String)>,
+    order: Option<&Value>,
+) -> Vec<(String, String)> {
+    let Some(names) = order.and_then(Value::as_array) else {
+        return values;
+    };
+    let rank = |column: &str| {
+        names
+            .iter()
+            .position(|n| n.as_str() == Some(column))
+            .unwrap_or(usize::MAX)
+    };
+    values.sort_by_key(|(column, _)| rank(column));
+    values
 }
 
 pub(crate) fn str_param<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {

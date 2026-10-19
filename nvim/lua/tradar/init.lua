@@ -1521,10 +1521,17 @@ local function build_statements(r, d, cols, rows, key_idx, cb)
     jobs[#jobs + 1] = { connection = r.conn, table = e.table, key = key, change = 'delete' }
   end
   for _, ins in ipairs(d.inserts) do
-    local values = {}
-    for c, v in pairs(ins.values) do values[cols[c]] = v end
+    -- A JSON object has no order, so the grid's column order travels
+    -- separately and keeps the generated INSERT in the table's own order.
+    local values, order = {}, {}
+    for c = 1, #cols do
+      if ins.values[c] ~= nil then
+        values[cols[c]] = ins.values[c]
+        order[#order + 1] = cols[c]
+      end
+    end
     counts.insert = counts.insert + 1
-    jobs[#jobs + 1] = { connection = r.conn, table = e.table, insert = values }
+    jobs[#jobs + 1] = { connection = r.conn, table = e.table, insert = values, insert_columns = order }
   end
   local sqls, left, failed = {}, #jobs, false
   for i, params in ipairs(jobs) do

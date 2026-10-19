@@ -648,3 +648,136 @@ async fn an_https_target_does_a_tls_handshake_and_fails_against_a_plaintext_serv
     .expect("connect hung");
     err(&connected);
 }
+
+struct Pki {
+    ca: String,
+    server_cert: String,
+    server_key: String,
+    client_cert: String,
+    client_key: String,
+}
+
+/// A throwaway CA with a server certificate (for `localhost`) and a client
+/// certificate it signed.
+fn pki() -> Pki {
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "tradar test ca");
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let issue = |name: &str| {
+        let key = KeyPair::generate().unwrap();
+        let cert = CertificateParams::new(vec![name.to_string()])
+            .unwrap()
+            .signed_by(&key, &ca, &ca_key)
+            .unwrap();
+        (cert.pem(), key.serialize_pem())
+    };
+    let (server_cert, server_key) = issue("localhost");
+    let (client_cert, client_key) = issue("client.test");
+    Pki {
+        ca: ca.pem(),
+        server_cert,
+        server_key,
+        client_cert,
+        client_key,
+    }
+}
+
+async fn spawn_greeter_tls(pki: &Pki, require_client_cert: bool) -> std::net::SocketAddr {
+    use tonic::transport::{Certificate, Identity, ServerTlsConfig};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(
+        pki.server_cert.clone(),
+        pki.server_key.clone(),
+    ));
+    if require_client_cert {
+        tls = tls.client_ca_root(Certificate::from_pem(pki.ca.clone()));
+    }
+    let router = TonicServer::builder()
+        .tls_config(tls)
+        .unwrap()
+        .add_service(greeter::greeter_server::GreeterServer::new(GreeterSvc));
+    tokio::spawn(async move {
+        router.serve_with_incoming(incoming).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    addr
+}
+
+/// Connects to `target` and, if that works, makes one call -- a rejected
+/// client certificate can surface at either step.
+async fn connect_and_say_hello(target: &str) -> Result<Value, String> {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), target);
+    let connected = call(&server, "grpc.connect", json!({"connection": "g"})).await;
+    if let Some(e) = connected.get("error") {
+        return Err(e["message"].as_str().unwrap_or("?").to_string());
+    }
+    let proto_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/greeter.proto");
+    ok(&call(
+        &server,
+        "grpc.load_proto",
+        json!({"connection": "g", "path": proto_path}),
+    )
+    .await);
+    let invoked = call(
+        &server,
+        "grpc.invoke",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "SayHello",
+               "request": {"name": "tls"}, "timeout_ms": 5000}),
+    )
+    .await;
+    match invoked.get("error") {
+        Some(e) => Err(e["message"].as_str().unwrap_or("?").to_string()),
+        None => Ok(invoked["result"]["response"].clone()),
+    }
+}
+
+#[tokio::test]
+async fn tls_with_a_private_ca_and_a_domain_override() {
+    let pki = pki();
+    let addr = spawn_greeter_tls(&pki, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let ca = dir.path().join("ca.pem");
+    std::fs::write(&ca, &pki.ca).unwrap();
+
+    // The CA is what makes the certificate trusted; `domain` is the name on
+    // it (we dial 127.0.0.1).
+    let target = format!("https://{addr}?ca={}&domain=localhost", ca.display());
+    let reply = connect_and_say_hello(&target).await.unwrap();
+    assert_eq!(reply["message"], "Hello, tls!");
+
+    // Without the CA the certificate is not trusted.
+    let untrusted = format!("https://{addr}?domain=localhost");
+    assert!(connect_and_say_hello(&untrusted).await.is_err());
+}
+
+#[tokio::test]
+async fn mtls_needs_the_client_certificate() {
+    let pki = pki();
+    let addr = spawn_greeter_tls(&pki, true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str, content: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, content).unwrap();
+        p.display().to_string()
+    };
+    let (ca, cert, key) = (
+        path("ca.pem", &pki.ca),
+        path("c.pem", &pki.client_cert),
+        path("k.pem", &pki.client_key),
+    );
+
+    let without = format!("https://{addr}?ca={ca}&domain=localhost");
+    assert!(connect_and_say_hello(&without).await.is_err());
+
+    let with = format!("https://{addr}?ca={ca}&cert={cert}&key={key}&domain=localhost");
+    let reply = connect_and_say_hello(&with).await.unwrap();
+    assert_eq!(reply["message"], "Hello, tls!");
+}

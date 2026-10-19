@@ -193,6 +193,18 @@ async fn edit_builds_a_statement_without_running_it() {
     let count = call(&server, "execute", q("SELECT count(*) FROM n")).await;
     assert_eq!(ok(&count)["rows"], json!([["1"]]));
 
+    // `insert_columns` fixes the column order (the object has none).
+    let ordered = call(
+        &server,
+        "edit.sql",
+        json!({"connection": "local", "table": "n",
+               "insert": {"id": "2", "v": "x"}, "insert_columns": ["v", "id"]}),
+    )
+    .await;
+    let ordered = ok(&ordered)["sql"].as_str().unwrap().to_string();
+    assert!(ordered.contains("(\"v\", \"id\")"), "{ordered}");
+    assert!(ordered.ends_with("VALUES ('x', '2')"), "{ordered}");
+
     let empty = call(
         &server,
         "edit.sql",

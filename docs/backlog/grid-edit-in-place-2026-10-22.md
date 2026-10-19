@@ -36,3 +36,7 @@ Thay luồng staged edit của `result-buffer-views-staged-edit-2026-10-20.md`: 
 - Smoke test headless Neovim + `tradar-server` thật + SQLite: sửa 2 ô + `dd` + dòng mới → xem trước đúng 4 câu, DB chưa đổi; `<CR>` commit cả 4 trong một lượt và lưới tải lại, sửa được ngay; `revert`; sửa header bị chặn; `:w` trong xem trước; lỗi ở `INSERT` (`NOT NULL`) → xem trước mở lại với phần chưa chạy; kết quả join/thiếu cột khoá chỉ đọc và `dd` nói lý do.
 - Lưới tài liệu: smoke test với `rpc` được stub (Mongo giả): sửa ô + xoá dòng → xem trước đúng; thêm dòng → bị chặn vì connector không insert.
 - `cargo test -p tradar-server --test rpc` (thêm ca `insert`), `-p tradar-query-workbench` (`build_sql_insert`).
+
+## Bổ sung: thứ tự cột của INSERT (2026-10-31)
+
+Câu `INSERT` từ dòng thêm tay trước đây có thứ tự cột ngẫu nhiên (object JSON không có thứ tự). Plugin gửi thêm `insert_columns` (tên cột theo thứ tự lưới), server sắp lại bằng `order_insert_values` (protocol 1.8); cột không được nêu giữ thứ tự tương đối ở cuối.

@@ -65,7 +65,7 @@ Content-Type: application/json
 
 ## gRPC
 
-`target` dạng `host:port` hoặc `http://…` là plaintext; `https://host:port` bật **TLS** (chứng chỉ server được kiểm tra theo bộ root CA webpki đi kèm; chưa hỗ trợ CA riêng/mTLS). Hỗ trợ **unary, server-streaming, client-streaming và bidi**, cùng **metadata (header) của request**.
+`target` dạng `host:port` hoặc `http://…` là plaintext; `https://host:port` bật **TLS** (chứng chỉ server được kiểm tra theo bộ root CA webpki đi kèm). Tuỳ chọn TLS đặt ngay trong query của `target`: `?ca=/đường/dẫn/ca.pem` thêm CA riêng, `&cert=…&key=…` gửi client certificate (mTLS, phải đi cùng nhau), `&domain=tên` đổi tên dùng để kiểm tra chứng chỉ (hữu ích khi dial theo IP); ví dụ `https://10.0.0.5:443?ca=/etc/ca.pem&cert=/me.pem&key=/me.key&domain=api.internal`. Các tham số này chỉ dùng được với `https://`. Hỗ trợ **unary, server-streaming, client-streaming và bidi**, cùng **metadata (header) của request**.
 
 | Lệnh | Việc |
 |---|---|
@@ -77,6 +77,8 @@ Content-Type: application/json
 Chọn method mở một buffer JSON trong tab mới, đã **điền sẵn khung request** sinh từ message đầu vào (mọi trường ở giá trị mặc định: `""`, `0`, `false`, giá trị enum đầu tiên, `[]`, `{}`, message lồng nhau được điền; `oneof` chỉ có nhánh đầu — đổi sang nhánh bạn muốn; message tự tham chiếu dừng ở tầng hai) — sửa giá trị rồi gửi. Server cũ không có khung thì buffer mở trên `{}`. Trong buffer request: `<leader>rr` hoặc `:TradarGrpcSend` gọi thật (response hiện ở split riêng, JSON thụt lề), `<leader>rx` hoặc `:TradarGrpcCancel` huỷ, `g?` xem phím. Buffer request không nhận `q` (đóng bằng `:q`/`:tabclose`). Chọn lại đúng connection/service/method đã mở sẽ nhảy về tab cũ. Chưa có skeleton request tự sinh theo shape message.
 
 Nếu server không hỗ trợ reflection, `:TradarGrpcServices` trả rỗng cho tới khi bạn `:TradarGrpcLoadProto`.
+
+**Gợi ý trong khung request.** Khung sinh ra có các dòng `// …` phía trên những trường cần chú thích: comment trong `.proto` (chỉ có khi nạp bằng `:TradarGrpcLoadProto`; server reflection không mang comment), các giá trị của enum (`// enum Level: LEVEL_UNSET | LEVEL_HIGH`), các nhánh của `oneof`. Dòng nào bắt đầu bằng `//` đều bị bỏ khi gửi, nên cứ để nguyên hoặc xoá tuỳ ý.
 
 **Metadata.** Các dòng `# tên: giá trị` ở đầu buffer request là header gửi kèm (`# x-token: abc`); dòng `#` khác và dòng trống ở đầu là comment; JSON bắt đầu từ dòng đầu tiên không phải `#`. Key tự chuyển về chữ thường; key `-bin` (giá trị nhị phân) chưa hỗ trợ. Dòng đặc biệt `# deadline: 5s` (`500ms`, `2m`, hoặc số trần = giây) không gửi như header mà đặt **deadline** của call (`grpc-timeout`); hết hạn thì server trả lỗi (`DEADLINE_EXCEEDED`, hoặc `CANCELLED` với server tonic). Với unary, header của response hiện thành các dòng `# tên: giá trị` phía trên JSON trả về.
 
