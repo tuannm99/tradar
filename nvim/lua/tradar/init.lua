@@ -346,13 +346,31 @@ end
 
 local function show(buf, height)
   local win = vim.fn.bufwinid(buf)
-  if win ~= -1 then return win end
+  if win ~= -1 then
+    -- A thin strip (the "running…" note, a one-line message) is replaced by
+    -- the real layout once a full result arrives, instead of staying 4 rows.
+    if height == nil and vim.w[win].tradar_strip and #vim.api.nvim_tabpage_list_wins(0) > 1 then
+      vim.api.nvim_win_close(win, true)
+    else
+      return win
+    end
+  end
   local origin = vim.api.nvim_get_current_win()
-  vim.cmd(('botright %dsplit'):format(height or 15))
+  -- A full result follows `results_layout`; the short one-line messages
+  -- (`height` given) always take a thin strip at the bottom.
+  local layout = (height == nil and buf == state.results_buf) and opts.results_layout or 'bottom'
+  if layout == 'right' then
+    vim.cmd(('botright %dvsplit'):format(opts.results_width or math.floor(vim.o.columns * 0.5)))
+  elseif layout == 'tab' then
+    vim.cmd('tabnew')
+  else
+    vim.cmd(('botright %dsplit'):format(height or opts.results_height or 15))
+  end
   win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   vim.wo[win].wrap = false
   vim.wo[win].cursorline = true
+  vim.w[win].tradar_strip = height ~= nil or nil
   -- Results are for looking at: keep the editor focused, as an IDE would.
   vim.api.nvim_set_current_win(origin)
   return win
@@ -529,6 +547,35 @@ local function show_result(r, meta)
   if not state.result.edit then resolve_edit(state.result) end
 end
 
+--- `<leader>rz`: blow the results window up to the whole screen (and focus
+--- it), or put it back and return to where you were. With
+--- `results_layout = 'tab'` the results already have the whole screen.
+function M.zoom()
+  local buf = state.results_buf
+  local win = buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) or -1
+  if win == -1 then return notify('no results window to zoom') end
+  if vim.api.nvim_win_get_config(win).relative ~= '' or #vim.api.nvim_tabpage_list_wins(vim.api.nvim_win_get_tabpage(win)) == 1 then
+    return notify('the results already fill the screen')
+  end
+  local zoom = state.zoom
+  if zoom and zoom.win == win then
+    state.zoom = nil
+    vim.api.nvim_win_set_height(win, zoom.height)
+    vim.api.nvim_win_set_width(win, zoom.width)
+    if zoom.origin and vim.api.nvim_win_is_valid(zoom.origin) then vim.api.nvim_set_current_win(zoom.origin) end
+    return
+  end
+  local origin = vim.api.nvim_get_current_win()
+  state.zoom = {
+    win = win,
+    height = vim.api.nvim_win_get_height(win),
+    width = vim.api.nvim_win_get_width(win),
+    origin = origin ~= win and origin or nil,
+  }
+  vim.api.nvim_set_current_win(win)
+  vim.cmd('wincmd _ | wincmd |')
+end
+
 --- `<leader>rv`: the result as a table (editable) or raw JSON -- documents
 --- as they are, SQL rows as an array of objects. Cell operations are off in
 --- the JSON view (there is no grid to point at).
@@ -696,6 +743,7 @@ attach_results = function(buf)
   -- prefix every other tradar action already uses, kept out of the
   -- plain-`g`-prefixed family on purpose for that reason.
   map('n', (opts.prefix or '<leader>r') .. 'v', function() M.toggle_view() end, 'result: table <-> JSON')
+  map('n', (opts.prefix or '<leader>r') .. 'z', function() M.zoom() end, 'zoom the results window to full screen / restore')
   map('n', (opts.prefix or '<leader>r') .. 'w', function() M.write() end, 'commit grid edits (same as :w)')
   map('n', (opts.prefix or '<leader>r') .. 'u', function() M.revert() end, 'revert grid edits')
   map('n', 'gK', function() M.row_view() end, 'show this row, one field per line')
@@ -735,6 +783,7 @@ attach_results = function(buf)
       '- `gyj` / `gyv` / `gym` yank all as JSON / CSV / Markdown table',
       ('- `%sv` table <-> JSON (SQL rows and documents)'):format(opts.prefix or '<leader>r'),
       ('- `%sm` load the next page of rows'):format(opts.prefix or '<leader>r'),
+      ('- `%sz` zoom this window to the full screen / restore (also from the SQL buffer)'):format(opts.prefix or '<leader>r'),
       '- `gK` show the current row, one field per line',
       '- `gd` follow foreign key under cursor',
       '- edit the grid like any buffer (`cw`, `dd`, `o` + a new row, `:s`, `:g`, `u`…); nothing runs until `:w`',
@@ -1843,6 +1892,7 @@ function M.attach(buf)
     map('n', 't', function() require('tradar.telescope').tables() end, 'tables (telescope)')
     map('n', 'h', function() require('tradar.telescope').history() end, 'history (telescope)')
     map('n', 'm', function() M.more() end, 'load more rows')
+    map('n', 'z', function() M.zoom() end, 'zoom the results window to full screen / restore')
     map('n', 'e', M.explain, 'explain statement under cursor')
     vim.keymap.set('n', 'g?', function()
       show_help({
@@ -1852,6 +1902,7 @@ function M.attach(buf)
         ('- `%sc` / `%ss` choose connection / schema panel'):format(p, p),
         ('- `%st` / `%sh` tables / history (telescope)'):format(p, p),
         ('- `%sm` load the next page of rows (scrolling does not)'):format(p),
+        ('- `%sz` zoom the results window to the full screen / restore'):format(p),
         ('- `%se` explain statement under cursor'):format(p),
         '- `K` table/column info under cursor (falls back to LSP hover)',
         '- `gd` open table under cursor (falls back to LSP go-to-definition)',

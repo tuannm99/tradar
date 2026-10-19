@@ -17,6 +17,7 @@ Quy ước: `<leader>r` là **tiền tố** mặc định, đổi bằng `setup{
 | `rt` | n | picker bảng (telescope) |
 | `rh` | n | picker lịch sử (telescope) |
 | `rm` | n | tải thêm dòng của kết quả hiện tại |
+| `rz` | n | phóng cửa sổ kết quả ra toàn màn hình (và nhảy vào đó); bấm lại để trả về cỡ cũ và quay lại editor |
 | `re` | n | `EXPLAIN` câu dưới con trỏ (chỉ SQL; không bao giờ `ANALYZE`) |
 | `K` | n | thông tin bảng/cột dưới con trỏ (không có thì rơi về LSP hover) |
 | `gd` | n | mở bảng dưới con trỏ (không có thì rơi về LSP go-to-definition) |
@@ -31,6 +32,7 @@ Là buffer Neovim bình thường: `j`/`k`/`gg`/`G`, `/`, `yy`… đều dùng �
 | `gyc` / `gyr` / `gyC` | copy ô / dòng / cột (`gyr` ở visual: nhiều dòng, tab-separated) |
 | `gyj` / `gyv` / `gym` | copy **cả** kết quả dạng JSON / CSV / Markdown |
 | `rm` | tải trang kế của kết quả (không tự tải khi cuộn) |
+| `rz` | phóng to cửa sổ kết quả toàn màn hình / trả lại cỡ cũ (`:TradarResultsZoom`) |
 | `rv` | đổi bảng ↔ JSON (SQL: mảng object; tài liệu: JSON in thụt lề) |
 | `gK` | xem cả dòng hiện tại, mỗi trường một dòng |
 | `K` | xem trọn giá trị một ô (khi ô bị cắt `…`) |

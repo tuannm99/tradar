@@ -31,3 +31,10 @@ Trước đó gRPC chỉ có unary và không gửi được header. Yêu cầu:
 ## Bổ sung: CA riêng, mTLS, `domain`
 
 Tuỳ chọn TLS nằm trong query của `target` (không đổi schema `SavedConnection`): `ca`, `cert`+`key`, `domain`; `split_target` tách chúng khỏi URI, tham số khác được giữ nguyên. Dùng với target không phải `https://` thì báo lỗi. Test thật (rcgen sinh CA/server/client cert, server tonic có TLS): CA riêng + `domain` chạy được, thiếu CA thì từ chối, server đòi client cert thì thiếu cert bị từ chối còn có cert chạy được.
+
+## Rà lại sau khi merge (2026-10-31)
+
+Hai lỗi thứ tự tìm được khi rà, đều sửa ở plugin:
+
+- Server chạy các request của một connection **đồng thời**, nên hai `grpc.stream.send` gửi liền nhau có thể tới server đảo thứ tự (smoke test ra `b+a` thay vì `a+b`). Tin nhắn và `close` của một stream giờ đi qua hàng đợi, mỗi lần một request (`pump_sends`). Cùng lỗi ở `socket.send` của Socket tail (dán nhiều dòng) — sửa bằng hàng đợi tương tự.
+- Server có thể đẩy reply đầu tiên **trước** khi trả lời `grpc.stream.start`, lúc đó plugin chưa biết `subscription` và làm rơi tin. Plugin giờ giữ tạm tin đến sớm (≤ 3 giây từ lúc gọi start, tối đa 1000 tin) rồi phát lại khi biết id; bấm `rr` lần nữa khi stream còn đang khởi động bị từ chối thay vì mở stream thứ hai. Kiểm chứng bằng cách trì hoãn có chủ đích câu trả lời của `stream.start` 400 ms.

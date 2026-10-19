@@ -76,5 +76,7 @@ Lệnh kế tiếp sẽ tự khởi động bản mới.
 | `documents_view` | `"table"` hoặc `"json"` — ép cách hiện kết quả dạng tài liệu |
 | `page_size = 20` | số dòng mỗi trang kết quả (trang kế tải bằng `<leader>rm`) |
 | `auto_load_more = true` | tự tải trang kế khi con trỏ xuống cuối (mặc định tắt) |
+| `results_layout = "bottom"` | chỗ đặt cửa sổ kết quả: `"bottom"` (chia ngang dưới cùng, mặc định), `"right"` (chia dọc bên phải), `"tab"` (tab riêng, chiếm cả màn hình) |
+| `results_height = 15` / `results_width = 80` | cao (layout `bottom`) / rộng (layout `right`, mặc định nửa màn hình) của cửa sổ kết quả |
 
 Plugin tuỳ chọn: `nvim-telescope/telescope.nvim` (picker bảng/history), `blink.cmp` (completion), `which-key.nvim` (nhóm phím).

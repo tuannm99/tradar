@@ -239,6 +239,11 @@ end
 --- subscription -> request buffer, for `grpc.stream.message` pushes.
 local streams = {}
 local stream_listener
+--- Pushes that arrive before `grpc.stream.start` has answered (the server may
+--- send the first reply ahead of the response to the start request), by
+--- subscription id; replayed once the id is known.
+local early = {}
+local last_start = 0
 
 --- The response split as an append-only transcript (streams): `‹` a reply,
 --- `›` a message we sent, `#` headers/trailers/status.
@@ -258,7 +263,13 @@ end
 
 local function on_stream_message(params)
   local buf = streams[params.subscription]
-  if not buf then return end
+  if not buf then
+    if (vim.uv or vim.loop).now() - last_start < 3000 then
+      early[params.subscription] = early[params.subscription] or {}
+      if #early[params.subscription] < 1000 then table.insert(early[params.subscription], params) end
+    end
+    return
+  end
   local kind = params.kind
   if kind == 'headers' or kind == 'trailers' then
     local label = kind == 'trailers' and 'trailer ' or ''
@@ -290,27 +301,66 @@ local function reset_response(buf)
   vim.bo[resp].modifiable = false
 end
 
+--- Messages (and the final close) for one stream go out strictly one at a
+--- time: the server runs requests of a connection concurrently, so two
+--- `grpc.stream.send` in flight together could arrive swapped -- wrong for a
+--- stream, where order is the point.
+local send_queues = {}
+
+local function pump_sends(buf)
+  local queue = send_queues[buf]
+  if not queue or queue.busy then return end
+  local item = table.remove(queue.items, 1)
+  if not item then return end
+  queue.busy = true
+  local method = item.close and 'grpc.stream.close' or 'grpc.stream.send'
+  rpc.request(method, { subscription = item.subscription, message = item.body }, function(e)
+    queue.busy = false
+    if e then
+      queue.items = {}
+      return notify(e, vim.log.levels.ERROR)
+    end
+    if item.close then stream_append(buf, { '# send side closed' }) end
+    pump_sends(buf)
+  end)
+end
+
+local function queue_send(buf, item)
+  send_queues[buf] = send_queues[buf] or { items = {}, busy = false }
+  table.insert(send_queues[buf].items, item)
+  pump_sends(buf)
+end
+
 --- Sends the buffer's JSON as one more message on the open stream.
 local function stream_send(buf, info, body)
-  local subscription = vim.b[buf].tradar_grpc_stream
-  call('grpc.stream.send', { subscription = subscription, message = body }, function() end)
+  queue_send(buf, { subscription = vim.b[buf].tradar_grpc_stream, body = body })
 end
 
 local function stream_start(buf, info, body, metadata, timeout_ms)
   if not stream_listener then stream_listener = rpc.on('grpc.stream.message', on_stream_message) end
   reset_response(buf)
   local sends = info.client_streaming
-  call('grpc.stream.start', {
+  vim.b[buf].tradar_grpc_starting = true
+  last_start = (vim.uv or vim.loop).now()
+  rpc.request('grpc.stream.start', {
     connection = info.connection,
     service = info.service,
     method = info.method,
     request = (not sends) and body or nil,
     metadata = metadata,
     timeout_ms = timeout_ms,
-  }, function(result)
+  }, function(e, result)
+    if vim.api.nvim_buf_is_valid(buf) then vim.b[buf].tradar_grpc_starting = nil end
+    if e then
+      early = {}
+      return notify(e, vim.log.levels.ERROR)
+    end
     streams[result.subscription] = buf
     vim.b[buf].tradar_grpc_stream = result.subscription
-    if sends then stream_send(buf, info, body) end
+    local queued = early[result.subscription] or {}
+    early = {}
+    for _, params in ipairs(queued) do on_stream_message(params) end
+    if sends and streams[result.subscription] then stream_send(buf, info, body) end
   end)
 end
 
@@ -327,6 +377,7 @@ function M.send(buf)
   if parse_err then return notify(parse_err, vim.log.levels.ERROR) end
 
   if info.client_streaming or info.server_streaming then
+    if vim.b[buf].tradar_grpc_starting then return notify('the stream is still starting', vim.log.levels.WARN) end
     if vim.b[buf].tradar_grpc_stream then
       if info.client_streaming then return stream_send(buf, info, body) end
       return notify('this stream is still running -- <leader>rx to stop it first', vim.log.levels.WARN)
@@ -377,9 +428,7 @@ function M.close(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   local subscription = vim.b[buf].tradar_grpc_stream
   if not subscription then return notify('no open stream on this buffer', vim.log.levels.WARN) end
-  call('grpc.stream.close', { subscription = subscription }, function()
-    stream_append(buf, { '# send side closed' })
-  end)
+  queue_send(buf, { subscription = subscription, close = true })
 end
 
 --- Cancels the in-flight `grpc.invoke` (or stops the open stream) started
