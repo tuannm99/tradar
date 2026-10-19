@@ -1,6 +1,9 @@
 use super::*;
 use testcontainers_modules::elastic_search::ElasticSearch;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use tradar_query_workbench::query_driver::{
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
+};
 
 #[test]
 fn crud_snippet_covers_all_four_ops() {

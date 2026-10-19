@@ -74,6 +74,10 @@ fn collections_read_the_way_cqlsh_prints_them() {
 }
 
 use super::*;
+use scylla::value::{CqlValue, Row};
+use tradar_query_workbench::query_driver::{
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
+};
 
 #[test]
 fn cassandra_error_marker_points_at_the_quoted_token_s_position() {
