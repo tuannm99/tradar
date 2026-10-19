@@ -27,7 +27,10 @@ use crate::server::ClientConnection;
 pub(crate) struct Ctx<'a> {
     pub store: Option<&'a ConnectionStore>,
     /// Only the push-capable extensions (Kafka, Socket) read this.
-    #[cfg_attr(not(any(feature = "kafka", feature = "socket")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "kafka", feature = "socket", feature = "grpc")),
+        allow(dead_code)
+    )]
     pub client: &'a ClientConnection,
 }
 

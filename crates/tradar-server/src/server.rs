@@ -63,7 +63,10 @@ struct State {
 /// client's subscriptions on the same server.
 // `id`/`outbox`/`notify` are only used by push-capable extensions (Kafka,
 // Socket); a build with both off leaves them unused.
-#[cfg_attr(not(any(feature = "kafka", feature = "socket")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "kafka", feature = "socket", feature = "grpc")),
+    allow(dead_code)
+)]
 #[derive(Clone)]
 pub struct ClientConnection {
     pub(crate) id: u64,
@@ -85,7 +88,17 @@ impl ClientConnection {
         Self { id: 0, outbox }
     }
 
-    #[cfg_attr(not(any(feature = "kafka", feature = "socket")), allow(dead_code))]
+    /// A connection whose pushes land in the returned receiver, one
+    /// JSON-RPC line each -- for a test that drives a subscription.
+    pub fn with_inbox(id: u64) -> (Self, mpsc::UnboundedReceiver<String>) {
+        let (outbox, inbox) = mpsc::unbounded_channel();
+        (Self { id, outbox }, inbox)
+    }
+
+    #[cfg_attr(
+        not(any(feature = "kafka", feature = "socket", feature = "grpc")),
+        allow(dead_code)
+    )]
     pub(crate) fn notify(&self, method: &str, params: Value) {
         let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
         let _ = self.outbox.send(format!("{line}\n"));

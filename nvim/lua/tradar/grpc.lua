@@ -1,7 +1,9 @@
 -- gRPC: connect, browse service/method via server reflection (or a loaded
 -- `.proto` when the target doesn't support reflection), invoke -- unary
--- only, per the v1 scope (see docs/architecture.md, "Chốt lại scope v1"
--- under gRPC). Talks to the `grpc.*` methods added to tradar-server
+-- through `grpc.invoke`, server-/client-streaming and bidi through
+-- `grpc.stream.*` over the push channel. Request metadata is the leading
+-- `# name: value` lines of the request buffer. Talks to the `grpc.*`
+-- methods added to tradar-server
 -- (docs/backlog/grpc-rpc-methods-2026-10-14.md); this module owns no
 -- connection state of its own beyond "which connection did we last pick",
 -- the server already keeps the channel + schema.
@@ -101,8 +103,14 @@ local function pick_method(conn, service)
     if #methods == 0 then return notify(service .. ' has no methods', vim.log.levels.WARN) end
     vim.ui.select(methods, {
       prompt = service,
-      format_item = function(m) return ('%s(%s) -> %s'):format(m.name, m.input, m.output) end,
-    }, function(m) if m then M.open_request(conn, service, m.name) end end)
+      format_item = function(m)
+        local tag = (m.client_streaming and m.server_streaming and '  [bidi stream]')
+          or (m.client_streaming and '  [client stream]')
+          or (m.server_streaming and '  [server stream]')
+          or ''
+        return ('%s(%s) -> %s%s'):format(m.name, m.input, m.output, tag)
+      end,
+    }, function(m) if m then M.open_request(conn, service, m.name, m) end end)
   end)
 end
 
@@ -155,6 +163,7 @@ local function show_response(request_buf, text)
       if win ~= -1 then vim.api.nvim_win_close(win, true) end
     end, { buffer = resp_buf, desc = 'tradar: close gRPC response' })
   end
+  if vim.bo[resp_buf].filetype ~= 'json' then vim.bo[resp_buf].filetype = 'json' end
   vim.bo[resp_buf].modifiable = true
   vim.api.nvim_buf_set_lines(resp_buf, 0, -1, false, vim.split(text, '\n', { plain = true }))
   vim.bo[resp_buf].modifiable = false
@@ -168,22 +177,149 @@ local function show_response(request_buf, text)
   end
 end
 
---- Parses the request buffer's own text as JSON and invokes -- no
---- "sinh khung" (skeleton) from the method's input shape yet (see
---- backlog's "Chưa làm"), so the buffer opens on a plain `{}` the user
---- fills in by hand, same way grpcurl's own `-d` argument has to be typed
---- out in full by the caller.
+--- Splits a request buffer into `metadata` and the JSON body: leading
+--- `# name: value` lines are request headers (gRPC metadata), other leading
+--- `#`/blank lines are comments; the body starts at the first other line.
+--- Returns `nil` for `metadata` when there is none (an empty Lua table would
+--- encode as `[]`, not `{}`).
+local function parse_request(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local metadata, first = {}, 1
+  while first <= #lines do
+    local line = lines[first]
+    local key, value = line:match('^#%s*([%w%-_%.]+)%s*:%s*(.-)%s*$')
+    if key then
+      metadata[key] = value
+    elseif not (line:match('^%s*$') or line:match('^#')) then
+      break
+    end
+    first = first + 1
+  end
+  local text = table.concat(lines, '\n', first)
+  local ok, body = pcall(vim.json.decode, text, { luanil = { object = true, array = true } })
+  if not ok then return nil, nil, 'request is not valid JSON: ' .. tostring(body) end
+  return body, next(metadata) and metadata or nil
+end
+
+--- `# name: value` lines for a metadata object (response headers/trailers),
+--- sorted so the order is stable.
+local function metadata_lines(label, metadata)
+  local keys = vim.tbl_keys(metadata or {})
+  table.sort(keys)
+  local lines = {}
+  for _, key in ipairs(keys) do
+    table.insert(lines, ('# %s%s: %s'):format(label, key, metadata[key]))
+  end
+  return lines
+end
+
+local function error_suffix(data)
+  return data and data.grpc_code and (' (grpc_code=' .. tostring(data.grpc_code) .. ')') or ''
+end
+
+--- subscription -> request buffer, for `grpc.stream.message` pushes.
+local streams = {}
+local stream_listener
+
+--- The response split as an append-only transcript (streams): `‹` a reply,
+--- `›` a message we sent, `#` headers/trailers/status.
+local function stream_append(buf, lines)
+  local resp = vim.b[buf].tradar_grpc_response
+  if not (resp and vim.api.nvim_buf_is_valid(resp)) then return end
+  require('tradar.tail').append(resp, lines)
+end
+
+local function transcript_lines(prefix, text)
+  local lines = vim.split(text, '\n', { plain = true })
+  for i, line in ipairs(lines) do
+    lines[i] = (i == 1 and prefix or '  ') .. line
+  end
+  return lines
+end
+
+local function on_stream_message(params)
+  local buf = streams[params.subscription]
+  if not buf then return end
+  local kind = params.kind
+  if kind == 'headers' or kind == 'trailers' then
+    local label = kind == 'trailers' and 'trailer ' or ''
+    stream_append(buf, metadata_lines(label, params.metadata))
+  elseif kind == 'message' then
+    stream_append(buf, transcript_lines('‹ ', require('tradar.render').pretty(params.message)))
+  elseif kind == 'sent' then
+    stream_append(buf, transcript_lines('› ', vim.json.encode(params.message)))
+  else
+    -- `end` or `error`: the call is over either way.
+    if kind == 'error' then
+      stream_append(buf, { ('# error: %s (grpc_code=%s)'):format(params.message or '?', tostring(params.code)) })
+    else
+      stream_append(buf, { '# end of stream' })
+    end
+    streams[params.subscription] = nil
+    if vim.api.nvim_buf_is_valid(buf) then vim.b[buf].tradar_grpc_stream = nil end
+    rpc.request('grpc.stream.stop', { subscription = params.subscription }, function() end)
+  end
+end
+
+--- A fresh, empty response split for a stream's transcript.
+local function reset_response(buf)
+  show_response(buf, '')
+  local resp = vim.b[buf].tradar_grpc_response
+  vim.bo[resp].filetype = ''
+  vim.bo[resp].modifiable = true
+  vim.api.nvim_buf_set_lines(resp, 0, -1, false, {})
+  vim.bo[resp].modifiable = false
+end
+
+--- Sends the buffer's JSON as one more message on the open stream.
+local function stream_send(buf, info, body)
+  local subscription = vim.b[buf].tradar_grpc_stream
+  call('grpc.stream.send', { subscription = subscription, message = body }, function() end)
+end
+
+local function stream_start(buf, info, body, metadata)
+  if not stream_listener then stream_listener = rpc.on('grpc.stream.message', on_stream_message) end
+  reset_response(buf)
+  local sends = info.client_streaming
+  call('grpc.stream.start', {
+    connection = info.connection,
+    service = info.service,
+    method = info.method,
+    request = (not sends) and body or nil,
+    metadata = metadata,
+  }, function(result)
+    streams[result.subscription] = buf
+    vim.b[buf].tradar_grpc_stream = result.subscription
+    if sends then stream_send(buf, info, body) end
+  end)
+end
+
+--- Parses the request buffer (metadata + JSON) and invokes. Streaming
+--- methods go through `grpc.stream.*` instead: `<leader>rr` starts the call
+--- (server-streaming) or starts it and sends the buffer as a message
+--- (client/bidi; run it again to send another), `<leader>rc` half-closes,
+--- `<leader>rx` stops.
 function M.send(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   local info = vim.b[buf].tradar_grpc
   if not info then return notify('not a tradar gRPC request buffer', vim.log.levels.ERROR) end
+  local body, metadata, parse_err = parse_request(buf)
+  if parse_err then return notify(parse_err, vim.log.levels.ERROR) end
+
+  if info.client_streaming or info.server_streaming then
+    if vim.b[buf].tradar_grpc_stream then
+      if info.client_streaming then return stream_send(buf, info, body) end
+      return notify('this stream is still running -- <leader>rx to stop it first', vim.log.levels.WARN)
+    end
+    return rpc.ensure(require('tradar').rpc_opts(), function(err)
+      if err then return notify(err, vim.log.levels.ERROR) end
+      stream_start(buf, info, body, metadata)
+    end)
+  end
+
   if vim.b[buf].tradar_grpc_query_id then
     return notify('a request is already running on this buffer -- <leader>rx to cancel it first', vim.log.levels.WARN)
   end
-  local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
-  local ok, request = pcall(vim.json.decode, text, { luanil = { object = true, array = true } })
-  if not ok then return notify('request is not valid JSON: ' .. tostring(request), vim.log.levels.ERROR) end
-
   state.next_id = state.next_id + 1
   local query_id = ('grpc-%d'):format(state.next_id)
   vim.b[buf].tradar_grpc_query_id = query_id
@@ -198,28 +334,48 @@ function M.send(buf)
       connection = info.connection,
       service = info.service,
       method = info.method,
-      request = request,
+      request = body,
+      metadata = metadata,
       query_id = query_id,
     }, function(e, result, data)
       clear()
-      if e then
-        local suffix = data and data.grpc_code and (' (grpc_code=' .. tostring(data.grpc_code) .. ')') or ''
-        return notify(e .. suffix, vim.log.levels.ERROR)
-      end
+      if e then return notify(e .. error_suffix(data), vim.log.levels.ERROR) end
       -- Indented (and nested keys sorted) rather than one compact line: a real
       -- response is nested, and unreadable as a single line.
-      show_response(buf, require('tradar.render').pretty(result.response))
+      local text = require('tradar.render').pretty(result.response)
+      local headers = metadata_lines('', result.headers)
+      if #headers > 0 then text = table.concat(headers, '\n') .. '\n' .. text end
+      show_response(buf, text)
     end)
   end)
 end
 
---- Cancels the in-flight `grpc.invoke` started from this buffer, if any --
---- best-effort the same way `M.cancel`/`:TradarCancel` is for SQL: a gRPC
---- call has no server-side "stop processing" analogue to a DB's own
---- cancel, so this only drops the client's own wait (see `tradar-server`'s
---- `cancel` method, shared across both).
+--- Half-closes a client-/bidi-streaming call: no more messages, replies keep
+--- arriving until the server ends the stream.
+function M.close(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local subscription = vim.b[buf].tradar_grpc_stream
+  if not subscription then return notify('no open stream on this buffer', vim.log.levels.WARN) end
+  call('grpc.stream.close', { subscription = subscription }, function()
+    stream_append(buf, { '# send side closed' })
+  end)
+end
+
+--- Cancels the in-flight `grpc.invoke` (or stops the open stream) started
+--- from this buffer, if any. A unary cancel is best-effort the same way
+--- `M.cancel`/`:TradarCancel` is for SQL: a gRPC call has no server-side
+--- "stop processing" analogue to a DB's own cancel, so this only drops the
+--- client's own wait (see `tradar-server`'s `cancel` method).
 function M.cancel(buf)
   buf = buf or vim.api.nvim_get_current_buf()
+  local subscription = vim.b[buf].tradar_grpc_stream
+  if subscription then
+    streams[subscription] = nil
+    vim.b[buf].tradar_grpc_stream = nil
+    return call('grpc.stream.stop', { subscription = subscription }, function()
+      stream_append(buf, { '# stopped' })
+    end)
+  end
   local query_id = vim.b[buf].tradar_grpc_query_id
   if not query_id then return notify('nothing running on this buffer', vim.log.levels.WARN) end
   call('cancel', { query_id = query_id }, function(result)
@@ -228,7 +384,7 @@ function M.cancel(buf)
   end)
 end
 
-function M.open_request(connection, service, method)
+function M.open_request(connection, service, method, kind)
   local key = table.concat({ connection, service, method }, '/')
   local existing = open_buffers[key]
   if existing and vim.api.nvim_buf_is_valid(existing) then
@@ -245,12 +401,34 @@ function M.open_request(connection, service, method)
   local buf = scratch('tradar-grpc://' .. key)
   open_buffers[key] = buf
   vim.bo[buf].filetype = 'json'
-  vim.b[buf].tradar_grpc = { connection = connection, service = service, method = method }
+  vim.b[buf].tradar_grpc = {
+    connection = connection,
+    service = service,
+    method = method,
+    client_streaming = kind and kind.client_streaming or false,
+    server_streaming = kind and kind.server_streaming or false,
+  }
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '{}' }) -- until `grpc.skeleton` answers
   vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcSend', function() M.send(buf) end, {})
   vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcCancel', function() M.cancel(buf) end, {})
   vim.keymap.set('n', '<leader>rr', function() M.send(buf) end, { buffer = buf, desc = 'tradar: send gRPC request' })
-  vim.keymap.set('n', '<leader>rx', function() M.cancel(buf) end, { buffer = buf, desc = 'tradar: cancel gRPC request' })
+  vim.keymap.set('n', '<leader>rx', function() M.cancel(buf) end, { buffer = buf, desc = 'tradar: cancel gRPC request / stop stream' })
+  if kind and kind.client_streaming then
+    vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcClose', function() M.close(buf) end, {})
+    vim.keymap.set('n', '<leader>rc', function() M.close(buf) end, { buffer = buf, desc = 'tradar: close the send side of the stream' })
+  end
+  -- A stream outlives its response split but not its request buffer.
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    buffer = buf,
+    once = true,
+    callback = function()
+      local subscription = vim.b[buf].tradar_grpc_stream
+      if subscription then
+        streams[subscription] = nil
+        rpc.request('grpc.stream.stop', { subscription = subscription }, function() end)
+      end
+    end,
+  })
   -- No `q` here: unlike the response split/results buffer (both
   -- `modifiable = false`, where `q` shadowing vim's own macro-record is
   -- free), this buffer is a real editable JSON buffer -- stealing `q`
@@ -259,8 +437,10 @@ function M.open_request(connection, service, method)
   vim.keymap.set('n', 'g?', function()
     vim.lsp.util.open_floating_preview({
       '# tradar: gRPC request buffer',
-      '- `<leader>rr` / `:TradarGrpcSend` send this request',
-      '- `<leader>rx` / `:TradarGrpcCancel` cancel if still running',
+      '- `<leader>rr` / `:TradarGrpcSend` send this request (streaming: start the call; client/bidi: run again to send another message)',
+      '- `<leader>rc` / `:TradarGrpcClose` client/bidi stream: close the send side',
+      '- `<leader>rx` / `:TradarGrpcCancel` cancel if still running / stop the stream',
+      '- leading `# name: value` lines are request metadata (headers)',
       '- `:q`/`:tabclose` close (this buffer is editable -- `q` is left as vim\'s own macro-record)',
     }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
   end, { buffer = buf, desc = 'tradar: show keymap help' })

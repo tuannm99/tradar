@@ -3,6 +3,12 @@ package greeter;
 
 service Greeter {
   rpc SayHello (HelloRequest) returns (HelloReply);
+  // `length` copies of "<name> #<i>".
+  rpc Countdown (HelloRequest) returns (stream HelloReply);
+  // One reply naming every received name.
+  rpc Collect (stream HelloRequest) returns (HelloReply);
+  // Echoes each request as "echo <name>".
+  rpc Chat (stream HelloRequest) returns (stream HelloReply);
 }
 
 message HelloRequest {

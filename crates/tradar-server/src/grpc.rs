@@ -5,8 +5,10 @@
 //! (`server.rs`'s `State::grpc`) instead of going through `Arc<dyn
 //! QueryDriver>`.
 //!
-//! Scope v1 (see docs/architecture.md, "Chốt lại scope v1" under gRPC):
-//! unary only, no request metadata/headers. The dynamic-invocation
+//! Unary goes through `grpc.invoke`; server-/client-streaming and bidi go
+//! through `grpc.stream.*` over the push channel (the same shape as Socket's
+//! tail). Both take optional request `metadata` (ASCII headers) and report
+//! the response headers (and, for streams, trailers). The dynamic-invocation
 //! mechanics here were de-risked by a throwaway spike before this was
 //! written -- see `docs/backlog/grpc-spike-2026-10-12.md`.
 
@@ -20,6 +22,7 @@ use prost_reflect::{
 };
 use tonic::client::Grpc;
 use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
+use tonic::metadata::{KeyAndValueRef, MetadataKey, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 use tonic::{Request, Status};
 
@@ -68,6 +71,8 @@ pub struct MethodInfo {
     pub name: String,
     pub input: String,
     pub output: String,
+    pub client_streaming: bool,
+    pub server_streaming: bool,
 }
 
 pub fn list_methods(pool: &DescriptorPool, service: &str) -> anyhow::Result<Vec<MethodInfo>> {
@@ -78,6 +83,8 @@ pub fn list_methods(pool: &DescriptorPool, service: &str) -> anyhow::Result<Vec<
             name: m.name().to_string(),
             input: m.input().full_name().to_string(),
             output: m.output().full_name().to_string(),
+            client_streaming: m.is_client_streaming(),
+            server_streaming: m.is_server_streaming(),
         })
         .collect())
 }
@@ -284,6 +291,69 @@ impl From<Status> for GrpcError {
     }
 }
 
+/// A JSON object of `name: value` strings into request metadata. Names are
+/// lower-cased (gRPC metadata keys are case-insensitive, HTTP/2 wants them
+/// lower); `-bin` keys carry binary values and aren't supported.
+pub fn parse_metadata(value: Option<&serde_json::Value>) -> anyhow::Result<MetadataMap> {
+    let mut map = MetadataMap::new();
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(map);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("`metadata` phải là object {{tên: giá trị}}"))?;
+    for (name, value) in object {
+        let name = name.trim().to_ascii_lowercase();
+        if name.ends_with("-bin") {
+            anyhow::bail!("metadata `{name}`: key `-bin` (giá trị nhị phân) chưa được hỗ trợ");
+        }
+        let text = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let key = MetadataKey::from_bytes(name.as_bytes())
+            .map_err(|e| anyhow::anyhow!("metadata key `{name}` không hợp lệ: {e}"))?;
+        let val = MetadataValue::try_from(text.as_str())
+            .map_err(|e| anyhow::anyhow!("metadata `{name}`: giá trị không hợp lệ: {e}"))?;
+        map.append(key, val);
+    }
+    Ok(map)
+}
+
+/// Response headers/trailers as a JSON object. A repeated key is joined with
+/// `, ` (how HTTP folds them); a binary value shows its base64 form.
+pub fn metadata_to_json(map: &MetadataMap) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for entry in map.iter() {
+        let (key, value) = match entry {
+            KeyAndValueRef::Ascii(k, v) => (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or("<không đọc được>").to_string(),
+            ),
+            KeyAndValueRef::Binary(k, v) => (
+                k.as_str().to_string(),
+                String::from_utf8_lossy(v.as_encoded_bytes()).into_owned(),
+            ),
+        };
+        match out.get_mut(&key) {
+            Some(serde_json::Value::String(existing)) => {
+                existing.push_str(", ");
+                existing.push_str(&value);
+            }
+            _ => {
+                out.insert(key, serde_json::Value::String(value));
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// A unary call's response plus the headers that came with it.
+pub struct UnaryResponse {
+    pub response: serde_json::Value,
+    pub headers: serde_json::Value,
+}
+
 /// Build a request from JSON, invoke, return the response as JSON -- the
 /// entire point of the spike this module is built on: neither the request
 /// nor the response type is known to Rust at compile time, only the
@@ -294,14 +364,19 @@ pub async fn invoke(
     service: &str,
     method: &str,
     request_json: serde_json::Value,
-) -> anyhow::Result<Result<serde_json::Value, GrpcError>> {
+    metadata: MetadataMap,
+) -> anyhow::Result<Result<UnaryResponse, GrpcError>> {
     let method = get_method(pool, service, method)?;
+    if method.is_client_streaming() || method.is_server_streaming() {
+        anyhow::bail!(
+            "`{}` là method streaming -- dùng `grpc.stream.start`, không phải `grpc.invoke`",
+            method.name()
+        );
+    }
     let request_msg = DynamicMessage::deserialize(method.input(), request_json)
         .map_err(|e| anyhow::anyhow!("request không khớp schema: {e}"))?;
 
-    let path = format!("/{}/{}", method.parent_service().full_name(), method.name())
-        .parse()
-        .map_err(|e| anyhow::anyhow!("path không hợp lệ: {e}"))?;
+    let path = method_path(&method)?;
 
     let mut grpc = Grpc::new(channel);
     grpc.ready()
@@ -310,10 +385,183 @@ pub async fn invoke(
     let codec = DynamicCodec {
         response_desc: method.output(),
     };
-    match grpc.unary(Request::new(request_msg), path, codec).await {
-        Ok(response) => Ok(Ok(serde_json::to_value(response.into_inner())?)),
+    let mut request = Request::new(request_msg);
+    *request.metadata_mut() = metadata;
+    match grpc.unary(request, path, codec).await {
+        Ok(response) => {
+            let headers = metadata_to_json(response.metadata());
+            Ok(Ok(UnaryResponse {
+                response: serde_json::to_value(response.into_inner())?,
+                headers,
+            }))
+        }
         Err(status) => Ok(Err(status.into())),
     }
+}
+
+fn method_path(
+    method: &MethodDescriptor,
+) -> anyhow::Result<tonic::codegen::http::uri::PathAndQuery> {
+    format!("/{}/{}", method.parent_service().full_name(), method.name())
+        .parse()
+        .map_err(|e| anyhow::anyhow!("path không hợp lệ: {e}"))
+}
+
+/// A running stream (server-streaming, client-streaming or bidi). Cheap to
+/// `Clone` so `grpc.stream.send` can take a copy out of the subscription map
+/// while the original stays there for `stop`.
+#[derive(Clone)]
+pub struct StreamHandle(std::sync::Arc<StreamInner>);
+
+struct StreamInner {
+    /// `None` once the client half-closed (`close`), or if the method only
+    /// streams server -> client.
+    tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<DynamicMessage>>>,
+    input: MessageDescriptor,
+    client_streaming: bool,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl StreamHandle {
+    pub fn client_streaming(&self) -> bool {
+        self.0.client_streaming
+    }
+
+    /// Queue one request message on a client-/bidi-streaming call.
+    pub fn send(&self, message: serde_json::Value) -> anyhow::Result<()> {
+        if !self.0.client_streaming {
+            anyhow::bail!("method này chỉ stream server -> client, không gửi thêm message được");
+        }
+        let msg = DynamicMessage::deserialize(self.0.input.clone(), message)
+            .map_err(|e| anyhow::anyhow!("message không khớp schema: {e}"))?;
+        match self.0.tx.lock().unwrap().as_ref() {
+            Some(tx) => tx
+                .send(msg)
+                .map_err(|_| anyhow::anyhow!("stream đã kết thúc")),
+            None => anyhow::bail!("đã đóng chiều gửi (half-close)"),
+        }
+    }
+
+    /// Half-close: no more requests, the server's replies keep coming.
+    pub fn close(&self) {
+        self.0.tx.lock().unwrap().take();
+    }
+
+    pub fn stop(&self) {
+        self.close();
+        self.0.task.abort();
+    }
+}
+
+/// Starts a streaming call and pushes what happens as `{kind, ...}` items:
+/// `headers`, `message` (one response), `trailers`, then `end` -- or `error`
+/// (with the gRPC `code`) in place of `end`. `request` is the one request of
+/// a server-streaming call, or an optional first message of a client/bidi
+/// one.
+pub fn start_stream(
+    channel: Channel,
+    pool: &DescriptorPool,
+    service: &str,
+    method: &str,
+    request: Option<serde_json::Value>,
+    metadata: MetadataMap,
+    push: impl Fn(serde_json::Value) + Send + Sync + 'static,
+) -> anyhow::Result<StreamHandle> {
+    use serde_json::json;
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    let method = get_method(pool, service, method)?;
+    let (client_streaming, server_streaming) =
+        (method.is_client_streaming(), method.is_server_streaming());
+    if !client_streaming && !server_streaming {
+        anyhow::bail!(
+            "`{}` là unary -- dùng `grpc.invoke`, không phải `grpc.stream.start`",
+            method.name()
+        );
+    }
+    let input = method.input();
+    let first = request
+        .map(|v| DynamicMessage::deserialize(input.clone(), v))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("request không khớp schema: {e}"))?;
+    let path = method_path(&method)?;
+    let codec = DynamicCodec {
+        response_desc: method.output(),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<DynamicMessage>();
+    if client_streaming && let Some(msg) = first.clone() {
+        let _ = tx.send(msg);
+    }
+    let kept_tx = client_streaming.then_some(tx);
+
+    let task = tokio::spawn(async move {
+        let fail = |status: Status| {
+            push(
+                json!({"kind": "error", "code": status.code() as i32, "message": status.message()}),
+            );
+        };
+        let mut grpc = Grpc::new(channel);
+        if let Err(e) = grpc.ready().await {
+            return fail(Status::unavailable(format!(
+                "kênh gRPC không sẵn sàng: {e}"
+            )));
+        }
+        // The three shapes differ only in how the request goes out and
+        // whether the reply is one message or a stream.
+        let reply = if !client_streaming {
+            let mut req = Request::new(first.unwrap_or_else(|| DynamicMessage::new(input)));
+            *req.metadata_mut() = metadata;
+            grpc.server_streaming(req, path, codec).await
+        } else if server_streaming {
+            let mut req = Request::new(UnboundedReceiverStream::new(rx));
+            *req.metadata_mut() = metadata;
+            grpc.streaming(req, path, codec).await
+        } else {
+            let mut req = Request::new(UnboundedReceiverStream::new(rx));
+            *req.metadata_mut() = metadata;
+            match grpc.client_streaming(req, path, codec).await {
+                Ok(response) => {
+                    push(
+                        json!({"kind": "headers", "metadata": metadata_to_json(response.metadata())}),
+                    );
+                    match serde_json::to_value(response.into_inner()) {
+                        Ok(message) => push(json!({"kind": "message", "message": message})),
+                        Err(e) => return fail(Status::internal(e.to_string())),
+                    }
+                    return push(json!({"kind": "end"}));
+                }
+                Err(status) => return fail(status),
+            }
+        };
+        let response = match reply {
+            Ok(response) => response,
+            Err(status) => return fail(status),
+        };
+        push(json!({"kind": "headers", "metadata": metadata_to_json(response.metadata())}));
+        let mut stream = response.into_inner();
+        loop {
+            match stream.message().await {
+                Ok(Some(message)) => match serde_json::to_value(message) {
+                    Ok(message) => push(json!({"kind": "message", "message": message})),
+                    Err(e) => return fail(Status::internal(e.to_string())),
+                },
+                Ok(None) => break,
+                Err(status) => return fail(status),
+            }
+        }
+        if let Ok(Some(trailers)) = stream.trailers().await {
+            push(json!({"kind": "trailers", "metadata": metadata_to_json(&trailers)}));
+        }
+        push(json!({"kind": "end"}));
+    });
+
+    Ok(StreamHandle(std::sync::Arc::new(StreamInner {
+        tx: std::sync::Mutex::new(kept_tx),
+        input: method.input(),
+        client_streaming,
+        task,
+    })))
 }
 
 /// `tonic::codec::ProstCodec` (the one `tonic`'s own generated clients use)
@@ -376,11 +624,40 @@ impl Decoder for DynamicDecoder {
 /// `grpc.*` -- a connection (channel + descriptor pool) per saved name, plus
 /// the in-flight `invoke`s a client named with `query_id` so `cancel` can
 /// reach them.
-#[derive(Default)]
 pub struct GrpcExtension {
     connections: std::sync::Mutex<std::collections::HashMap<String, GrpcConnection>>,
     running:
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Notify>>>,
+    streams: std::sync::Mutex<crate::subscriptions::Subscriptions<StreamHandle>>,
+}
+
+impl GrpcExtension {
+    fn stream(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<StreamHandle, crate::protocol::RpcError> {
+        let subscription = crate::protocol::str_param(params, "subscription")?;
+        self.streams
+            .lock()
+            .unwrap()
+            .get(subscription)
+            .cloned()
+            .ok_or_else(|| {
+                crate::protocol::RpcError::app(format!(
+                    "`{subscription}` is not streaming -- call `grpc.stream.start` first"
+                ))
+            })
+    }
+}
+
+impl Default for GrpcExtension {
+    fn default() -> Self {
+        Self {
+            connections: Default::default(),
+            running: Default::default(),
+            streams: std::sync::Mutex::new(crate::subscriptions::Subscriptions::new("grpc")),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -391,6 +668,13 @@ impl crate::extension::Extension for GrpcExtension {
 
     fn is_connected(&self, name: &str) -> bool {
         self.connections.lock().unwrap().contains_key(name)
+    }
+
+    fn client_disconnected(&self, client_id: u64) {
+        let handles = self.streams.lock().unwrap().remove_client(client_id);
+        for handle in handles {
+            handle.stop();
+        }
     }
 
     /// Best-effort: only drops the client's own wait, there is no gRPC-level
@@ -417,6 +701,36 @@ impl crate::extension::Extension for GrpcExtension {
         use serde_json::{Value, json};
         use std::sync::Arc;
         use tokio::sync::Notify;
+
+        // These name a subscription, not a saved connection.
+        match method {
+            "stream.send" => {
+                let handle = self.stream(params)?;
+                let message = params.get("message").cloned().unwrap_or(json!({}));
+                handle
+                    .send(message.clone())
+                    .map_err(|e| RpcError::app(e.to_string()))?;
+                ctx.client.notify(
+                    "grpc.stream.message",
+                    json!({"subscription": str_param(params, "subscription")?, "kind": "sent", "message": message}),
+                );
+                return Ok(json!({"sent": true}));
+            }
+            "stream.close" => {
+                self.stream(params)?.close();
+                return Ok(json!({"closed": true}));
+            }
+            "stream.stop" => {
+                let subscription = str_param(params, "subscription")?;
+                let handle = self.streams.lock().unwrap().remove(subscription);
+                let stopped = handle.is_some();
+                if let Some(handle) = handle {
+                    handle.stop();
+                }
+                return Ok(json!({"stopped": stopped}));
+            }
+            _ => {}
+        }
 
         let name = str_param(params, "connection")?;
         match method {
@@ -474,7 +788,13 @@ impl crate::extension::Extension for GrpcExtension {
                 Ok(json!(
                     methods
                         .iter()
-                        .map(|m| json!({"name": m.name, "input": m.input, "output": m.output}))
+                        .map(|m| json!({
+                            "name": m.name,
+                            "input": m.input,
+                            "output": m.output,
+                            "client_streaming": m.client_streaming,
+                            "server_streaming": m.server_streaming,
+                        }))
                         .collect::<Vec<_>>()
                 ))
             }
@@ -491,6 +811,47 @@ impl crate::extension::Extension for GrpcExtension {
                     .map_err(|e| RpcError::app(e.to_string()))?;
                 Ok(json!({"skeleton": text}))
             }
+            // Streaming calls (server-/client-streaming, bidi). Replies arrive
+            // as `grpc.stream.message` notifications on the caller's socket:
+            // `{subscription, kind: headers|message|trailers|sent|end|error, ..}`.
+            "stream.start" => {
+                let service = str_param(params, "service")?;
+                let rpc_method = str_param(params, "method")?;
+                let request = params.get("request").filter(|v| !v.is_null()).cloned();
+                let metadata = parse_metadata(params.get("metadata"))
+                    .map_err(|e| RpcError::app(e.to_string()))?;
+                let (channel, pool) = {
+                    let connections = self.connections.lock().unwrap();
+                    let conn = connections
+                        .get(name)
+                        .ok_or_else(|| not_connected("grpc", name))?;
+                    (conn.channel.clone(), conn.pool.clone())
+                };
+                let subscription = self.streams.lock().unwrap().next_id();
+                let push_client = ctx.client.clone();
+                let id = subscription.clone();
+                let handle = start_stream(
+                    channel,
+                    &pool,
+                    service,
+                    rpc_method,
+                    request,
+                    metadata,
+                    move |mut item| {
+                        item["subscription"] = json!(id);
+                        push_client.notify("grpc.stream.message", item)
+                    },
+                )
+                .map_err(|e| RpcError::app(e.to_string()))?;
+                let client_streaming = handle.client_streaming();
+                self.streams.lock().unwrap().insert(
+                    subscription.clone(),
+                    ctx.client.id,
+                    (),
+                    handle,
+                );
+                Ok(json!({"subscription": subscription, "client_streaming": client_streaming}))
+            }
             // Only *invokes*; unlike `edit.sql` there is nothing to
             // show-then-run (a gRPC call isn't a statement the client could
             // choose to run later). An optional `query_id` lets a client
@@ -499,6 +860,8 @@ impl crate::extension::Extension for GrpcExtension {
                 let service = str_param(params, "service")?;
                 let rpc_method = str_param(params, "method")?;
                 let request = params.get("request").cloned().unwrap_or(json!({}));
+                let metadata = parse_metadata(params.get("metadata"))
+                    .map_err(|e| RpcError::app(e.to_string()))?;
                 let (channel, pool) = {
                     let connections = self.connections.lock().unwrap();
                     let conn = connections
@@ -516,14 +879,16 @@ impl crate::extension::Extension for GrpcExtension {
                         .insert(id.to_string(), Arc::clone(&cancel));
                 }
                 let outcome = tokio::select! {
-                    result = invoke(channel, &pool, service, rpc_method, request) => Some(result),
+                    result = invoke(channel, &pool, service, rpc_method, request, metadata) => Some(result),
                     () = cancel.notified() => None,
                 };
                 if let Some(id) = query_id {
                     self.running.lock().unwrap().remove(id);
                 }
                 match outcome {
-                    Some(Ok(Ok(response))) => Ok(json!({"response": response})),
+                    Some(Ok(Ok(reply))) => {
+                        Ok(json!({"response": reply.response, "headers": reply.headers}))
+                    }
                     Some(Ok(Err(status))) => Err(status.into()),
                     Some(Err(e)) => Err(e.into()),
                     None => Err(RpcError::app("invoke cancelled")),
