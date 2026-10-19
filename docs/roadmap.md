@@ -4,12 +4,12 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét. 
 
 ## Hướng đi hiện tại
 
-**Giao diện chính là Neovim + `tradar-server`**, không phải TUI (`tradar-app` đóng băng, chỉ sửa lỗi). Xem `docs/architecture.md`.
+**Giao diện chính là Neovim + `tradar-server`**, không phải TUI (`tradar-app` **deprecated**: không phát triển thêm, chỉ làm khi có người yêu cầu). Xem `docs/architecture.md`.
 
 ## Thứ tự tiếp theo
 
 1. **Dùng thật vài ngày trên database của chính mình** (người dùng làm, không phải việc code) — mọi lỗi gặp được vào đây trước tính năng mới.
-2. ~~Quyết định cuối về TUI~~ — **đã chốt: giữ đóng băng** (2026-10-31). Chỉ sửa lỗi, vẫn phải build/test qua; không bỏ hẳn. Hệ quả: phần client trùng lặp giữa connector crate và `tradar-server` (mục bên dưới) chỉ làm khi một lỗi phải sửa ở cả hai bản.
+2. ~~Quyết định cuối về TUI~~ — **đã chốt: deprecated** (2026-10-31). Không phát triển thêm, không sửa chủ động (chỉ khi có người yêu cầu); vẫn nằm trong cây và phải build/test qua; không xoá. Hệ quả: phần client trùng lặp giữa connector crate và `tradar-server` (mục bên dưới) chỉ làm khi một lỗi phải sửa ở cả hai bản.
 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước — bảo mật hiện dựa vào quyền `0600` của unix socket); Windows named pipe.
 
@@ -54,8 +54,8 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] HTTP: buffer request sửa được — `docs/backlog/http-request-buffer-2026-10-21.md`
 - [x] RabbitMQ publish buffer + refresh — `docs/backlog/rabbitmq-publish-buffer-2026-10-21.md`
 - [x] Kafka tail: tạm dừng/lọc/xoá/nối lại — `docs/backlog/kafka-tail-controls-2026-10-21.md`
-- [x] Quyết định cuối: **giữ đóng băng TUI** (không bỏ hẳn) — 2026-10-31
-- [ ] Tách phần client dùng chung giữa connector crate (TUI) và module `tradar-server` — **chủ đích chưa làm** (rà 2026-10-19; TUI đã chốt giữ đóng băng 2026-10-31, nên vẫn chỉ làm khi một lỗi phải sửa ở cả hai bản). Đang bị chép: RabbitMQ `parse_target`/`RabbitTarget`/`request`/`PEEK_COUNT`/thân request peek; HTTP `parse_headers`/`resolve_url`; Kafka `ephemeral_group_id`/probe metadata/`list_topics`; Socket `hex_preview`/`chunk_text` và hằng số 500 của ring buffer. Chỉ là các hàm thuần và hằng số (vài trăm dòng, ít đổi) — phần khác nhau mới là phần lớn (TUI bọc trong `tick()`/event queue, server bọc trong notification push), nên không có `Session` hay `Extension` nào để gộp. Để server dùng chung thì chỉ có hai đường: phụ thuộc thẳng `tradar-connector-*` (kéo `ratatui`/UI TUI vào server) hoặc một crate chung mới (một crate cho cả bốn backend, không phải mỗi backend một crate). **Chỉ làm khi**: quyết định *giữ* TUI lâu dài, hoặc một lỗi phải sửa ở cả hai bản. Nếu quyết định *bỏ* TUI thì phần trùng lặp tự biến mất — tách trước sẽ là công cốc.
+- [x] Quyết định cuối: **TUI deprecated** (không xoá, chỉ làm khi có người yêu cầu) — 2026-10-31
+- [ ] Tách phần client dùng chung giữa connector crate (TUI) và module `tradar-server` — **chủ đích chưa làm** (rà 2026-10-19; TUI đã chốt deprecated 2026-10-31, nên vẫn chỉ làm khi một lỗi phải sửa ở cả hai bản). Đang bị chép: RabbitMQ `parse_target`/`RabbitTarget`/`request`/`PEEK_COUNT`/thân request peek; HTTP `parse_headers`/`resolve_url`; Kafka `ephemeral_group_id`/probe metadata/`list_topics`; Socket `hex_preview`/`chunk_text` và hằng số 500 của ring buffer. Chỉ là các hàm thuần và hằng số (vài trăm dòng, ít đổi) — phần khác nhau mới là phần lớn (TUI bọc trong `tick()`/event queue, server bọc trong notification push), nên không có `Session` hay `Extension` nào để gộp. Để server dùng chung thì chỉ có hai đường: phụ thuộc thẳng `tradar-connector-*` (kéo `ratatui`/UI TUI vào server) hoặc một crate chung mới (một crate cho cả bốn backend, không phải mỗi backend một crate). **Chỉ làm khi**: quyết định *giữ* TUI lâu dài, hoặc một lỗi phải sửa ở cả hai bản. Nếu quyết định *bỏ* TUI thì phần trùng lặp tự biến mất — tách trước sẽ là công cốc.
 - [ ] Đóng gói: đường dẫn socket dài hơn ~108 byte, Windows named pipe
 
 **`tradar` CLI: import/export** — chưa scope, tier thấp (gần như mỗi connector đã có tool OSS riêng làm đúng việc này — `mongoimport`/`psql \copy`/`cqlsh COPY`/`elasticdump`; giá trị thật của việc tự làm lại chưa rõ ràng). Khi quay lại cần chốt: subcommand `clap` hay binary riêng; tái dùng connection đã lưu; mapping cột/field theo từng connector; streaming cho file lớn; import-only hay cả export.

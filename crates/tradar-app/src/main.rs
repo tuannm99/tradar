@@ -86,7 +86,7 @@ fn registry() -> HashMap<String, Box<dyn Connector>> {
 #[command(
     name = "tradar",
     version,
-    about = "Terminal-first database exploration and query tool"
+    about = "Terminal-first database exploration and query tool [DEPRECATED: use the Neovim plugin + tradar-server]"
 )]
 struct Cli {}
 
@@ -116,6 +116,13 @@ async fn main() -> anyhow::Result<()> {
     // arguments defined yet beyond those two; nothing to bind to `Cli`'s
     // fields, since there are none.
     Cli::parse();
+
+    // The TUI is deprecated (see docs/wiki/TUI.md). Printed before the
+    // alternate screen is entered, so it is what the terminal shows once the
+    // app exits.
+    eprintln!(
+        "tradar: this TUI is deprecated and no longer developed -- use the Neovim plugin + tradar-server (docs/wiki/Home.md)."
+    );
 
     // Theme and key bindings, before anything is drawn. A broken config is
     // reported and skipped rather than being fatal: losing your colors
