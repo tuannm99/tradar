@@ -73,7 +73,7 @@ Lệnh kế tiếp sẽ tự khởi động bản mới.
 | `confirm = false` | tắt mọi hộp xác nhận an toàn |
 | `prefix` | tiền tố phím (mặc định `<leader>r`) |
 | `keymaps = false` | không đăng ký phím nào |
-| `documents_view` | `"table"` hoặc `"json"` — ép cách hiện kết quả dạng tài liệu |
+| `documents_view` | `"json"` (mặc định) hoặc `"table"` — cách mở kết quả dạng tài liệu (Mongo, Elasticsearch, Redis); `<leader>rv` đổi qua lại. Sửa trực tiếp cần bảng |
 | `page_size = 20` | số dòng mỗi trang kết quả (trang kế tải bằng `<leader>rm`) |
 | `auto_load_more = true` | tự tải trang kế khi con trỏ xuống cuối (mặc định tắt) |
 | `results_layout = "bottom"` | chỗ đặt cửa sổ kết quả: `"bottom"` (chia ngang dưới cùng, mặc định), `"right"` (chia dọc bên phải), `"tab"` (tab riêng, chiếm cả màn hình) |

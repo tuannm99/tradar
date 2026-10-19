@@ -51,7 +51,7 @@ GET /my-index/_search
 
 ## Kết quả dạng tài liệu
 
-Kết quả mặc định hiện **bảng** (cột phẳng `address.city`) để sửa trực tiếp như SQL (sửa ô/xoá dòng rồi `:w` → xem trước → commit; chưa có thêm dòng mới cho Mongo/ES) và dùng `gyc`/export; `<leader>rv` đổi sang JSON (mỗi document in thụt lề, cách nhau một dòng trống, trường cấp 1 theo thứ tự lưu trong DB, cấp lồng nhau theo alphabet, tô màu cú pháp JSON; `gyj` copy cả kết quả cùng dạng này). Câu trả lời đơn giản (một chuỗi Redis, danh sách số) vẫn hiện dạng JSON. Ép một kiểu bằng `setup{ documents_view = "table" | "json" }`.
+Kết quả mặc định hiện **JSON** (mỗi document in thụt lề, cách nhau một dòng trống, trường cấp 1 theo thứ tự lưu trong DB, cấp lồng nhau theo alphabet, tô màu cú pháp JSON; `gyj` copy cả kết quả cùng dạng này). `<leader>rv` đổi sang **bảng** (cột phẳng `address.city`) — dạng này mới sửa trực tiếp như SQL được (sửa ô/xoá dòng rồi `:w` → xem trước → commit; chưa có thêm dòng mới cho Mongo/ES) và dùng `gyc`/export theo ô. Muốn mở bằng bảng mặc định:  `setup{ documents_view = "table" }`.
 
 Sửa/xoá dòng hoạt động cho Mongo (`find()` đơn giản, khoá `_id`) và Elasticsearch (`_search` trên một index, khoá `_id`); Redis chỉ đọc. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 
