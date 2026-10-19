@@ -65,7 +65,7 @@ Content-Type: application/json
 
 ## gRPC
 
-Chỉ **unary**, plaintext, chưa có metadata/header request.
+Plaintext (chưa TLS). Hỗ trợ **unary, server-streaming, client-streaming và bidi**, cùng **metadata (header) của request**.
 
 | Lệnh | Việc |
 |---|---|
@@ -77,3 +77,15 @@ Chỉ **unary**, plaintext, chưa có metadata/header request.
 Chọn method mở một buffer JSON trong tab mới, đã **điền sẵn khung request** sinh từ message đầu vào (mọi trường ở giá trị mặc định: `""`, `0`, `false`, giá trị enum đầu tiên, `[]`, `{}`, message lồng nhau được điền; `oneof` chỉ có nhánh đầu — đổi sang nhánh bạn muốn; message tự tham chiếu dừng ở tầng hai) — sửa giá trị rồi gửi. Server cũ không có khung thì buffer mở trên `{}`. Trong buffer request: `<leader>rr` hoặc `:TradarGrpcSend` gọi thật (response hiện ở split riêng, JSON thụt lề), `<leader>rx` hoặc `:TradarGrpcCancel` huỷ, `g?` xem phím. Buffer request không nhận `q` (đóng bằng `:q`/`:tabclose`). Chọn lại đúng connection/service/method đã mở sẽ nhảy về tab cũ. Chưa có skeleton request tự sinh theo shape message.
 
 Nếu server không hỗ trợ reflection, `:TradarGrpcServices` trả rỗng cho tới khi bạn `:TradarGrpcLoadProto`.
+
+**Metadata.** Các dòng `# tên: giá trị` ở đầu buffer request là header gửi kèm (`# x-token: abc`); dòng `#` khác và dòng trống ở đầu là comment; JSON bắt đầu từ dòng đầu tiên không phải `#`. Key tự chuyển về chữ thường; key `-bin` (giá trị nhị phân) chưa hỗ trợ. Với unary, header của response hiện thành các dòng `# tên: giá trị` phía trên JSON trả về.
+
+**Streaming.** Danh sách method ghi rõ `[server stream]`, `[client stream]` hoặc `[bidi stream]`. Response là một transcript chỉ-đọc (`‹` reply, `›` message đã gửi, `#` header/trailer/trạng thái), giữ 5000 dòng gần nhất:
+
+| Loại | `rr` | `rc` | `rx` |
+|---|---|---|---|
+| server-streaming | bắt đầu call với JSON trong buffer; replies đổ về tới khi server kết thúc | — | dừng |
+| client-streaming | lần đầu bắt đầu call và gửi JSON làm message đầu; mỗi lần `rr` tiếp theo gửi thêm một message (sửa JSON trước) | đóng chiều gửi, server trả reply duy nhất | dừng |
+| bidi | như client-streaming, nhưng reply về ngay khi có | đóng chiều gửi (reply còn lại vẫn về) | dừng |
+
+Đóng buffer request sẽ dừng stream đang mở.

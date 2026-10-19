@@ -5,6 +5,9 @@
 //! doc comment). The dynamic-invocation mechanics were de-risked by a
 //! throwaway spike first -- see `docs/backlog/grpc-spike-2026-10-12.md`.
 #![cfg(feature = "grpc")]
+// The streaming fixtures return `tonic::Status` as their error type, as the
+// generated service trait requires.
+#![allow(clippy::result_large_err)]
 
 use serde_json::{Value, json};
 use tonic::transport::Server as TonicServer;
@@ -26,14 +29,80 @@ impl greeter::greeter_server::Greeter for GreeterSvc {
         &self,
         request: tonic::Request<greeter::HelloRequest>,
     ) -> Result<tonic::Response<greeter::HelloReply>, tonic::Status> {
+        let token = request
+            .metadata()
+            .get("x-token")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let name = request.into_inner().name;
         if name == "boom" {
             return Err(tonic::Status::invalid_argument("name must not be 'boom'"));
         }
-        Ok(tonic::Response::new(greeter::HelloReply {
-            message: format!("Hello, {name}!"),
+        let message = match token {
+            Some(token) => format!("Hello, {name}! [token={token}]"),
+            None => format!("Hello, {name}!"),
+        };
+        let mut response = tonic::Response::new(greeter::HelloReply {
+            message,
             length: name.len() as i32,
+        });
+        response
+            .metadata_mut()
+            .insert("x-served-by", "greeter".parse().unwrap());
+        Ok(response)
+    }
+
+    type CountdownStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<greeter::HelloReply, tonic::Status>> + Send>,
+    >;
+
+    async fn countdown(
+        &self,
+        request: tonic::Request<greeter::HelloRequest>,
+    ) -> Result<tonic::Response<Self::CountdownStream>, tonic::Status> {
+        let name = request.into_inner().name;
+        let items: Vec<_> = (1..=3)
+            .map(|i| {
+                Ok(greeter::HelloReply {
+                    message: format!("{name} #{i}"),
+                    length: i,
+                })
+            })
+            .collect();
+        Ok(tonic::Response::new(Box::pin(tokio_stream::iter(items))))
+    }
+
+    async fn collect(
+        &self,
+        request: tonic::Request<tonic::Streaming<greeter::HelloRequest>>,
+    ) -> Result<tonic::Response<greeter::HelloReply>, tonic::Status> {
+        let mut stream = request.into_inner();
+        let mut names = Vec::new();
+        while let Some(msg) = stream.message().await? {
+            names.push(msg.name);
+        }
+        Ok(tonic::Response::new(greeter::HelloReply {
+            message: names.join("+"),
+            length: names.len() as i32,
         }))
+    }
+
+    type ChatStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<greeter::HelloReply, tonic::Status>> + Send>,
+    >;
+
+    async fn chat(
+        &self,
+        request: tonic::Request<tonic::Streaming<greeter::HelloRequest>>,
+    ) -> Result<tonic::Response<Self::ChatStream>, tonic::Status> {
+        use tokio_stream::StreamExt;
+        let replies = request.into_inner().map(|msg| {
+            msg.map(|m| greeter::HelloReply {
+                message: format!("echo {}", m.name),
+                length: 0,
+            })
+        });
+        Ok(tonic::Response::new(Box::pin(replies)))
     }
 }
 
@@ -142,7 +211,12 @@ async fn connect_discovers_services_via_reflection_and_invokes_unary() {
     .await;
     assert_eq!(
         ok(&methods),
-        &json!([{"name": "SayHello", "input": "greeter.HelloRequest", "output": "greeter.HelloReply"}])
+        &json!([
+            {"name": "SayHello", "input": "greeter.HelloRequest", "output": "greeter.HelloReply", "client_streaming": false, "server_streaming": false},
+            {"name": "Countdown", "input": "greeter.HelloRequest", "output": "greeter.HelloReply", "client_streaming": false, "server_streaming": true},
+            {"name": "Collect", "input": "greeter.HelloRequest", "output": "greeter.HelloReply", "client_streaming": true, "server_streaming": false},
+            {"name": "Chat", "input": "greeter.HelloRequest", "output": "greeter.HelloReply", "client_streaming": true, "server_streaming": true},
+        ])
     );
 
     let invoked = call(
@@ -285,4 +359,244 @@ async fn invoking_an_unknown_method_is_an_app_error_not_a_panic() {
             .unwrap()
             .contains("NoSuchMethod")
     );
+}
+
+#[tokio::test]
+async fn metadata_goes_out_with_the_request_and_response_headers_come_back() {
+    let addr = spawn_greeter(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &addr.to_string());
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+
+    let invoked = call(
+        &server,
+        "grpc.invoke",
+        json!({
+            "connection": "g", "service": "greeter.Greeter", "method": "SayHello",
+            "request": {"name": "Ann"}, "metadata": {"X-Token": "abc"},
+        }),
+    )
+    .await;
+    assert_eq!(
+        ok(&invoked)["response"]["message"],
+        "Hello, Ann! [token=abc]"
+    );
+    assert_eq!(ok(&invoked)["headers"]["x-served-by"], "greeter");
+
+    let bad = call(
+        &server,
+        "grpc.invoke",
+        json!({
+            "connection": "g", "service": "greeter.Greeter", "method": "SayHello",
+            "request": {}, "metadata": {"blob-bin": "x"},
+        }),
+    )
+    .await;
+    err(&bad);
+}
+
+#[tokio::test]
+async fn invoke_refuses_a_streaming_method_and_stream_start_a_unary_one() {
+    let addr = spawn_greeter(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &addr.to_string());
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+
+    let streaming = call(
+        &server,
+        "grpc.invoke",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "Countdown", "request": {}}),
+    )
+    .await;
+    assert!(
+        err(&streaming)["message"]
+            .as_str()
+            .unwrap()
+            .contains("grpc.stream.start")
+    );
+
+    let (client, _inbox) = ClientConnection::with_inbox(1);
+    let unary = server
+        .handle(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "grpc.stream.start", "params": {
+                "connection": "g", "service": "greeter.Greeter", "method": "SayHello"}}),
+            &client,
+        )
+        .await;
+    assert!(
+        err(&unary)["message"]
+            .as_str()
+            .unwrap()
+            .contains("grpc.invoke")
+    );
+}
+
+/// Reads pushed `grpc.stream.message` items until one of kind `end`/`error`.
+async fn drain_stream(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> Vec<Value> {
+    let mut items = Vec::new();
+    loop {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+            .await
+            .expect("stream went quiet")
+            .expect("inbox closed");
+        let note: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(note["method"], "grpc.stream.message");
+        let item = note["params"].clone();
+        let done = matches!(item["kind"].as_str(), Some("end" | "error"));
+        items.push(item);
+        if done {
+            return items;
+        }
+    }
+}
+
+async fn stream_call(
+    server: &Server,
+    client: &ClientConnection,
+    method: &str,
+    params: Value,
+) -> Value {
+    server
+        .handle(
+            json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
+            client,
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_server_streaming_call_pushes_each_reply_then_end() {
+    let addr = spawn_greeter(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &addr.to_string());
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+
+    let (client, mut inbox) = ClientConnection::with_inbox(1);
+    let started = stream_call(
+        &server,
+        &client,
+        "grpc.stream.start",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "Countdown",
+               "request": {"name": "t"}}),
+    )
+    .await;
+    assert_eq!(ok(&started)["client_streaming"], false);
+    let subscription = ok(&started)["subscription"].clone();
+
+    let items = drain_stream(&mut inbox).await;
+    let messages: Vec<_> = items
+        .iter()
+        .filter(|i| i["kind"] == "message")
+        .map(|i| i["message"]["message"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(messages, ["t #1", "t #2", "t #3"]);
+    assert_eq!(items[0]["kind"], "headers");
+    assert_eq!(items.last().unwrap()["kind"], "end");
+    assert!(items.iter().all(|i| i["subscription"] == subscription));
+
+    let stopped = stream_call(
+        &server,
+        &client,
+        "grpc.stream.stop",
+        json!({"subscription": subscription}),
+    )
+    .await;
+    assert_eq!(ok(&stopped)["stopped"], true);
+}
+
+#[tokio::test]
+async fn a_client_streaming_call_replies_once_after_close() {
+    let addr = spawn_greeter(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &addr.to_string());
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+
+    let (client, mut inbox) = ClientConnection::with_inbox(1);
+    let started = stream_call(
+        &server,
+        &client,
+        "grpc.stream.start",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "Collect",
+               "request": {"name": "a"}}),
+    )
+    .await;
+    assert_eq!(ok(&started)["client_streaming"], true);
+    let subscription = ok(&started)["subscription"].clone();
+    for name in ["b", "c"] {
+        ok(&stream_call(
+            &server,
+            &client,
+            "grpc.stream.send",
+            json!({"subscription": subscription, "message": {"name": name}}),
+        )
+        .await);
+    }
+    ok(&stream_call(
+        &server,
+        &client,
+        "grpc.stream.close",
+        json!({"subscription": subscription}),
+    )
+    .await);
+    // Sending after the half-close is refused.
+    err(&stream_call(
+        &server,
+        &client,
+        "grpc.stream.send",
+        json!({"subscription": subscription, "message": {"name": "d"}}),
+    )
+    .await);
+
+    let items = drain_stream(&mut inbox).await;
+    let reply = items.iter().find(|i| i["kind"] == "message").unwrap();
+    assert_eq!(reply["message"], json!({"message": "a+b+c", "length": 3}));
+    assert_eq!(items.last().unwrap()["kind"], "end");
+}
+
+#[tokio::test]
+async fn a_bidi_call_echoes_while_it_stays_open() {
+    let addr = spawn_greeter(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &addr.to_string());
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+
+    let (client, mut inbox) = ClientConnection::with_inbox(1);
+    let started = stream_call(
+        &server,
+        &client,
+        "grpc.stream.start",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "Chat"}),
+    )
+    .await;
+    let subscription = ok(&started)["subscription"].clone();
+    ok(&stream_call(
+        &server,
+        &client,
+        "grpc.stream.send",
+        json!({"subscription": subscription, "message": {"name": "one"}}),
+    )
+    .await);
+
+    // Skip headers/the `sent` echo until the reply for "one" shows up.
+    let reply = loop {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+            .await
+            .expect("no reply")
+            .unwrap();
+        let note: Value = serde_json::from_str(&line).unwrap();
+        if note["params"]["kind"] == "message" {
+            break note["params"]["message"].clone();
+        }
+    };
+    assert_eq!(reply["message"], "echo one");
+
+    // Dropping the client's connection tears its streams down.
+    server.client_disconnected(&client);
+    err(&stream_call(
+        &server,
+        &client,
+        "grpc.stream.send",
+        json!({"subscription": subscription, "message": {"name": "two"}}),
+    )
+    .await);
 }

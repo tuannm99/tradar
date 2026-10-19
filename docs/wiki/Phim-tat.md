@@ -86,7 +86,7 @@ Cả hai theo connection của block/buffer đang đứng; preview tô màu theo
 | **RabbitMQ publish** | `rr` | publish (hoặc `:TradarRabbitmqPublish` khi đang trong buffer) |
 | **HTTP request** | `rr` | gửi (hoặc `:TradarHttpSend` khi đang trong buffer) |
 | **HTTP response** | `q` | đóng |
-| **gRPC request** | `rr` / `rx` | gửi / huỷ |
+| **gRPC request** | `rr` / `rx` / `rc` | gửi (streaming: bắt đầu call, hoặc gửi thêm một message) / huỷ hoặc dừng stream / đóng chiều gửi của client-/bidi-stream |
 | **gRPC response** | `q` | đóng |
 
 Buffer request (HTTP, RabbitMQ publish, gRPC) **sửa được** nên không chiếm `q` — đóng bằng `:q`/`:tabclose`.

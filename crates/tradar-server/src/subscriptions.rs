@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 struct Entry<H, M> {
     client: u64,
-    #[cfg_attr(not(feature = "socket"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "socket", feature = "grpc")), allow(dead_code))]
     meta: M,
     handle: H,
 }
@@ -54,12 +54,12 @@ impl<H, M> Subscriptions<H, M> {
         );
     }
 
-    #[cfg_attr(not(feature = "socket"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "socket", feature = "grpc")), allow(dead_code))]
     pub fn get(&self, id: &str) -> Option<&H> {
         self.entries.get(id).map(|e| &e.handle)
     }
 
-    #[cfg_attr(not(feature = "socket"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "socket", feature = "grpc")), allow(dead_code))]
     pub fn any_meta(&self, mut f: impl FnMut(&M) -> bool) -> bool {
         self.entries.values().any(|e| f(&e.meta))
     }

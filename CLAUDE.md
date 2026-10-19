@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Primary interface: Neovim + `tradar-server`** (`nvim/`, `crates/tradar-server`) — not the TUI. `tradar-server` is a headless JSON-RPC server (over a unix socket) that holds every open connection; Neovim is the editor/navigation/vim-motion layer on top, and multiple Neovim sessions share one server process. See `docs/architecture.md` for the full shape (crate layout, trait contracts, protocol) and `docs/roadmap.md` for what's open.
 
-**TUI (`tradar-app`, and `tradar-query-workbench`'s `components/`) is frozen**: bug fixes only, no new features. It must keep building and passing `make check`. The connector crates and `QueryDriver` trait are shared by both interfaces and are *not* frozen — a fix there reaches both. New user-facing features go into the Neovim plugin/server. Whether to remove the TUI outright is undecided (see `docs/roadmap.md`).
+**TUI (`tradar-app`, and `tradar-query-workbench`'s `components/`) is frozen**: bug fixes only, no new features. It must keep building and passing `make check`. The connector crates and `QueryDriver` trait are shared by both interfaces and are *not* frozen — a fix there reaches both. New user-facing features go into the Neovim plugin/server. The decision is made: the TUI stays frozen (it is not being removed).
 
 The repo is a Cargo workspace. `cargo run`/`cargo build`/`cargo test` all work with no `-p` flag (`default-members = ["crates/tradar-app"]`; the binary is still named `tradar`). Crate layout:
 
