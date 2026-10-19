@@ -382,8 +382,17 @@ local function set_lines(buf, lines)
   vim.bo[buf].modifiable = false
 end
 
+--- `850ms` / `1.4s` / `2m 5s` -- how long a query took.
+local function took_text(ms)
+  if ms < 1000 then return ('%dms'):format(math.floor(ms + 0.5)) end
+  if ms < 60000 then return ('%.1fs'):format(ms / 1000) end
+  local s = math.floor(ms / 1000 + 0.5)
+  return ('%dm %ds'):format(math.floor(s / 60), s % 60)
+end
+
 local function results_title(r)
   local text = ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and ' (server cap reached)' or '')
+  if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
   if r.shown < r.total then
     text = text .. ('  — %d more: %sm loads the next page'):format(r.total - r.shown, opts.prefix or '<leader>r')
   end
@@ -514,6 +523,7 @@ local resolve_edit
 local edit_cache = nil
 
 local function show_result(r, meta)
+  local took = r.took_ms
   if dirty() then notify('discarded unsaved grid edits', vim.log.levels.WARN) end
   local buf = scratch('tradar://results', state.results_buf)
   state.results_buf = buf
@@ -521,7 +531,7 @@ local function show_result(r, meta)
   attach_results(buf)
   if r.kind == 'affected' then
     state.result = nil
-    set_lines(buf, { ('%d row(s) affected'):format(r.rows) })
+    set_lines(buf, { ('%d row(s) affected%s'):format(r.rows, took and (' · ' .. took_text(took)) or '') })
     return show(buf, 4)
   end
   state.result = {
@@ -540,6 +550,7 @@ local function show_result(r, meta)
       and edit_cache.edit or nil,
     edit_reason = 'still checking whether these rows can be edited…',
     conn = meta and meta.conn, query = meta and meta.query,
+    took_ms = took,
   }
   paint_results()
   local win = show(buf)
@@ -890,8 +901,11 @@ local function run_text(buf, text, base_row, base_col, flags)
     end
     call('execute', { connection = conn, query = text, page_size = opts.page_size or DEFAULT_PAGE, query_id = id }, function(r)
       finish()
-      local ms = (uv.hrtime() - started) / 1e6
-      local took = ms < 1000 and ('%dms'):format(ms) or ('%.1fs'):format(ms / 1000)
+      -- The database's own time when the server reports it, else what
+      -- this client saw (round trip included).
+      local ms = r.elapsed_ms or (uv.hrtime() - started) / 1e6
+      r.took_ms = ms
+      local took = took_text(ms)
       state.last = r.kind == 'affected' and ('%d affected · %s'):format(r.rows, took)
         or ('%d/%d rows · %s'):format(#r.rows, r.total, took)
       if vim.api.nvim_buf_is_valid(buf) then vim.diagnostic.reset(ns, buf) end
