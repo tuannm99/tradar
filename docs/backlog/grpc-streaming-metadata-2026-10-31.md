@@ -17,7 +17,7 @@ Trước đó gRPC chỉ có unary và không gửi được header. Yêu cầu:
 
 ## Chưa làm
 
-- Key metadata `-bin`, metadata riêng cho mỗi message, CA riêng/mTLS.
+- Key metadata `-bin`, metadata riêng cho mỗi message.
 
 ## Bổ sung: TLS và deadline
 
@@ -27,3 +27,7 @@ Trước đó gRPC chỉ có unary và không gửi được header. Yêu cầu:
 ## Bổ sung: gợi ý từ comment `.proto` (protocol 1.7)
 
 `grpc.skeleton` nhận `comments: true` → thêm dòng `// …` trên mỗi trường có doc comment (`load_proto` giờ biên dịch kèm source info qua `protox::Compiler`; reflection không mang comment nên chỉ `.proto` nạp tay mới có), liệt kê giá trị enum và các nhánh `oneof`. Plugin luôn yêu cầu `comments` và bỏ dòng `//` đứng riêng khi gửi. Test: bỏ các dòng `//` thì ra đúng khung thường.
+
+## Bổ sung: CA riêng, mTLS, `domain`
+
+Tuỳ chọn TLS nằm trong query của `target` (không đổi schema `SavedConnection`): `ca`, `cert`+`key`, `domain`; `split_target` tách chúng khỏi URI, tham số khác được giữ nguyên. Dùng với target không phải `https://` thì báo lỗi. Test thật (rcgen sinh CA/server/client cert, server tonic có TLS): CA riêng + `domain` chạy được, thiếu CA thì từ chối, server đòi client cert thì thiếu cert bị từ chối còn có cert chạy được.

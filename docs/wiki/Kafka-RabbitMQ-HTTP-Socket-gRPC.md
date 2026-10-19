@@ -65,7 +65,7 @@ Content-Type: application/json
 
 ## gRPC
 
-`target` dạng `host:port` hoặc `http://…` là plaintext; `https://host:port` bật **TLS** (chứng chỉ server được kiểm tra theo bộ root CA webpki đi kèm; chưa hỗ trợ CA riêng/mTLS). Hỗ trợ **unary, server-streaming, client-streaming và bidi**, cùng **metadata (header) của request**.
+`target` dạng `host:port` hoặc `http://…` là plaintext; `https://host:port` bật **TLS** (chứng chỉ server được kiểm tra theo bộ root CA webpki đi kèm). Tuỳ chọn TLS đặt ngay trong query của `target`: `?ca=/đường/dẫn/ca.pem` thêm CA riêng, `&cert=…&key=…` gửi client certificate (mTLS, phải đi cùng nhau), `&domain=tên` đổi tên dùng để kiểm tra chứng chỉ (hữu ích khi dial theo IP); ví dụ `https://10.0.0.5:443?ca=/etc/ca.pem&cert=/me.pem&key=/me.key&domain=api.internal`. Các tham số này chỉ dùng được với `https://`. Hỗ trợ **unary, server-streaming, client-streaming và bidi**, cùng **metadata (header) của request**.
 
 | Lệnh | Việc |
 |---|---|

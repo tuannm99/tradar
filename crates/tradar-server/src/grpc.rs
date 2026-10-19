@@ -36,20 +36,83 @@ pub struct GrpcConnection {
     pub pool: DescriptorPool,
 }
 
-/// `target` is a bare `host:port` (same convention as Cassandra/Kafka/
-/// Socket) or a full `http(s)://` URL typed by hand. `https://` turns TLS on
-/// (certificate verified against the bundled webpki roots); anything else is
-/// plaintext.
-pub async fn connect(target: &str) -> anyhow::Result<Channel> {
+/// TLS settings carried in the target's query string, e.g.
+/// `https://api.example.com:443?ca=/etc/ca.pem&cert=/me.pem&key=/me.key`.
+/// `ca` adds a trust anchor on top of the bundled webpki roots (a private
+/// CA), `cert` + `key` present a client certificate (mTLS), `domain`
+/// overrides the name the server certificate is checked against.
+#[derive(Debug, Default, PartialEq)]
+pub struct TlsOptions {
+    pub ca: Option<String>,
+    pub cert: Option<String>,
+    pub key: Option<String>,
+    pub domain: Option<String>,
+}
+
+/// Splits `target` into the URI to dial and its TLS options. Any other query
+/// parameter stays in the URI untouched.
+pub fn split_target(target: &str) -> anyhow::Result<(String, TlsOptions)> {
     let uri = if target.contains("://") {
         target.to_string()
     } else {
         format!("http://{target}")
     };
+    let Some((base, query)) = uri.split_once('?') else {
+        return Ok((uri, TlsOptions::default()));
+    };
+    let mut options = TlsOptions::default();
+    let mut rest = Vec::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let slot = match key {
+            "ca" => &mut options.ca,
+            "cert" => &mut options.cert,
+            "key" => &mut options.key,
+            "domain" => &mut options.domain,
+            _ => {
+                rest.push(pair);
+                continue;
+            }
+        };
+        *slot = Some(value.to_string());
+    }
+    if options.cert.is_some() != options.key.is_some() {
+        anyhow::bail!("`cert` và `key` phải đi cùng nhau (client certificate)");
+    }
+    let uri = if rest.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", rest.join("&"))
+    };
+    Ok((uri, options))
+}
+
+/// `target` is a bare `host:port` (same convention as Cassandra/Kafka/
+/// Socket) or a full `http(s)://` URL typed by hand. `https://` turns TLS on
+/// (server certificate verified against the bundled webpki roots, plus
+/// `?ca=` if given -- see `TlsOptions`); anything else is plaintext.
+pub async fn connect(target: &str) -> anyhow::Result<Channel> {
+    use tonic::transport::{Certificate, ClientTlsConfig, Identity};
+
+    let (uri, options) = split_target(target)?;
     let mut endpoint = Channel::from_shared(uri.clone())?;
     if uri.starts_with("https://") {
-        endpoint =
-            endpoint.tls_config(tonic::transport::ClientTlsConfig::new().with_webpki_roots())?;
+        let read = |path: &str| {
+            std::fs::read(path).map_err(|e| anyhow::anyhow!("không đọc được `{path}`: {e}"))
+        };
+        let mut tls = ClientTlsConfig::new().with_webpki_roots();
+        if let Some(ca) = &options.ca {
+            tls = tls.ca_certificate(Certificate::from_pem(read(ca)?));
+        }
+        if let (Some(cert), Some(key)) = (&options.cert, &options.key) {
+            tls = tls.identity(Identity::from_pem(read(cert)?, read(key)?));
+        }
+        if let Some(domain) = &options.domain {
+            tls = tls.domain_name(domain.clone());
+        }
+        endpoint = endpoint.tls_config(tls)?;
+    } else if options != TlsOptions::default() {
+        anyhow::bail!("`ca`/`cert`/`key`/`domain` chỉ dùng được với target `https://`");
     }
     Ok(endpoint.connect().await?)
 }
@@ -1149,6 +1212,25 @@ service Svc { rpc Do (Req) returns (Req); }
         let plain = skeleton(&pool, "demo.Svc", "Do", false).unwrap();
         assert_eq!(stripped, plain);
         serde_json::from_str::<serde_json::Value>(&plain).unwrap();
+    }
+
+    #[test]
+    fn tls_options_come_out_of_the_target_query() {
+        let (uri, options) =
+            split_target("https://h:443?ca=/a.pem&cert=/c.pem&key=/k.pem&domain=x.test&other=1")
+                .unwrap();
+        assert_eq!(uri, "https://h:443?other=1");
+        assert_eq!(options.ca.as_deref(), Some("/a.pem"));
+        assert_eq!(options.cert.as_deref(), Some("/c.pem"));
+        assert_eq!(options.key.as_deref(), Some("/k.pem"));
+        assert_eq!(options.domain.as_deref(), Some("x.test"));
+
+        let (uri, options) = split_target("localhost:50051").unwrap();
+        assert_eq!(uri, "http://localhost:50051");
+        assert_eq!(options, TlsOptions::default());
+
+        // A client certificate needs its key.
+        assert!(split_target("https://h?cert=/c.pem").is_err());
     }
 
     #[test]
