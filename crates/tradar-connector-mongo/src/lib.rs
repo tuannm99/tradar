@@ -671,6 +671,9 @@ impl QueryDriver for MongoDriver {
             "find",
             "findOne",
             "countDocuments",
+            "estimatedDocumentCount",
+            "distinct",
+            "getIndexes",
             "aggregate",
             "insertOne",
             "insertMany",
@@ -1433,6 +1436,55 @@ async fn run_method(
                 truncated: false,
             })
         }
+        "estimatedDocumentCount" => {
+            reject_chain()?;
+            max_args(0)?;
+            let count = collection.estimated_document_count().await?;
+            Ok(QueryResult::Documents {
+                items: vec![serde_json::json!({ "count": count })],
+                truncated: false,
+            })
+        }
+        "distinct" => {
+            reject_chain()?;
+            max_args(2)?;
+            let field = args
+                .first()
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("distinct requires a field name string"))?
+                .to_string();
+            let filter = if args.len() > 1 {
+                doc_arg(1)?
+            } else {
+                Document::new()
+            };
+            let values = collection.distinct(field, filter).await?;
+            let truncated = values.len() > MAX_ROWS;
+            let items = values
+                .into_iter()
+                .take(MAX_ROWS)
+                .map(|v| serde_json::json!({ "value": v.into_relaxed_extjson() }))
+                .collect();
+            Ok(QueryResult::Documents { items, truncated })
+        }
+        "getIndexes" => {
+            reject_chain()?;
+            max_args(0)?;
+            let mut cursor = collection.list_indexes().await?;
+            let mut items = Vec::new();
+            while let Some(index) = cursor.try_next().await? {
+                let options = index.options.as_ref();
+                items.push(serde_json::json!({
+                    "name": options.and_then(|o| o.name.clone()),
+                    "key": Bson::Document(index.keys.clone()).into_relaxed_extjson(),
+                    "unique": options.and_then(|o| o.unique).unwrap_or(false),
+                }));
+            }
+            Ok(QueryResult::Documents {
+                items,
+                truncated: false,
+            })
+        }
         "aggregate" => {
             reject_chain()?;
             // Real Mongo shell syntax passes a single pipeline array:
@@ -1766,6 +1818,22 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn distinct_and_index_helpers_parse_as_collection_methods() {
+        let q =
+            parse_shell_query("db.users.distinct(\"country\", {\"age\": {\"$gt\": 1}});").unwrap();
+        assert_eq!(q.collection, "users");
+        assert_eq!(q.primary().name, "distinct");
+        assert_eq!(q.primary().args.len(), 2);
+        let q = parse_shell_query("db.users.getIndexes()").unwrap();
+        assert_eq!(q.primary().name, "getIndexes");
+        assert!(
+            MongoDriver::new("mongodb://x")
+                .edit_source("db.users.getIndexes()")
+                .is_none()
+        );
     }
 
     #[test]
