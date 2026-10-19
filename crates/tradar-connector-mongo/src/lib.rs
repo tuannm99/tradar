@@ -19,6 +19,7 @@ use tradar_query_workbench::query_driver::QueryDriver;
 use tradar_query_workbench::query_engine::QueryEngine;
 
 mod convert;
+mod db_helpers;
 mod driver;
 mod keywords;
 mod relax;
