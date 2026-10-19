@@ -246,7 +246,7 @@ function M.open_request(connection, service, method)
   open_buffers[key] = buf
   vim.bo[buf].filetype = 'json'
   vim.b[buf].tradar_grpc = { connection = connection, service = service, method = method }
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '{}' })
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { '{}' }) -- until `grpc.skeleton` answers
   vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcSend', function() M.send(buf) end, {})
   vim.api.nvim_buf_create_user_command(buf, 'TradarGrpcCancel', function() M.cancel(buf) end, {})
   vim.keymap.set('n', '<leader>rr', function() M.send(buf) end, { buffer = buf, desc = 'tradar: send gRPC request' })
@@ -267,6 +267,18 @@ function M.open_request(connection, service, method)
   vim.cmd.tabnew()
   vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), buf)
   notify(('%s/%s -- edit the JSON body, then <leader>rr or :TradarGrpcSend'):format(service, method))
+
+  -- Replace the bare `{}` with every field of the input message at its
+  -- default. Quiet on failure (an older server has no `grpc.skeleton`), and
+  -- never over something the user already started typing.
+  rpc.request('grpc.skeleton', { connection = connection, service = service, method = method }, function(e, result)
+    if e or not result or not vim.api.nvim_buf_is_valid(buf) then return end
+    local current = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    if #current == 1 and vim.trim(current[1]) == '{}' then
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(result.skeleton, '\n', { plain = true }))
+      vim.bo[buf].modified = false
+    end
+  end)
 end
 
 return M

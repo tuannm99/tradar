@@ -14,7 +14,10 @@ use std::path::Path;
 
 use bytes::Buf;
 use prost::Message as _;
-use prost_reflect::{DescriptorPool, DynamicMessage, MethodDescriptor, ServiceDescriptor};
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MessageDescriptor, MethodDescriptor,
+    ServiceDescriptor,
+};
 use tonic::client::Grpc;
 use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::transport::Channel;
@@ -88,6 +91,102 @@ fn get_method(
         .methods()
         .find(|m| m.name() == method)
         .ok_or_else(|| anyhow::anyhow!("service `{service}` không có method `{method}`"))
+}
+
+/// A request body to start from: `method`'s input message as indented JSON
+/// with every field present at its default (`\"\"`, `0`, `false`, the first
+/// enum value, `[]`, `{}`, nested messages filled in). Written by hand
+/// rather than through `serde_json::Value` so the fields stay in the
+/// order the `.proto` declares them. Only the first member of a `oneof` is
+/// included (the others would make the request invalid), and a message
+/// that contains itself stops being expanded at the second level.
+pub fn skeleton(pool: &DescriptorPool, service: &str, method: &str) -> anyhow::Result<String> {
+    let method = get_method(pool, service, method)?;
+    Ok(message_skeleton(&method.input(), &mut Vec::new(), 0))
+}
+
+fn message_skeleton(desc: &MessageDescriptor, stack: &mut Vec<String>, depth: usize) -> String {
+    // Well-known types have a fixed JSON shape of their own.
+    match desc.full_name() {
+        "google.protobuf.Timestamp" => return "\"1970-01-01T00:00:00Z\"".into(),
+        "google.protobuf.Duration" => return "\"0s\"".into(),
+        "google.protobuf.FieldMask"
+        | "google.protobuf.StringValue"
+        | "google.protobuf.BytesValue" => {
+            return "\"\"".into();
+        }
+        "google.protobuf.BoolValue" => return "false".into(),
+        "google.protobuf.Int32Value"
+        | "google.protobuf.UInt32Value"
+        | "google.protobuf.Int64Value"
+        | "google.protobuf.UInt64Value"
+        | "google.protobuf.FloatValue"
+        | "google.protobuf.DoubleValue" => return "0".into(),
+        "google.protobuf.Value" => return "null".into(),
+        "google.protobuf.ListValue" => return "[]".into(),
+        "google.protobuf.Struct" | "google.protobuf.Any" | "google.protobuf.Empty" => {
+            return "{}".into();
+        }
+        _ => {}
+    }
+    let name = desc.full_name().to_string();
+    if stack.contains(&name) || depth > 4 {
+        return "{}".into();
+    }
+    stack.push(name);
+    let indent = "  ".repeat(depth + 1);
+    let mut lines = Vec::new();
+    for field in desc.fields() {
+        if let Some(oneof) = field.containing_oneof() {
+            let first = oneof.fields().next().map(|f| f.number());
+            if first != Some(field.number()) {
+                continue;
+            }
+        }
+        lines.push(format!(
+            "{indent}{}: {}",
+            serde_json::Value::String(field.json_name().to_string()),
+            field_skeleton(&field, stack, depth)
+        ));
+    }
+    stack.pop();
+    if lines.is_empty() {
+        return "{}".into();
+    }
+    format!("{{\n{}\n{}}}", lines.join(",\n"), "  ".repeat(depth))
+}
+
+fn field_skeleton(field: &FieldDescriptor, stack: &mut Vec<String>, depth: usize) -> String {
+    if field.is_map() {
+        return "{}".into();
+    }
+    if field.is_list() {
+        return "[]".into();
+    }
+    match field.kind() {
+        Kind::Double
+        | Kind::Float
+        | Kind::Int32
+        | Kind::Int64
+        | Kind::Uint32
+        | Kind::Uint64
+        | Kind::Sint32
+        | Kind::Sint64
+        | Kind::Fixed32
+        | Kind::Fixed64
+        | Kind::Sfixed32
+        | Kind::Sfixed64 => "0".into(),
+        Kind::Bool => "false".into(),
+        Kind::String | Kind::Bytes => "\"\"".into(),
+        Kind::Enum(e) => {
+            let first = e
+                .values()
+                .next()
+                .map_or(String::new(), |v| v.name().to_string());
+            serde_json::Value::String(first).to_string()
+        }
+        Kind::Message(m) => message_skeleton(&m, stack, depth + 1),
+    }
 }
 
 /// Server reflection (`grpc.reflection.v1.ServerReflection`): `ListServices`
@@ -379,6 +478,19 @@ impl crate::extension::Extension for GrpcExtension {
                         .collect::<Vec<_>>()
                 ))
             }
+            // A request body to start from, generated from the method's
+            // input message -- see `skeleton`.
+            "skeleton" => {
+                let service = str_param(params, "service")?;
+                let rpc_method = str_param(params, "method")?;
+                let connections = self.connections.lock().unwrap();
+                let conn = connections
+                    .get(name)
+                    .ok_or_else(|| not_connected("grpc", name))?;
+                let text = skeleton(&conn.pool, service, rpc_method)
+                    .map_err(|e| RpcError::app(e.to_string()))?;
+                Ok(json!({"skeleton": text}))
+            }
             // Only *invokes*; unlike `edit.sql` there is nothing to
             // show-then-run (a gRPC call isn't a statement the client could
             // choose to run later). An optional `query_id` lets a client
@@ -419,5 +531,98 @@ impl crate::extension::Extension for GrpcExtension {
             }
             _ => Err(unknown_method("grpc", method)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROTO: &str = r#"
+syntax = "proto3";
+package demo;
+import "google/protobuf/timestamp.proto";
+
+enum Level { LEVEL_UNSET = 0; LEVEL_HIGH = 1; }
+
+message Address { string city = 1; Level level = 2; }
+
+message Node { string id = 1; Node next = 2; }
+
+message Req {
+  string name = 1;
+  int64 big = 2;
+  bool flag = 3;
+  bytes blob = 4;
+  repeated string tags = 5;
+  map<string, int32> counts = 6;
+  Address address = 7;
+  google.protobuf.Timestamp at = 8;
+  oneof pick {
+    string by_name = 9;
+    int32 by_id = 10;
+  }
+  optional string note = 11;
+  Node chain = 12;
+}
+
+service Svc { rpc Do (Req) returns (Address); }
+"#;
+
+    fn pool() -> DescriptorPool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.proto");
+        std::fs::write(&path, PROTO).unwrap();
+        let mut pool = DescriptorPool::new();
+        load_proto(&mut pool, path.to_str().unwrap()).unwrap();
+        pool
+    }
+
+    #[test]
+    fn skeleton_has_every_field_at_its_default_in_declared_order() {
+        let text = skeleton(&pool(), "demo.Svc", "Do").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "name": "",
+                "big": 0,
+                "flag": false,
+                "blob": "",
+                "tags": [],
+                "counts": {},
+                "address": {"city": "", "level": "LEVEL_UNSET"},
+                "at": "1970-01-01T00:00:00Z",
+                "byName": "",
+                "note": "",
+                "chain": {"id": "", "next": {}},
+            })
+        );
+        // Declaration order is kept (a JSON object would not promise it).
+        let name = text.find("\"name\"").unwrap();
+        let big = text.find("\"big\"").unwrap();
+        let chain = text.find("\"chain\"").unwrap();
+        assert!(name < big && big < chain, "{text}");
+        assert!(
+            !text.contains("byId"),
+            "only the first oneof member: {text}"
+        );
+    }
+
+    #[test]
+    fn the_skeleton_is_a_request_the_server_would_accept() {
+        let pool = pool();
+        let text = skeleton(&pool, "demo.Svc", "Do").unwrap();
+        let method = get_method(&pool, "demo.Svc", "Do").unwrap();
+        let mut deserializer = serde_json::Deserializer::from_str(&text);
+        DynamicMessage::deserialize(method.input(), &mut deserializer)
+            .expect("the generated skeleton must deserialize into its own message");
+    }
+
+    #[test]
+    fn an_unknown_method_is_an_error() {
+        assert!(skeleton(&pool(), "demo.Svc", "Nope").is_err());
+        assert!(skeleton(&pool(), "demo.Nope", "Do").is_err());
     }
 }
