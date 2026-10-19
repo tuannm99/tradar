@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use mongodb::bson::{Bson, Document};
+use mongodb::options::Hint;
 
 use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
@@ -740,6 +741,8 @@ impl QueryDriver for MongoDriver {
             "sort",
             "limit",
             "skip",
+            "hint",
+            "explain",
             "count",
             // Query/filter operators.
             "$eq",
@@ -1006,7 +1009,8 @@ impl QueryDriver for MongoDriver {
             helper => return self.run_db_helper(helper, db).await,
         };
         let collection = db.collection::<Document>(&parsed.collection);
-        let mut result = run_method(&collection, parsed.primary(), parsed.chain()).await?;
+        let mut result =
+            run_method_in(Some(&db), &collection, parsed.primary(), parsed.chain()).await?;
         // Every arm of `run_method` produces `Documents` via either
         // `into_relaxed_extjson()` or serializing a driver result struct
         // that itself contains `Bson` values (`inserted_id`, ...) -- both
@@ -1047,7 +1051,7 @@ impl QueryDriver for MongoDriver {
         let chain_is_safe = parsed
             .chain()
             .iter()
-            .all(|call| matches!(call.name.as_str(), "sort" | "limit" | "skip"));
+            .all(|call| matches!(call.name.as_str(), "sort" | "limit" | "skip" | "hint"));
         chain_is_safe.then(|| parsed.collection.clone())
     }
 
@@ -1355,6 +1359,17 @@ async fn run_method(
     primary: &MethodCall,
     chain: &[MethodCall],
 ) -> anyhow::Result<QueryResult> {
+    run_method_in(None, collection, primary, chain).await
+}
+
+/// `run_method`, with the database `.explain()` needs to send its command
+/// (`None` where only a collection is at hand).
+async fn run_method_in(
+    db: Option<&mongodb::Database>,
+    collection: &mongodb::Collection<Document>,
+    primary: &MethodCall,
+    chain: &[MethodCall],
+) -> anyhow::Result<QueryResult> {
     let method = primary.name.as_str();
     let args = &primary.args;
 
@@ -1395,79 +1410,146 @@ async fn run_method(
             } else {
                 doc_arg(0)?
             };
-            let mut builder = collection.find(filter);
-            if let Some(projection) = args.get(1) {
-                builder = builder.projection(json_to_document(projection.clone())?);
-            }
+            let projection = args
+                .get(1)
+                .map(|p| json_to_document(p.clone()))
+                .transpose()?;
 
-            // `.count()` has to be the chain's last call (nothing after it
-            // means anything -- there are no more documents to modify how
-            // you fetch), everything before it configures the cursor.
-            let mut wants_count = false;
+            // `.count()` and `.explain()` have to be the chain's last call
+            // (nothing after them means anything); everything before
+            // configures the cursor.
+            let (mut sort, mut limit, mut skip, mut hint) = (None, None, None, None);
+            let (mut wants_count, mut wants_explain) = (false, false);
             for (i, call) in chain.iter().enumerate() {
+                let last = i == chain.len() - 1;
                 match call.name.as_str() {
                     "sort" => {
                         if call.args.len() != 1 {
                             anyhow::bail!("sort(...) requires exactly 1 argument");
                         }
-                        builder = builder.sort(json_to_document(call.args[0].clone())?);
+                        sort = Some(json_to_document(call.args[0].clone())?);
                     }
                     "limit" => {
-                        let n = call.args.first().and_then(|v| v.as_i64()).ok_or_else(|| {
-                            anyhow::anyhow!("limit(...) requires a numeric argument")
-                        })?;
-                        builder = builder.limit(n);
+                        limit =
+                            Some(call.args.first().and_then(|v| v.as_i64()).ok_or_else(|| {
+                                anyhow::anyhow!("limit(...) requires a numeric argument")
+                            })?);
                     }
                     "skip" => {
-                        let n = call.args.first().and_then(|v| v.as_u64()).ok_or_else(|| {
-                            anyhow::anyhow!("skip(...) requires a numeric argument")
-                        })?;
-                        builder = builder.skip(n);
+                        skip =
+                            Some(call.args.first().and_then(|v| v.as_u64()).ok_or_else(|| {
+                                anyhow::anyhow!("skip(...) requires a numeric argument")
+                            })?);
                     }
-                    "count" if i == chain.len() - 1 => {
+                    // `hint({field: 1})` or `hint("index_name")`.
+                    "hint" => {
+                        hint = Some(match call.args.as_slice() {
+                            [serde_json::Value::String(name)] => Hint::Name(name.clone()),
+                            [doc @ serde_json::Value::Object(_)] => {
+                                Hint::Keys(json_to_document(doc.clone())?)
+                            }
+                            _ => anyhow::bail!("hint(...) takes an index name or a key document"),
+                        });
+                    }
+                    "count" if last => {
                         if !call.args.is_empty() {
                             anyhow::bail!("count() does not take arguments");
                         }
                         wants_count = true;
                     }
                     "count" => anyhow::bail!("count() must be the last call in the chain"),
+                    "explain" if last => wants_explain = true,
+                    "explain" => anyhow::bail!("explain() must be the last call in the chain"),
                     other => anyhow::bail!(
                         "find(...) does not support chained .{other}() -- only \
-                         .sort()/.limit()/.skip()/.count() are implemented"
+                         .sort()/.limit()/.skip()/.hint()/.count()/.explain() are implemented"
                     ),
                 }
             }
 
+            if wants_explain {
+                let db = db.ok_or_else(|| anyhow::anyhow!("explain() needs a database"))?;
+                let mut find = mongodb::bson::doc! { "find": collection.name(), "filter": filter };
+                if let Some(sort) = sort {
+                    find.insert("sort", sort);
+                }
+                if let Some(projection) = projection {
+                    find.insert("projection", projection);
+                }
+                if let Some(limit) = limit {
+                    find.insert("limit", limit);
+                }
+                if let Some(skip) = skip {
+                    find.insert("skip", skip as i64);
+                }
+                match hint {
+                    Some(Hint::Name(name)) => find.insert("hint", name),
+                    Some(Hint::Keys(keys)) => find.insert("hint", keys),
+                    _ => None,
+                };
+                let reply = db
+                    .run_command(
+                        mongodb::bson::doc! { "explain": find, "verbosity": "executionStats" },
+                    )
+                    .await?;
+                return Ok(QueryResult::Documents {
+                    items: vec![Bson::Document(reply).into_relaxed_extjson()],
+                    truncated: false,
+                });
+            }
+
+            // The server counts (an index answers it without reading a
+            // single document) -- not a client-side walk of the cursor.
+            if wants_count {
+                let mut count = collection.count_documents(filter);
+                // `limit(0)` means "no limit" in the shell; a `$limit: 0` stage
+                // would be an error.
+                if let Some(limit) = limit.filter(|l| *l != 0) {
+                    count = count.limit(limit.unsigned_abs());
+                }
+                if let Some(skip) = skip {
+                    count = count.skip(skip);
+                }
+                if let Some(hint) = hint {
+                    count = count.hint(hint);
+                }
+                return Ok(QueryResult::Documents {
+                    items: vec![serde_json::json!({ "count": count.await? })],
+                    truncated: false,
+                });
+            }
+
+            let mut builder = collection.find(filter);
+            if let Some(projection) = projection {
+                builder = builder.projection(projection);
+            }
+            if let Some(sort) = sort {
+                builder = builder.sort(sort);
+            }
+            if let Some(limit) = limit {
+                builder = builder.limit(limit);
+            }
+            if let Some(skip) = skip {
+                builder = builder.skip(skip);
+            }
+            if let Some(hint) = hint {
+                builder = builder.hint(hint);
+            }
+
             let mut cursor = builder.await?;
             let mut docs = Vec::new();
-            let mut total: usize = 0;
             let mut truncated = false;
             while let Some(doc) = cursor.try_next().await? {
-                total += 1;
-                if wants_count {
-                    // `.count()` needs the real total, not just however
-                    // many fit under `MAX_ROWS` -- so this path scans the
-                    // whole cursor without ever materialising a document,
-                    // same memory profile as the capped path below.
-                    continue;
-                }
                 if docs.len() >= MAX_ROWS {
                     truncated = true;
                     break;
                 }
                 docs.push(Bson::Document(doc).into_relaxed_extjson());
             }
-            if wants_count {
-                Ok(QueryResult::Documents {
-                    items: vec![serde_json::json!({ "count": total })],
-                    truncated: false,
-                })
-            } else {
-                Ok(QueryResult::Documents {
-                    items: docs,
-                    truncated,
-                })
-            }
+            Ok(QueryResult::Documents {
+                items: docs,
+                truncated,
+            })
         }
         "findOne" => {
             reject_chain()?;
@@ -1928,6 +2010,16 @@ mod tests {
                 .edit_source("db.users.getIndexes()")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_sort_document_keeps_its_key_order() {
+        // A compound index serves `{a: 1, b: -1}` but not `{b: -1, a: 1}`:
+        // the order the user typed must reach the server.
+        let q = parse_shell_query("db.t.find({}).sort({zeta: 1, alpha: -1, mid: 1})").unwrap();
+        let doc = json_to_document(q.chain()[0].args[0].clone()).unwrap();
+        let keys: Vec<_> = doc.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["zeta", "alpha", "mid"]);
     }
 
     #[test]
@@ -2519,6 +2611,56 @@ mod tests {
             .await
             .unwrap();
         client.database("test").collection::<Document>("users")
+    }
+
+    #[tokio::test]
+    async fn find_chain_validates_hint_and_explain_before_touching_the_server() {
+        let collection = unreachable_collection().await;
+        let primary = MethodCall {
+            name: "find".to_string(),
+            args: vec![],
+        };
+        let call = |name: &str, args: Vec<serde_json::Value>| MethodCall {
+            name: name.to_string(),
+            args,
+        };
+        // explain / count must be last.
+        for early in ["explain", "count"] {
+            let err = run_method(
+                &collection,
+                &primary,
+                &[
+                    call(early, vec![]),
+                    call("limit", vec![serde_json::json!(1)]),
+                ],
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("must be the last call"), "{early}: {err}");
+        }
+        // hint takes an index name or a key document, nothing else.
+        let err = run_method(
+            &collection,
+            &primary,
+            &[call("hint", vec![serde_json::json!(3)])],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("hint"), "{err}");
+        // Without a database there is nowhere to send explain.
+        let err = run_method(&collection, &primary, &[call("explain", vec![])])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a database"), "{err}");
+        // hint does not reshape documents, so a hinted find stays editable.
+        assert!(
+            MongoDriver::new("mongodb://x")
+                .edit_source("db.users.find({}).hint({a: 1}).sort({a: 1})")
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -3262,6 +3404,53 @@ mod tests {
         };
         assert_eq!(docs.len(), 1, "docs were: {docs:?}");
         assert_eq!(docs[0]["n"], 2);
+    }
+
+    #[tokio::test]
+    async fn explain_hint_and_count_go_through_the_server_and_its_index() {
+        let container = Mongo::new().start().await.unwrap();
+        let port = container.get_host_port_ipv4(27017).await.unwrap();
+        let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+        driver.connect().await.unwrap();
+        for n in 1..=5 {
+            driver
+                .execute(&format!(r#"db.users.insertOne({{"n": {n}}})"#))
+                .await
+                .unwrap();
+        }
+        driver
+            .execute(
+                r#"db.runCommand({createIndexes: "users", indexes: [{key: {n: 1}, name: "n_1"}]})"#,
+            )
+            .await
+            .unwrap();
+
+        // The plan names the index scan.
+        let QueryResult::Documents { items, .. } = driver
+            .execute(r#"db.users.find({n: {$gt: 1}}).sort({n: 1}).explain()"#)
+            .await
+            .unwrap()
+        else {
+            panic!("expected Documents");
+        };
+        assert!(items[0].to_string().contains("IXSCAN"), "{}", items[0]);
+
+        // count honours the filter, skip and limit server-side.
+        let count = |q: &'static str| {
+            let driver = &driver;
+            async move {
+                let QueryResult::Documents { items, .. } = driver.execute(q).await.unwrap() else {
+                    panic!("expected Documents");
+                };
+                items[0]["count"].as_i64().unwrap()
+            }
+        };
+        assert_eq!(count(r#"db.users.find({n: {$gt: 1}}).count()"#).await, 4);
+        assert_eq!(
+            count(r#"db.users.find({}).hint("n_1").skip(1).limit(3).count()"#).await,
+            3
+        );
+        assert_eq!(count(r#"db.users.find({}).limit(0).count()"#).await, 5);
     }
 
     #[tokio::test]

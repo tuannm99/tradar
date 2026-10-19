@@ -16,7 +16,7 @@ Hoặc gom nhiều ngôn ngữ vào một file với [`.tdb`](File-tdb).
 
 ## MongoDB
 
-Dạng `db.<collection>.<method>(<args>)`. Hỗ trợ `find` (kèm projection, và chain `.sort()`/`.limit()`/`.skip()`/`.count()`), `findOne`, `countDocuments`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`. Đây là parser tối giản chứ không phải JS engine thật: không có `$where`, bulk operation hay transaction; thứ gì ngoài các dạng trên trả lỗi "unsupported query".
+Dạng `db.<collection>.<method>(<args>)`. Hỗ trợ `find` (kèm projection, và chain `.sort()`/`.limit()`/`.skip()`/`.hint(<tên index hoặc {field: 1}>)`/`.count()`/`.explain()`), `findOne`, `countDocuments`, `aggregate`, `insertOne`, `insertMany`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`. Đây là parser tối giản chứ không phải JS engine thật: không có `$where`, bulk operation hay transaction; thứ gì ngoài các dạng trên trả lỗi "unsupported query".
 
 - Nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`, `ISODate(…)`), không chỉ JSON chặt, và cả comment `// …` / `/* … */` ở bất kỳ đâu trong lời gọi (dòng filter đang tạm tắt không làm query hỏng).
 - Dấu `;` ở cuối câu được chấp nhận như trong mongosh (`db.users.find();`).
@@ -24,6 +24,7 @@ Dạng `db.<collection>.<method>(<args>)`. Hỗ trợ `find` (kèm projection, v
 - **Lời gọi cấp database**: `db.getName()`, `db.getCollectionNames()`, `db.getCollectionInfos()`, `db.stats()`, `db.version()`, `db.serverStatus()`, `db.runCommand({…})`, `db.adminCommand({…})`. Danh sách trả về là một giá trị mảng; `runCommand`/`adminCommand` trả document phản hồi của server.
 - **Phương thức collection khác**: `distinct("field", {filter})` (mỗi giá trị một dòng cột `value`), `getIndexes()` (cột `name`/`key`/`unique`), `estimatedDocumentCount()`. Không dùng chain và không sửa-tại-chỗ được.
 - `db.getSiblingDB("khác").…` chạy đúng một câu trên database khác mà không đổi `use` (vd `db.getSiblingDB("shop").getCollectionNames()`, `db.getSiblingDB("shop").orders.find({})`); kết quả kiểu này không sửa-tại-chỗ được.
+- **Kiểm tra index**: `db.users.find({…}).sort({…}).explain()` trả plan chạy thật (`executionStats`) — tìm `IXSCAN` (dùng index) hay `COLLSCAN` (quét cả collection) và `totalDocsExamined`. `.hint(…)` ép dùng một index. `.count()` do server đếm (qua index nếu có), có tính cả `.skip()`/`.limit()`/`.hint()`; `.explain()` và `.count()` phải là lời gọi cuối chain.
 - `db.getCollection("tên-lạ").find(…)` dùng cho collection có tên không phải định danh thường.
 - Câu lệnh trải nhiều dòng được hiểu đúng: dòng bắt đầu bằng `db`, `db.`, `use`, `show` mở câu mới, dòng khác nối vào câu phía trên.
 - `find`/`aggregate` dừng ở 10.000 document đầu và báo "truncated" nếu còn nhiều hơn; `.count()` vẫn trả số thật.
