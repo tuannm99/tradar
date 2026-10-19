@@ -95,7 +95,7 @@ function M.schema()
       local node = node_at_cursor()
       if not (node and node.entry) then return notify('put the cursor on a table', vim.log.levels.WARN) end
       if state.sql_buf and vim.api.nvim_buf_is_valid(state.sql_buf) then M.open_table(state.sql_buf, node.entry) end
-    end, { buffer = buf, desc = 'tradar: open the table under the cursor (ctx.show its rows)' })
+    end, { buffer = buf, desc = 'tradar: open the table under the cursor (show its rows)' })
     vim.keymap.set('n', 'r', function()
       local c = state.schema_conn
       if not c then return end
@@ -260,7 +260,7 @@ function M.hover()
   end)
 end
 
---- `gd` on a table name: ctx.show its rows. Anything else: the LSP's own.
+--- `gd` on a table name: show its rows. Anything else: the LSP's own.
 function M.goto_table()
   local buf = vim.api.nvim_get_current_buf()
   local conn = M.block_connection(buf, vim.api.nvim_win_get_cursor(0)[1])
