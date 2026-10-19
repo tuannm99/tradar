@@ -139,11 +139,34 @@ end
 
 --- Sends `text` (the call site decides what counts as "a line to send" --
 --- `<CR>` passes the current line) on `buf`'s own subscription.
+--- Lines for one tail go out one at a time: the server runs the requests of
+--- a connection concurrently, so two `socket.send` in flight together (fast
+--- typing, pasting several lines) could reach the peer swapped.
+local send_queues = {}
+
+local function pump(buf)
+  local queue = send_queues[buf]
+  if not queue or queue.busy then return end
+  local item = table.remove(queue.items, 1)
+  if not item then return end
+  queue.busy = true
+  rpc.request('socket.send', { subscription = item.subscription, text = item.text }, function(err)
+    queue.busy = false
+    if err then
+      queue.items = {}
+      return notify(err, vim.log.levels.ERROR)
+    end
+    pump(buf)
+  end)
+end
+
 function M.send(buf, text)
   local subscription = vim.b[buf].tradar_socket_subscription
   if not subscription then return notify('not connected yet', vim.log.levels.WARN) end
   if text == '' then return end
-  call('socket.send', { subscription = subscription, text = text }, function() end)
+  send_queues[buf] = send_queues[buf] or { items = {}, busy = false }
+  table.insert(send_queues[buf].items, { subscription = subscription, text = text })
+  pump(buf)
 end
 
 --- `:TradarSocketTail [connection]` -- opens a two-way tail buffer, prompting
