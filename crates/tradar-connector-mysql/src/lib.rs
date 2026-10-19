@@ -167,6 +167,7 @@ where
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut truncated = false;
+    let mut budget = query_driver::RowBudget::default();
     while let Some(row) = stream
         .try_next()
         .await
@@ -175,11 +176,13 @@ where
         if columns.is_empty() {
             columns = row.columns().iter().map(|c| c.name().to_string()).collect();
         }
-        if rows.len() == query_driver::MAX_ROWS {
+        if budget.is_full() {
             truncated = true;
             break;
         }
-        rows.push((0..row.len()).map(|i| stringify_column(&row, i)).collect());
+        let cells: Vec<String> = (0..row.len()).map(|i| stringify_column(&row, i)).collect();
+        budget.keep(&cells);
+        rows.push(cells);
     }
 
     Ok(QueryResult::Table {

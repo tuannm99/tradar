@@ -15,7 +15,7 @@ use tradar_connector_spi::Connector;
 use tradar_core::action::CrudOp;
 use tradar_core::storage::{ConnectionStore, SavedConnection};
 use tradar_query_workbench::components::completion::{CandidateKind, CompletionSource};
-use tradar_query_workbench::query_driver::{QueryDriver, completion_context};
+use tradar_query_workbench::query_driver::{self, QueryDriver, completion_context};
 use tradar_query_workbench::query_engine::QueryEngine;
 
 use crate::extension::{Ctx, Extension};
@@ -34,6 +34,17 @@ const DEFAULT_PAGE: usize = 200;
 /// -- oldest is evicted first.
 const MAX_CURSORS: usize = 16;
 
+/// Text held by all cursors together; past it the oldest cursors go, whatever
+/// `MAX_CURSORS` says (a few wide JSON/text columns make a single result
+/// tens of MB). The newest cursor always stays.
+const MAX_CURSOR_BYTES: usize = 256 * 1024 * 1024;
+
+/// Rows an `execute` reads from the database when the client does not say
+/// (`max_rows`): a grid shows tens of rows, and every row read is stringified,
+/// held and (for the first page) sent. `query_driver::MAX_ROWS` stays the
+/// ceiling for a client that asks for more.
+const DEFAULT_FETCH_ROWS: usize = 1_000;
+
 #[derive(Default)]
 struct State {
     drivers: HashMap<String, Arc<dyn QueryDriver>>,
@@ -43,6 +54,8 @@ struct State {
     completions: HashMap<String, Arc<CompletionSource>>,
     cursors: HashMap<u64, StoredResult>,
     cursor_order: VecDeque<u64>,
+    /// `StoredResult::approx_bytes` per cursor, taken once at insert.
+    cursor_bytes: HashMap<u64, usize>,
     next_cursor: u64,
     /// In-flight `execute`s that a client named with `query_id`, so a
     /// `cancel` from the same (or another) connection can reach them --
@@ -395,6 +408,7 @@ impl Server {
         // connection must not block another client's `fetch`. A `cancel`
         // for this `query_id` drops the in-flight future *and* fires the
         // driver's own `cancel_query` -- see `cancel` below.
+        let max_rows = usize_param(params, "max_rows")?.unwrap_or(DEFAULT_FETCH_ROWS);
         let query_id = params.get("query_id").and_then(Value::as_str);
         let cancel = Arc::new(Notify::new());
         if let Some(id) = query_id {
@@ -412,7 +426,7 @@ impl Server {
         let outcome = tokio::select! {
             biased;
             () = cancel.notified() => None,
-            result = driver.execute(query) => Some(result),
+            result = query_driver::with_max_rows(max_rows, driver.execute(query)) => Some(result),
         };
         // What the database took, without the socket round trip or the
         // client's rendering; shown next to the row count.
@@ -449,12 +463,18 @@ impl Server {
         let mut state = self.state.lock().unwrap();
         state.next_cursor += 1;
         let cursor = state.next_cursor;
+        state.cursor_bytes.insert(cursor, stored.approx_bytes());
         state.cursors.insert(cursor, stored);
         state.cursor_order.push_back(cursor);
-        while state.cursor_order.len() > MAX_CURSORS {
-            if let Some(oldest) = state.cursor_order.pop_front() {
-                state.cursors.remove(&oldest);
-            }
+        let mut held: usize = state.cursor_bytes.values().sum();
+        while state.cursor_order.len() > MAX_CURSORS
+            || (held > MAX_CURSOR_BYTES && state.cursor_order.len() > 1)
+        {
+            let Some(oldest) = state.cursor_order.pop_front() else {
+                break;
+            };
+            state.cursors.remove(&oldest);
+            held = held.saturating_sub(state.cursor_bytes.remove(&oldest).unwrap_or(0));
         }
         response["cursor"] = json!(cursor);
         Ok(response)
@@ -549,6 +569,7 @@ impl Server {
         let cursor = u64_param(params, "cursor")?;
         let mut state = self.state.lock().unwrap();
         state.cursor_order.retain(|c| *c != cursor);
+        state.cursor_bytes.remove(&cursor);
         Ok(json!({"closed": state.cursors.remove(&cursor).is_some()}))
     }
 

@@ -391,7 +391,7 @@ local function took_text(ms)
 end
 
 local function results_title(r)
-  local text = ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and ' (server cap reached)' or '')
+  local text = ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and (' (stopped at %d rows; setup{ max_rows } reads more)'):format(r.total) or '')
   if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
   if r.shown < r.total then
     text = text .. ('  — %d more: %sm loads the next page'):format(r.total - r.shown, opts.prefix or '<leader>r')
@@ -496,10 +496,18 @@ local function paint_results(new_from)
   sync_editable(r)
 end
 
+--- The previous result's rows live in the server until closed; with one
+--- results buffer only the newest is ever reachable, so let the old one go.
+local function release_result(keep)
+  local old = state.result and state.result.id
+  if old and old ~= keep then rpc.request('cursor.close', { cursor = old }, function() end) end
+end
+
 show_message = function(text, height)
   local buf = scratch('tradar://results', state.results_buf)
   state.results_buf = buf
   attach_results(buf)
+  release_result()
   state.result = nil
   set_lines(buf, vim.split(text, '\n', { plain = true }))
   show(buf, height or 6)
@@ -519,6 +527,7 @@ local edit_cache = nil
 
 local function show_result(r, meta)
   local took = r.took_ms
+  release_result(r.cursor)
   if dirty() then notify('discarded unsaved grid edits', vim.log.levels.WARN) end
   local buf = scratch('tradar://results', state.results_buf)
   state.results_buf = buf
@@ -894,7 +903,7 @@ local function run_text(buf, text, base_row, base_col, flags)
       state.running = nil
       stop_spinner()
     end
-    call('execute', { connection = conn, query = text, page_size = opts.page_size or DEFAULT_PAGE, query_id = id }, function(r)
+    call('execute', { connection = conn, query = text, page_size = opts.page_size or DEFAULT_PAGE, max_rows = opts.max_rows, query_id = id }, function(r)
       finish()
       -- The database's own time when the server reports it, else what
       -- this client saw (round trip included).

@@ -233,10 +233,11 @@ fn table_from_json(json: &serde_json::Value) -> QueryResult {
         .and_then(|d| d.as_array())
         .cloned()
         .unwrap_or_default();
-    let truncated = data.len() > query_driver::MAX_ROWS;
+    let cap = query_driver::max_rows();
+    let truncated = data.len() > cap;
     let rows: Vec<Vec<String>> = data
         .into_iter()
-        .take(query_driver::MAX_ROWS)
+        .take(cap)
         .map(|row| {
             columns
                 .iter()

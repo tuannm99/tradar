@@ -184,6 +184,7 @@ where
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut truncated = false;
+    let mut budget = query_driver::RowBudget::default();
     while let Some(row) = stream
         .try_next()
         .await
@@ -192,11 +193,13 @@ where
         if columns.is_empty() {
             columns = row.columns().iter().map(|c| c.name().to_string()).collect();
         }
-        if rows.len() == query_driver::MAX_ROWS {
+        if budget.is_full() {
             truncated = true;
             break;
         }
-        rows.push((0..row.len()).map(|i| stringify_column(&row, i)).collect());
+        let cells: Vec<String> = (0..row.len()).map(|i| stringify_column(&row, i)).collect();
+        budget.keep(&cells);
+        rows.push(cells);
     }
 
     Ok(QueryResult::Table {
@@ -368,16 +371,19 @@ impl QueryDriver for SqliteDriver {
 }
 
 fn stringify_column(row: &SqliteRow, index: usize) -> String {
+    use sqlx::Decode;
     let raw = row.try_get_raw(index).expect("valid column index");
     if raw.is_null() {
         return "NULL".to_string();
     }
+    // Decoding the value already in hand: `row.try_get` would look the
+    // column up and check its type compatibility a second time, per cell.
     match raw.type_info().name() {
-        "INTEGER" => row.try_get::<i64, _>(index).map(|v| v.to_string()),
-        "REAL" => row.try_get::<f64, _>(index).map(|v| v.to_string()),
-        "TEXT" => row.try_get::<String, _>(index),
+        "INTEGER" => <i64 as Decode<Sqlite>>::decode(raw).map(|v| v.to_string()),
+        "REAL" => <f64 as Decode<Sqlite>>::decode(raw).map(|v| v.to_string()),
+        "TEXT" => <String as Decode<Sqlite>>::decode(raw),
         "BLOB" => Ok("<blob>".to_string()),
-        _ => row.try_get::<String, _>(index),
+        _ => <String as Decode<Sqlite>>::decode(raw),
     }
     .unwrap_or_else(|_| "NULL".to_string())
 }

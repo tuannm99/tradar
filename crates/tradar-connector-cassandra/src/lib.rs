@@ -594,14 +594,15 @@ impl QueryDriver for CassandraDriver {
             .map_err(|e| format_cassandra_error(e, query))?;
         let mut out_rows = Vec::new();
         let mut truncated = false;
+        let mut budget = query_driver::RowBudget::default();
         while let Some(row) = rows_stream.next().await {
-            if out_rows.len() == query_driver::MAX_ROWS {
+            if budget.is_full() {
                 truncated = true;
                 break;
             }
-            out_rows.push(stringify_row(
-                &row.map_err(|e| format_cassandra_error(e, query))?,
-            ));
+            let cells = stringify_row(&row.map_err(|e| format_cassandra_error(e, query))?);
+            budget.keep(&cells);
+            out_rows.push(cells);
         }
         Ok(QueryResult::Table {
             columns,

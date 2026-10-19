@@ -36,7 +36,7 @@ pub const APP_ERROR: i64 = -32000;
 /// minor bump had this scheme existed from the start -- this is the first
 /// breaking-change-shaped line in the wire surface's history, which is
 /// exactly why it's `(1, 0)` and not `(0, 1)`.
-pub const PROTOCOL_VERSION: (u32, u32) = (1, 9);
+pub const PROTOCOL_VERSION: (u32, u32) = (1, 10);
 
 pub struct RpcError {
     pub code: i64,
@@ -187,6 +187,31 @@ impl StoredResult {
             }),
             QueryResult::Documents { items, truncated } => Ok(Self::Documents { items, truncated }),
             QueryResult::Affected { rows } => Err(rows),
+        }
+    }
+
+    /// Rough size of the text held, for the server's memory budget -- cheap
+    /// (no serialisation), within a small constant of the real thing.
+    pub fn approx_bytes(&self) -> usize {
+        fn json_size(value: &Value) -> usize {
+            match value {
+                Value::String(s) => s.len() + 24,
+                Value::Array(items) => 24 + items.iter().map(json_size).sum::<usize>(),
+                Value::Object(map) => {
+                    48 + map
+                        .iter()
+                        .map(|(k, v)| k.len() + 24 + json_size(v))
+                        .sum::<usize>()
+                }
+                _ => 16,
+            }
+        }
+        match self {
+            Self::Table { rows, .. } => rows
+                .iter()
+                .map(|row| 24 + row.iter().map(|cell| cell.len() + 24).sum::<usize>())
+                .sum(),
+            Self::Documents { items, .. } => items.iter().map(json_size).sum(),
         }
     }
 
