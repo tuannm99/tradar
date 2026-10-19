@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 #[test]
 fn loading_from_a_missing_file_returns_no_connections() {
