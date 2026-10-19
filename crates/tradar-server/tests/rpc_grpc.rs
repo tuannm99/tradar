@@ -98,6 +98,30 @@ fn err(response: &Value) -> &Value {
 }
 
 #[tokio::test]
+async fn skeleton_gives_a_request_to_start_from() {
+    let addr = spawn_greeter(true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &addr.to_string());
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+
+    let skeleton = call(
+        &server,
+        "grpc.skeleton",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "SayHello"}),
+    )
+    .await;
+    assert_eq!(ok(&skeleton)["skeleton"], "{\n  \"name\": \"\"\n}");
+
+    let missing = call(
+        &server,
+        "grpc.skeleton",
+        json!({"connection": "g", "service": "greeter.Greeter", "method": "Nope"}),
+    )
+    .await;
+    err(&missing);
+}
+
+#[tokio::test]
 async fn connect_discovers_services_via_reflection_and_invokes_unary() {
     let addr = spawn_greeter(true).await;
     let dir = tempfile::tempdir().unwrap();
