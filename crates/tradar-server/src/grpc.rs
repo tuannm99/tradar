@@ -37,15 +37,57 @@ pub struct GrpcConnection {
 }
 
 /// `target` is a bare `host:port` (same convention as Cassandra/Kafka/
-/// Socket) or a full `http(s)://` URL typed by hand. Plaintext only for
-/// v1 -- TLS is the same deferred non-goal Socket already has.
+/// Socket) or a full `http(s)://` URL typed by hand. `https://` turns TLS on
+/// (certificate verified against the bundled webpki roots); anything else is
+/// plaintext.
 pub async fn connect(target: &str) -> anyhow::Result<Channel> {
     let uri = if target.contains("://") {
         target.to_string()
     } else {
         format!("http://{target}")
     };
-    Ok(Channel::from_shared(uri)?.connect().await?)
+    let mut endpoint = Channel::from_shared(uri.clone())?;
+    if uri.starts_with("https://") {
+        endpoint =
+            endpoint.tls_config(tonic::transport::ClientTlsConfig::new().with_webpki_roots())?;
+    }
+    Ok(endpoint.connect().await?)
+}
+
+/// What rides along with a call besides its message: request headers and an
+/// optional deadline.
+#[derive(Default)]
+pub struct CallOptions {
+    pub metadata: MetadataMap,
+    pub timeout: Option<std::time::Duration>,
+}
+
+impl CallOptions {
+    /// Reads `metadata` and `timeout_ms` out of a request's params.
+    pub fn from_params(params: &serde_json::Value) -> anyhow::Result<Self> {
+        Ok(Self {
+            metadata: parse_metadata(params.get("metadata"))?,
+            timeout: parse_timeout(params)?,
+        })
+    }
+
+    fn apply<T>(self, request: &mut Request<T>) {
+        *request.metadata_mut() = self.metadata;
+        if let Some(timeout) = self.timeout {
+            request.set_timeout(timeout);
+        }
+    }
+}
+
+/// `timeout_ms` of a call as the deadline gRPC sends (`grpc-timeout`).
+pub fn parse_timeout(params: &serde_json::Value) -> anyhow::Result<Option<std::time::Duration>> {
+    match params.get("timeout_ms") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(ms) if ms > 0 => Ok(Some(std::time::Duration::from_millis(ms))),
+            _ => anyhow::bail!("`timeout_ms` phải là số nguyên dương (mili giây)"),
+        },
+    }
 }
 
 /// Services a pool knows about, minus the reflection service itself
@@ -364,7 +406,7 @@ pub async fn invoke(
     service: &str,
     method: &str,
     request_json: serde_json::Value,
-    metadata: MetadataMap,
+    options: CallOptions,
 ) -> anyhow::Result<Result<UnaryResponse, GrpcError>> {
     let method = get_method(pool, service, method)?;
     if method.is_client_streaming() || method.is_server_streaming() {
@@ -386,7 +428,7 @@ pub async fn invoke(
         response_desc: method.output(),
     };
     let mut request = Request::new(request_msg);
-    *request.metadata_mut() = metadata;
+    options.apply(&mut request);
     match grpc.unary(request, path, codec).await {
         Ok(response) => {
             let headers = metadata_to_json(response.metadata());
@@ -464,7 +506,7 @@ pub fn start_stream(
     service: &str,
     method: &str,
     request: Option<serde_json::Value>,
-    metadata: MetadataMap,
+    options: CallOptions,
     push: impl Fn(serde_json::Value) + Send + Sync + 'static,
 ) -> anyhow::Result<StreamHandle> {
     use serde_json::json;
@@ -511,15 +553,15 @@ pub fn start_stream(
         // whether the reply is one message or a stream.
         let reply = if !client_streaming {
             let mut req = Request::new(first.unwrap_or_else(|| DynamicMessage::new(input)));
-            *req.metadata_mut() = metadata;
+            options.apply(&mut req);
             grpc.server_streaming(req, path, codec).await
         } else if server_streaming {
             let mut req = Request::new(UnboundedReceiverStream::new(rx));
-            *req.metadata_mut() = metadata;
+            options.apply(&mut req);
             grpc.streaming(req, path, codec).await
         } else {
             let mut req = Request::new(UnboundedReceiverStream::new(rx));
-            *req.metadata_mut() = metadata;
+            options.apply(&mut req);
             match grpc.client_streaming(req, path, codec).await {
                 Ok(response) => {
                     push(
@@ -818,8 +860,8 @@ impl crate::extension::Extension for GrpcExtension {
                 let service = str_param(params, "service")?;
                 let rpc_method = str_param(params, "method")?;
                 let request = params.get("request").filter(|v| !v.is_null()).cloned();
-                let metadata = parse_metadata(params.get("metadata"))
-                    .map_err(|e| RpcError::app(e.to_string()))?;
+                let options =
+                    CallOptions::from_params(params).map_err(|e| RpcError::app(e.to_string()))?;
                 let (channel, pool) = {
                     let connections = self.connections.lock().unwrap();
                     let conn = connections
@@ -836,7 +878,7 @@ impl crate::extension::Extension for GrpcExtension {
                     service,
                     rpc_method,
                     request,
-                    metadata,
+                    options,
                     move |mut item| {
                         item["subscription"] = json!(id);
                         push_client.notify("grpc.stream.message", item)
@@ -860,8 +902,8 @@ impl crate::extension::Extension for GrpcExtension {
                 let service = str_param(params, "service")?;
                 let rpc_method = str_param(params, "method")?;
                 let request = params.get("request").cloned().unwrap_or(json!({}));
-                let metadata = parse_metadata(params.get("metadata"))
-                    .map_err(|e| RpcError::app(e.to_string()))?;
+                let options =
+                    CallOptions::from_params(params).map_err(|e| RpcError::app(e.to_string()))?;
                 let (channel, pool) = {
                     let connections = self.connections.lock().unwrap();
                     let conn = connections
@@ -879,7 +921,7 @@ impl crate::extension::Extension for GrpcExtension {
                         .insert(id.to_string(), Arc::clone(&cancel));
                 }
                 let outcome = tokio::select! {
-                    result = invoke(channel, &pool, service, rpc_method, request, metadata) => Some(result),
+                    result = invoke(channel, &pool, service, rpc_method, request, options) => Some(result),
                     () = cancel.notified() => None,
                 };
                 if let Some(id) = query_id {

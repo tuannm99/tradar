@@ -181,14 +181,28 @@ end
 --- `# name: value` lines are request headers (gRPC metadata), other leading
 --- `#`/blank lines are comments; the body starts at the first other line.
 --- Returns `nil` for `metadata` when there is none (an empty Lua table would
---- encode as `[]`, not `{}`).
+--- encode as `[]`, not `{}`). The one special name is `deadline` (`5s`,
+--- `500ms`, `2m`, or a bare number of seconds): it is not sent as a header
+--- but becomes the call's `timeout_ms`.
+local function parse_deadline(text)
+  local n, unit = text:match('^(%d+%.?%d*)%s*(%a*)$')
+  if not n then return nil end
+  local factor = ({ ms = 1, s = 1000, [''] = 1000, m = 60000 })[unit:lower()]
+  return factor and math.floor(tonumber(n) * factor) or nil
+end
+
 local function parse_request(buf)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local metadata, first = {}, 1
+  local metadata, first, timeout_ms = {}, 1, nil
   while first <= #lines do
     local line = lines[first]
     local key, value = line:match('^#%s*([%w%-_%.]+)%s*:%s*(.-)%s*$')
-    if key then
+    if key and key:lower() == 'deadline' then
+      timeout_ms = parse_deadline(value)
+      if not timeout_ms or timeout_ms <= 0 then
+        return nil, nil, nil, ('bad deadline "%s" -- use e.g. 5s, 500ms, 2m'):format(value)
+      end
+    elseif key then
       metadata[key] = value
     elseif not (line:match('^%s*$') or line:match('^#')) then
       break
@@ -197,8 +211,8 @@ local function parse_request(buf)
   end
   local text = table.concat(lines, '\n', first)
   local ok, body = pcall(vim.json.decode, text, { luanil = { object = true, array = true } })
-  if not ok then return nil, nil, 'request is not valid JSON: ' .. tostring(body) end
-  return body, next(metadata) and metadata or nil
+  if not ok then return nil, nil, nil, 'request is not valid JSON: ' .. tostring(body) end
+  return body, next(metadata) and metadata or nil, timeout_ms
 end
 
 --- `# name: value` lines for a metadata object (response headers/trailers),
@@ -277,7 +291,7 @@ local function stream_send(buf, info, body)
   call('grpc.stream.send', { subscription = subscription, message = body }, function() end)
 end
 
-local function stream_start(buf, info, body, metadata)
+local function stream_start(buf, info, body, metadata, timeout_ms)
   if not stream_listener then stream_listener = rpc.on('grpc.stream.message', on_stream_message) end
   reset_response(buf)
   local sends = info.client_streaming
@@ -287,6 +301,7 @@ local function stream_start(buf, info, body, metadata)
     method = info.method,
     request = (not sends) and body or nil,
     metadata = metadata,
+    timeout_ms = timeout_ms,
   }, function(result)
     streams[result.subscription] = buf
     vim.b[buf].tradar_grpc_stream = result.subscription
@@ -303,7 +318,7 @@ function M.send(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   local info = vim.b[buf].tradar_grpc
   if not info then return notify('not a tradar gRPC request buffer', vim.log.levels.ERROR) end
-  local body, metadata, parse_err = parse_request(buf)
+  local body, metadata, timeout_ms, parse_err = parse_request(buf)
   if parse_err then return notify(parse_err, vim.log.levels.ERROR) end
 
   if info.client_streaming or info.server_streaming then
@@ -313,7 +328,7 @@ function M.send(buf)
     end
     return rpc.ensure(require('tradar').rpc_opts(), function(err)
       if err then return notify(err, vim.log.levels.ERROR) end
-      stream_start(buf, info, body, metadata)
+      stream_start(buf, info, body, metadata, timeout_ms)
     end)
   end
 
@@ -336,6 +351,7 @@ function M.send(buf)
       method = info.method,
       request = body,
       metadata = metadata,
+      timeout_ms = timeout_ms,
       query_id = query_id,
     }, function(e, result, data)
       clear()
@@ -440,7 +456,7 @@ function M.open_request(connection, service, method, kind)
       '- `<leader>rr` / `:TradarGrpcSend` send this request (streaming: start the call; client/bidi: run again to send another message)',
       '- `<leader>rc` / `:TradarGrpcClose` client/bidi stream: close the send side',
       '- `<leader>rx` / `:TradarGrpcCancel` cancel if still running / stop the stream',
-      '- leading `# name: value` lines are request metadata (headers)',
+      '- leading `# name: value` lines are request metadata (headers); `# deadline: 5s` sets the call deadline',
       '- `:q`/`:tabclose` close (this buffer is editable -- `q` is left as vim\'s own macro-record)',
     }, 'markdown', { border = 'rounded', focus_id = 'tradar_help', max_width = 90 })
   end, { buffer = buf, desc = 'tradar: show keymap help' })
