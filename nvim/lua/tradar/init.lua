@@ -186,13 +186,24 @@ local function elapsed_text(ns_since)
   return ('%.1fs'):format(seconds)
 end
 
+--- Unsaved edits in the grid (`:w` commits them, `<leader>ru` reverts).
+local function dirty()
+  local buf = state.results_buf
+  return buf ~= nil and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified and state.result ~= nil
+end
+
 --- Short text for a statusline: `db demo · 120/5000 rows · 83ms`, a spinner
 --- while a query runs, `✗` when the connection stopped answering. Empty off
 --- SQL/tradar buffers so it costs a statusline nothing there.
 function M.status()
   local in_tradar = vim.b.tradar_attached or vim.api.nvim_buf_get_name(0):find('^tradar://') ~= nil
   if not in_tradar and not state.running then return '' end
-  local conn = (state.running and state.running.conn) or M.block_connection(0, vim.api.nvim_win_get_cursor(0)[1])
+  -- In the results buffer the connection is the *result's*, not whichever
+  -- one the buffer-wide fallback (last chosen) happens to name.
+  local in_results = vim.api.nvim_buf_get_name(0):find('^tradar://results') ~= nil
+  local conn = (state.running and state.running.conn)
+    or (in_results and state.result and state.result.conn)
+    or M.block_connection(0, vim.api.nvim_win_get_cursor(0)[1])
   if not conn then return '' end
   local parts = { 'db ' .. conn .. (M.is_protected(conn) and ' ⚠' or '') }
   if state.alive[conn] == false then parts[1] = parts[1] .. ' ✗' end
@@ -203,6 +214,7 @@ function M.status()
   elseif state.last then
     parts[#parts + 1] = state.last
   end
+  if in_results and dirty() then parts[#parts + 1] = '✎ unsaved edits' end
   return table.concat(parts, ' · ')
 end
 
@@ -336,12 +348,6 @@ local function sync_editable(r)
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
   vim.bo[buf].modifiable = (grid_of(r) ~= nil and r.edit ~= nil) or false
   vim.bo[buf].modified = false
-end
-
---- Unsaved edits in the grid (`:w` commits them, `<leader>ru` reverts).
-local function dirty()
-  local buf = state.results_buf
-  return buf ~= nil and vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified and state.result ~= nil
 end
 
 --- `new_from` (1-based index into `r.rows`), when given, means "only rows
@@ -730,6 +736,8 @@ local function set_diagnostic(buf, base_row, base_col, message, data)
   end
 end
 
+local TX_VERBS = { begin = true, start = true, commit = true, rollback = true, ['end'] = true, abort = true }
+
 local function run_text(buf, text, base_row, base_col, flags)
   flags = flags or {}
   if state.running then
@@ -779,6 +787,16 @@ local function run_text(buf, text, base_row, base_col, flags)
       if vim.api.nvim_buf_is_valid(buf) then vim.diagnostic.reset(ns, buf) end
       if guard.changes_schema(text) then state.schema_cache[conn] = nil end
       show_result(r, { conn = conn, query = text })
+      -- BEGIN/COMMIT/ROLLBACK flip the `tx` badge now, not at the next 15s poll.
+      local verb = text:match('^%s*(%a+)')
+      if verb and TX_VERBS[verb:lower()] then
+        rpc.request('status', { connection = conn }, function(err, st)
+          if not err then
+            state.alive[conn], state.in_tx[conn] = st.alive, st.in_transaction
+            vim.cmd.redrawstatus()
+          end
+        end)
+      end
       if flags.after then flags.after() end
     end, function(err, data)
       finish()

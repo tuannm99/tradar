@@ -81,7 +81,7 @@ Lỗi cú pháp được gạch chân đúng vị trí bằng `vim.diagnostic` (
 
 ## Statusline
 
-`require('tradar').status()` trả chuỗi như `db demo · 120/5000 rows · 83ms`: spinner khi đang chạy, `✗` khi ping nền (mỗi 15 giây) thấy connection rớt, `tx` khi đang trong transaction, `⚠` với connection protected. Rỗng ngoài buffer tradar, nên gắn vào lualine không tốn gì ở file khác.
+`require('tradar').status()` trả chuỗi như `db demo · 120/5000 rows · 83ms`: spinner khi đang chạy, `✗` khi ping nền (mỗi 15 giây) thấy connection rớt, `tx` khi đang trong transaction (cập nhật ngay sau `BEGIN`/`COMMIT`/`ROLLBACK`, không đợi lần ping kế), `⚠` với connection protected. Trong buffer kết quả, nó hiện connection **của kết quả** đó và thêm `✎ unsaved edits` khi lưới có sửa chưa commit. Rỗng ngoài buffer tradar, nên gắn vào lualine không tốn gì ở file khác.
 
 ## An toàn
 

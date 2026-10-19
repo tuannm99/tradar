@@ -192,7 +192,8 @@ impl QueryDriver for RedisDriver {
             .connection
             .clone()
             .expect("connect() must be called first");
-        let parts: Vec<&str> = query.split_whitespace().collect();
+        let tokens = split_command(query)?;
+        let parts: Vec<&str> = tokens.iter().map(String::as_str).collect();
         let (command, args) = parts
             .split_first()
             .ok_or_else(|| anyhow::anyhow!("empty command"))?;
@@ -253,10 +254,10 @@ impl QueryDriver for RedisDriver {
         _columns: &[String],
     ) -> Option<String> {
         let kind = entry.kind.as_deref()?;
-        let key = &entry.name;
+        let key = quote_arg(&entry.name);
         let browse_kind = BrowseKind::parse(kind)?;
         Some(match op {
-            tradar_core::action::CrudOp::Read => browse_kind.command(key),
+            tradar_core::action::CrudOp::Read => browse_kind.command(&entry.name),
             tradar_core::action::CrudOp::Create | tradar_core::action::CrudOp::Update => {
                 match browse_kind {
                     BrowseKind::String => format!("SET {key} <value>"),
@@ -269,6 +270,116 @@ impl QueryDriver for RedisDriver {
             tradar_core::action::CrudOp::Delete => format!("DEL {key}"),
         })
     }
+}
+
+/// A command line as `redis-cli` reads it: arguments split on whitespace,
+/// except that a token *starting* with `"` or `'` runs to the matching quote
+/// and may contain spaces -- `SET greeting "hello world"`. Inside `"..."` the
+/// escapes `\n \r \t \b \a \\ \" \xHH` are understood (anything else after a
+/// backslash is that character); inside `'...'` only `\'` is. A quote in the
+/// middle of an unquoted token is just a character, so `SET k it's` keeps
+/// working, and an unterminated quote is an error rather than a silent
+/// mis-split.
+fn split_command(text: &str) -> anyhow::Result<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let mut token = String::new();
+        match chars[i] {
+            quote @ ('"' | '\'') => {
+                i += 1;
+                let mut closed = false;
+                while i < chars.len() {
+                    let c = chars[i];
+                    if c == quote {
+                        closed = true;
+                        i += 1;
+                        break;
+                    }
+                    if c == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                        let e = chars[i];
+                        if quote == '\'' {
+                            if e == '\'' {
+                                token.push('\'');
+                            } else {
+                                token.push('\\');
+                                token.push(e);
+                            }
+                        } else {
+                            match e {
+                                'n' => token.push('\n'),
+                                'r' => token.push('\r'),
+                                't' => token.push('\t'),
+                                'b' => token.push('\u{8}'),
+                                'a' => token.push('\u{7}'),
+                                'x' if i + 2 < chars.len()
+                                    && chars[i + 1].is_ascii_hexdigit()
+                                    && chars[i + 2].is_ascii_hexdigit() =>
+                                {
+                                    let hex: String = chars[i + 1..=i + 2].iter().collect();
+                                    token.push(u8::from_str_radix(&hex, 16)? as char);
+                                    i += 2;
+                                }
+                                other => token.push(other),
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    token.push(c);
+                    i += 1;
+                }
+                if !closed {
+                    anyhow::bail!("unterminated {quote} quote in the command");
+                }
+                if i < chars.len() && !chars[i].is_whitespace() {
+                    anyhow::bail!(
+                        "a closing quote must be followed by a space or the end of the command"
+                    );
+                }
+            }
+            _ => {
+                while i < chars.len() && !chars[i].is_whitespace() {
+                    token.push(chars[i]);
+                    i += 1;
+                }
+            }
+        }
+        out.push(token);
+    }
+    Ok(out)
+}
+
+/// `arg` as one token of a command line: bare when it is plain, otherwise
+/// double-quoted with the escapes `split_command` reads back -- a key with
+/// a space in it must survive being written into a snippet.
+fn quote_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'' || c == '\\')
+    {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The five Redis types the browse sidebar has a specialized view for --
@@ -300,11 +411,11 @@ impl BrowseKind {
     /// The command that fetches `key`'s full value for this type.
     fn command(self, key: &str) -> String {
         match self {
-            Self::String => format!("GET {key}"),
-            Self::Hash => format!("HGETALL {key}"),
-            Self::List => format!("LRANGE {key} 0 -1"),
-            Self::Set => format!("SMEMBERS {key}"),
-            Self::Zset => format!("ZRANGE {key} 0 -1 WITHSCORES"),
+            Self::String => format!("GET {}", quote_arg(key)),
+            Self::Hash => format!("HGETALL {}", quote_arg(key)),
+            Self::List => format!("LRANGE {} 0 -1", quote_arg(key)),
+            Self::Set => format!("SMEMBERS {}", quote_arg(key)),
+            Self::Zset => format!("ZRANGE {} 0 -1 WITHSCORES", quote_arg(key)),
         }
     }
 }
@@ -502,6 +613,69 @@ pub fn connector() -> Box<dyn Connector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_command_splits_on_whitespace_like_before() {
+        assert_eq!(
+            split_command("  GET   key:1 ").unwrap(),
+            vec!["GET", "key:1"]
+        );
+        assert!(split_command("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn split_command_keeps_a_quoted_value_with_spaces_as_one_argument() {
+        assert_eq!(
+            split_command("SET greeting \"hello world\"").unwrap(),
+            vec!["SET", "greeting", "hello world"]
+        );
+        assert_eq!(
+            split_command("SET k 'it\\'s a  test'").unwrap(),
+            vec!["SET", "k", "it's a  test"]
+        );
+        assert_eq!(split_command("SET k \"\"").unwrap(), vec!["SET", "k", ""]);
+    }
+
+    #[test]
+    fn split_command_reads_double_quote_escapes() {
+        assert_eq!(
+            split_command("SET k \"a\\nb\\t\\\"q\\\"\\x41\"").unwrap(),
+            vec!["SET", "k", "a\nb\t\"q\"A"]
+        );
+    }
+
+    #[test]
+    fn split_command_treats_a_mid_token_quote_as_a_plain_character() {
+        assert_eq!(
+            split_command("SET k it's").unwrap(),
+            vec!["SET", "k", "it's"]
+        );
+    }
+
+    #[test]
+    fn split_command_rejects_an_unterminated_quote_and_junk_after_a_closing_one() {
+        assert!(split_command("SET k \"oops").is_err());
+        assert!(split_command("SET k \"a\"b").is_err());
+    }
+
+    #[test]
+    fn quote_arg_round_trips_through_split_command() {
+        for key in [
+            "plain:key",
+            "has space",
+            "quo\"te",
+            "back\\slash",
+            "tab\there",
+            "",
+        ] {
+            let line = format!("GET {}", quote_arg(key));
+            assert_eq!(
+                split_command(&line).unwrap(),
+                vec!["GET".to_string(), key.to_string()],
+                "{line}"
+            );
+        }
+    }
     use testcontainers_modules::redis::{REDIS_PORT, Redis};
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
