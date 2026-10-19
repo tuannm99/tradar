@@ -31,6 +31,12 @@ async fn call(server: &Server, method: &str, params: Value) -> Value {
         .await
 }
 
+fn err_message(response: &Value) -> &str {
+    response["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error, got {response}"))
+}
+
 fn ok(response: &Value) -> &Value {
     assert!(
         response.get("error").is_none(),
@@ -655,4 +661,40 @@ async fn status_answers_at_once_inside_a_held_transaction() {
     ok(&call(&server, "execute", q("ROLLBACK")).await);
     let after = call(&server, "status", status()).await;
     assert_eq!(ok(&after)["in_transaction"], false);
+}
+
+#[tokio::test]
+async fn cancelling_a_running_query_reports_cancelled_not_the_drivers_interrupt_error() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(connected(dir.path()).await);
+    let slow = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 400000000) \
+                SELECT count(*) FROM c";
+
+    // Repeated: the old behaviour was a coin flip between two ready branches.
+    for round in 0..5 {
+        let id = format!("slow-{round}");
+        let running = {
+            let server = Arc::clone(&server);
+            let id = id.clone();
+            tokio::spawn(async move {
+                call(
+                    &server,
+                    "execute",
+                    json!({"connection": "local", "query": slow, "query_id": id}),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let cancelled = call(&server, "cancel", json!({"query_id": id})).await;
+        assert_eq!(ok(&cancelled)["cancelled"], true);
+
+        let response = running.await.unwrap();
+        assert_eq!(
+            err_message(&response),
+            "query cancelled",
+            "round {round}: {response}"
+        );
+    }
 }

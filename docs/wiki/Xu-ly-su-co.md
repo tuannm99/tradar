@@ -41,6 +41,8 @@ Unix socket giới hạn khoảng 108 byte. Nếu `$XDG_RUNTIME_DIR` dài, `:che
 
 ## "`tên` is not connected -- call `connect` first"
 
+Plugin tự khôi phục trường hợp thường gặp nhất: server bị dừng/khởi động lại sau khi bạn đã kết nối — lệnh kế tiếp tự kết nối lại và lặp lại một lần, không cần gõ lại. Chỉ khi connection chưa từng được kết nối trong phiên này (hoặc kết nối lại cũng thất bại) bạn mới thấy thông báo này; khi đó mở lại file có dòng `-- tradar: tên`, hoặc `:TradarConnect tên`.
+
 Connection chưa được kết nối. Mở lại file có dòng `-- tradar: tên` (plugin tự connect nền), hoặc `:TradarConnect tên`. Với Kafka/RabbitMQ/HTTP/gRPC dùng lệnh `…Connect` tương ứng ([trang này](Kafka-RabbitMQ-HTTP-Socket-gRPC)).
 
 ## "no saved … connection named …"
