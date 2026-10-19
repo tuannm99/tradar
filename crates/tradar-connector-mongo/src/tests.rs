@@ -254,6 +254,15 @@ fn single_quoted_strings_do_not_confuse_the_argument_splitter() {
 }
 
 use super::*;
+use crate::convert::*;
+use crate::relax::*;
+use crate::run::*;
+use crate::shell::*;
+use crate::snippets::*;
+use mongodb::bson::Document;
+use tradar_query_workbench::query_driver::{
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
+};
 
 #[test]
 fn split_statements_treats_a_multi_line_call_as_one_statement() {
