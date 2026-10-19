@@ -10,7 +10,7 @@ Tất cả phím có tiền tố `<leader>r` (đổi được bằng `setup{ pre
 
 | Phím | Việc |
 |---|---|
-| `rr` | chạy statement dưới con trỏ (visual mode: phần đang chọn) |
+| `rr` | chạy statement dưới con trỏ. Visual mode: các dòng đang chọn, **tách theo `;`** và chạy lần lượt (dừng ở lỗi đầu tiên; hỏi một lần nếu có câu nguy hiểm) |
 | `ra` | chạy cả file theo thứ tự, dừng ở lỗi đầu tiên |
 | `rx` | huỷ query đang chạy |
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
@@ -27,7 +27,7 @@ Ranh giới statement do chính driver quyết định. Chạy hoàn toàn async
 
 ## Buffer kết quả
 
-Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Cuộn tới cuối sẽ tự tải trang kế.
+Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Mỗi trang 100 dòng (`setup{ page_size }`); trang kế tải bằng `<leader>rm` chứ không tự tải khi cuộn (`setup{ auto_load_more = true }` để như cũ). Query chạy lâu: thanh trên cùng của cửa sổ kết quả hiện spinner + thời gian + cách huỷ.
 
 | Phím | Việc |
 |---|---|

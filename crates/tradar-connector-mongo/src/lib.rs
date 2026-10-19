@@ -784,6 +784,13 @@ impl QueryDriver for MongoDriver {
         chain_is_safe.then(|| parsed.collection.clone())
     }
 
+    /// Always `_id` -- said outright so the plugin does not have to run
+    /// `list_schema` (which samples a document from *every* collection) after
+    /// each result just to learn it.
+    fn edit_key_columns(&self, _source: &str) -> Option<Vec<String>> {
+        Some(vec!["_id".to_string()])
+    }
+
     /// Builds the `updateOne`/`deleteOne` this driver would run for `edit`,
     /// filtered by `edit.key` (always just `_id`, the one field
     /// `list_schema` marks `primary_key: true` -- see that field's own
@@ -1891,6 +1898,15 @@ mod tests {
 
     fn id_key(id: &str) -> Vec<(String, String)> {
         vec![("_id".to_string(), id.to_string())]
+    }
+
+    #[test]
+    fn edit_key_columns_is_always_id() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+        assert_eq!(
+            driver.edit_key_columns("users"),
+            Some(vec!["_id".to_string()])
+        );
     }
 
     #[test]

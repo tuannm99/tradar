@@ -74,5 +74,7 @@ Lệnh kế tiếp sẽ tự khởi động bản mới.
 | `prefix` | tiền tố phím (mặc định `<leader>r`) |
 | `keymaps = false` | không đăng ký phím nào |
 | `documents_view` | `"table"` hoặc `"json"` — ép cách hiện kết quả dạng tài liệu |
+| `page_size = 100` | số dòng mỗi trang kết quả (trang kế tải bằng `<leader>rm`) |
+| `auto_load_more = true` | tự tải trang kế khi con trỏ xuống cuối (mặc định tắt) |
 
 Plugin tuỳ chọn: `nvim-telescope/telescope.nvim` (picker bảng/history), `blink.cmp` (completion), `which-key.nvim` (nhóm phím).
