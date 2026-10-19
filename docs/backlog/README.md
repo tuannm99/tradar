@@ -89,3 +89,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`mongo-console-helpers-2026-10-31.md`](mongo-console-helpers-2026-10-31.md) — Mongo: `show collections/users/roles`, `db`, `db.getCollectionNames()/stats()/runCommand()...`, `db.getCollection("x")`, dấu `;` cuối câu
 - [`grpc-streaming-metadata-2026-10-31.md`](grpc-streaming-metadata-2026-10-31.md) — gRPC: metadata request/response, server-/client-streaming và bidi qua `grpc.stream.*` (protocol 1.6), buffer transcript trong plugin
 - [`results-window-layout-zoom-2026-10-31.md`](results-window-layout-zoom-2026-10-31.md) — `<leader>rz` phóng cửa sổ kết quả toàn màn hình, `results_layout` (bottom/right/tab), sửa cửa sổ kết quả bị bé 4 dòng sau "running…"
+- [`performance-fetch-cap-2026-10-31.md`](performance-fetch-cap-2026-10-31.md) — `max_rows` (mặc định 1000) thay vì đọc 10 000 dòng, trần 64 MB mỗi kết quả, 256 MB tổng cursor, đóng cursor cũ: `select *` 600 ms → 30 ms, RSS không còn tăng không chặn

@@ -19,7 +19,7 @@ use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
 use tradar_core::capability::Capability;
 use tradar_core::storage::SavedConnection;
 use tradar_query_workbench::query_driver::{
-    self as query_driver, ColumnInfo, MAX_ROWS, QueryDriver, QueryResult, SchemaInfo, Statement,
+    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo, Statement,
     qualify_colliding_names,
 };
 use tradar_query_workbench::query_engine::QueryEngine;
@@ -1540,7 +1540,7 @@ async fn run_method_in(
             let mut docs = Vec::new();
             let mut truncated = false;
             while let Some(doc) = cursor.try_next().await? {
-                if docs.len() >= MAX_ROWS {
+                if docs.len() >= query_driver::max_rows() {
                     truncated = true;
                     break;
                 }
@@ -1609,10 +1609,11 @@ async fn run_method_in(
                 Document::new()
             };
             let values = collection.distinct(field, filter).await?;
-            let truncated = values.len() > MAX_ROWS;
+            let cap = query_driver::max_rows();
+            let truncated = values.len() > cap;
             let items = values
                 .into_iter()
-                .take(MAX_ROWS)
+                .take(cap)
                 .map(|v| serde_json::json!({ "value": v.into_relaxed_extjson() }))
                 .collect();
             Ok(QueryResult::Documents { items, truncated })
@@ -1654,7 +1655,7 @@ async fn run_method_in(
             let mut docs = Vec::new();
             let mut truncated = false;
             while let Some(doc) = cursor.try_next().await? {
-                if docs.len() >= MAX_ROWS {
+                if docs.len() >= query_driver::max_rows() {
                     truncated = true;
                     break;
                 }
@@ -3290,7 +3291,7 @@ mod tests {
         let port = container.get_host_port_ipv4(27017).await.unwrap();
         let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
         driver.connect().await.unwrap();
-        let docs: Vec<serde_json::Value> = (0..MAX_ROWS + 1)
+        let docs: Vec<serde_json::Value> = (0..query_driver::MAX_ROWS + 1)
             .map(|i| serde_json::json!({"n": i}))
             .collect();
         driver
@@ -3309,10 +3310,10 @@ mod tests {
         let QueryResult::Documents { items, truncated } = result else {
             panic!("expected Documents");
         };
-        assert_eq!(items.len(), MAX_ROWS);
+        assert_eq!(items.len(), query_driver::MAX_ROWS);
         assert!(
             truncated,
-            "more matches than MAX_ROWS must be reported as truncated"
+            "more matches than query_driver::MAX_ROWS must be reported as truncated"
         );
     }
 
@@ -3483,7 +3484,7 @@ mod tests {
         let port = container.get_host_port_ipv4(27017).await.unwrap();
         let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
         driver.connect().await.unwrap();
-        let docs: Vec<serde_json::Value> = (0..MAX_ROWS + 1)
+        let docs: Vec<serde_json::Value> = (0..query_driver::MAX_ROWS + 1)
             .map(|i| serde_json::json!({"n": i}))
             .collect();
         driver
@@ -3499,10 +3500,10 @@ mod tests {
         let QueryResult::Documents { items, truncated } = result else {
             panic!("expected Documents");
         };
-        assert_eq!(items.len(), MAX_ROWS);
+        assert_eq!(items.len(), query_driver::MAX_ROWS);
         assert!(
             truncated,
-            "more documents than MAX_ROWS must be reported as truncated"
+            "more documents than query_driver::MAX_ROWS must be reported as truncated"
         );
     }
 
@@ -3515,7 +3516,7 @@ mod tests {
         let port = container.get_host_port_ipv4(27017).await.unwrap();
         let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
         driver.connect().await.unwrap();
-        let docs: Vec<serde_json::Value> = (0..MAX_ROWS + 1)
+        let docs: Vec<serde_json::Value> = (0..query_driver::MAX_ROWS + 1)
             .map(|i| serde_json::json!({"n": i}))
             .collect();
         driver
@@ -3531,7 +3532,10 @@ mod tests {
         let QueryResult::Documents { items, truncated } = result else {
             panic!("expected Documents");
         };
-        assert_eq!(items, vec![serde_json::json!({"count": MAX_ROWS + 1})]);
+        assert_eq!(
+            items,
+            vec![serde_json::json!({"count": query_driver::MAX_ROWS + 1})]
+        );
         assert!(
             !truncated,
             "a count report is one document, never itself truncated"

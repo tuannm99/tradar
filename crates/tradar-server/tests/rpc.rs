@@ -755,3 +755,27 @@ async fn edit_sql_accepts_several_cells_of_a_row_as_one_update() {
     .await;
     assert!(malformed.get("error").is_some(), "{malformed}");
 }
+
+#[tokio::test]
+async fn execute_reads_only_max_rows_and_says_it_was_cut_short() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_sqlite(dir.path());
+    ok(&call(&server, "connect", json!({"connection": "local"})).await);
+    let sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000) SELECT i FROM n";
+    let q = |sql: &str| json!({"connection": "local", "query": sql});
+
+    // Default: a few hundred rows' worth, not the whole 5000.
+    let default = call(&server, "execute", q(sql)).await;
+    assert_eq!(ok(&default)["truncated"], true);
+    assert_eq!(ok(&default)["total"], 1000);
+
+    // The client can ask for more, or fewer.
+    let mut more = q(sql);
+    more["max_rows"] = json!(3000);
+    let more = call(&server, "execute", more).await;
+    assert_eq!(ok(&more)["total"], 3000);
+    let mut few = q(sql);
+    few["max_rows"] = json!(50);
+    let few = call(&server, "execute", few).await;
+    assert_eq!(ok(&few)["total"], 50);
+}
