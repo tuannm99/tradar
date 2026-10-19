@@ -505,16 +505,11 @@ show_message = function(text, height)
   show(buf, height or 6)
 end
 
---- Documents are a table when they are *objects* (Mongo, Elasticsearch);
---- plain replies (a Redis string, a list of numbers) stay as JSON lines --
---- a one-column table of `value` adds nothing. `setup{ documents_view }`
---- forces either.
-local function default_view(items)
-  if opts.documents_view then return opts.documents_view end
-  for _, item in ipairs(items) do
-    if type(item) == 'table' and not vim.islist(item) then return 'table' end
-  end
-  return 'json'
+--- Documents (Mongo, Elasticsearch, Redis replies) open as JSON; the table
+--- is one `<leader>rv` away, and is what editing needs. `setup{
+--- documents_view = 'table' }` makes the table the default instead.
+local function default_view()
+  return opts.documents_view or 'json'
 end
 
 local resolve_edit
@@ -542,7 +537,7 @@ local function show_result(r, meta)
     -- `order` parameter, `nil` for anything but a `documents` result from
     -- a server new enough to send it.
     field_order = r.field_order,
-    view = r.kind == 'documents' and default_view(r.rows) or 'table',
+    view = r.kind == 'documents' and default_view() or 'table',
     -- Row editing: `edit` = { table, keys } once `resolve_edit`
     -- has found the source table; until then (or if it never does) the grid
     -- is read-only, with `edit_reason` saying why.

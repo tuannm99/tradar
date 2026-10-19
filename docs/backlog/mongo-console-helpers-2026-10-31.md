@@ -20,3 +20,11 @@ Thêm vào `run_method` (không chain, không editable). Chỉ unit-test phần 
 ## Bổ sung: `.explain()`, `.hint()`, `.count()` phía server
 
 Phản hồi "`.sort` chưa ăn index": không có cách nào kiểm tra, và `find(...).count()` trước đây đếm bằng cách đi hết cursor ở client (kéo mọi document về, không dùng index). Giờ `.count()` gọi `count_documents` (server đếm, qua index nếu có; tính `skip`/`limit`/`hint`), thêm `.hint(<tên|key doc>)` và `.explain()` (lệnh `explain` với `executionStats` trả plan thật để xem `IXSCAN`/`COLLSCAN`). Thứ tự key của `sort` được giữ nguyên (test). Test thật cần Docker (`explain_hint_and_count_go_through_the_server_and_its_index`), chưa chạy được trong sandbox; phần kiểm tra chain chạy được và đạt.
+
+## Bổ sung: Elasticsearch aggregation không hiện kết quả
+
+`_search` luôn bị bóc thành từng hit (`unwrap_search_hits`), nên một response có `aggregations`/`suggest` (thường `"size": 0`, không hit) ra lưới rỗng. Giờ response như vậy được giữ nguyên làm một document (test `a_search_with_aggregations_keeps_the_whole_response`), và plugin mở một document lồng nhau ở dạng JSON thay vì bảng một dòng rất rộng (`default_view`). Chưa chạy trên cluster ES thật (Docker 429).
+
+## Bổ sung: Mongo/ES mặc định hiện JSON
+
+Kết quả `documents` (Mongo, Elasticsearch, Redis) giờ mở ở dạng JSON; `<leader>rv` sang bảng để sửa ô/xoá dòng; `setup{ documents_view = 'table' }` đổi mặc định. Thay cho luật tự đoán trước đó (một document lồng nhau → JSON).

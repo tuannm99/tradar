@@ -54,7 +54,7 @@ Dùng file `.mongo` (filetype `mongo`, tô màu như JavaScript), `.redis`, `.es
 -- tradar: tên-connection     (SQL)
 ```
 
-Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu hiện **bảng** (cột phẳng `address.city`) để sửa trực tiếp (`:w` → xem trước → commit, `UPDATE`/`DELETE`; chưa có `INSERT`)/`gyc`/export như SQL; `<leader>rv` đổi sang JSON. `<leader>re` (EXPLAIN) chỉ có cho SQL.
+Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu mặc định hiện **JSON**; `<leader>rv` đổi sang **bảng** (cột phẳng `address.city`, dạng cần để sửa trực tiếp; `setup{ documents_view = "table" }` để mở bằng bảng) Trong bảng có thể sửa (`:w` → xem trước → commit, `UPDATE`/`DELETE`; chưa có `INSERT`), `gyc` và export như SQL. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 
 ### gRPC
 

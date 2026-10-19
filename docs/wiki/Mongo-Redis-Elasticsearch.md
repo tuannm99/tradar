@@ -45,12 +45,13 @@ GET /my-index/_search
 
 - Comment kiểu Kibana được bỏ trước khi gửi: dòng bắt đầu bằng `#` ở bất kỳ đâu, `// …` và `/* … */` trong body (không nhầm với `//` trong đường dẫn hay trong chuỗi `"http://…"`).
 - Body được kiểm tra JSON ngay trên máy trước khi gửi; chấp nhận cả NDJSON (một JSON mỗi dòng) cho `_bulk`/`_msearch`.
+- `_search` thường hiện mỗi hit là một dòng (`_id` + các field của `_source`). Nếu response có `aggregations` hoặc `suggest` (thường kèm `"size": 0` nên không có hit) thì hiện **nguyên response** dạng JSON, vì phần đó mới là câu trả lời. Một document lồng nhiều tầng (response aggregation, `serverStatus`) tự mở ở dạng JSON thay vì bảng một dòng rất rộng; `<leader>rv` đổi qua lại, `setup{ documents_view }` ép một kiểu.
 - Response không phải 2xx hiện như lỗi thật, kèm body lỗi của Elasticsearch.
 - Mỗi lần chạy chỉ một request; chưa có cấu hình auth/TLS client-cert riêng.
 
 ## Kết quả dạng tài liệu
 
-Kết quả mặc định hiện **bảng** (cột phẳng `address.city`) để sửa trực tiếp như SQL (sửa ô/xoá dòng rồi `:w` → xem trước → commit; chưa có thêm dòng mới cho Mongo/ES) và dùng `gyc`/export; `<leader>rv` đổi sang JSON (mỗi document in thụt lề, cách nhau một dòng trống, trường cấp 1 theo thứ tự lưu trong DB, cấp lồng nhau theo alphabet, tô màu cú pháp JSON; `gyj` copy cả kết quả cùng dạng này). Câu trả lời đơn giản (một chuỗi Redis, danh sách số) vẫn hiện dạng JSON. Ép một kiểu bằng `setup{ documents_view = "table" | "json" }`.
+Kết quả mặc định hiện **JSON** (mỗi document in thụt lề, cách nhau một dòng trống, trường cấp 1 theo thứ tự lưu trong DB, cấp lồng nhau theo alphabet, tô màu cú pháp JSON; `gyj` copy cả kết quả cùng dạng này). `<leader>rv` đổi sang **bảng** (cột phẳng `address.city`) — dạng này mới sửa trực tiếp như SQL được (sửa ô/xoá dòng rồi `:w` → xem trước → commit; chưa có thêm dòng mới cho Mongo/ES) và dùng `gyc`/export theo ô. Muốn mở bằng bảng mặc định:  `setup{ documents_view = "table" }`.
 
 Sửa/xoá dòng hoạt động cho Mongo (`find()` đơn giản, khoá `_id`) và Elasticsearch (`_search` trên một index, khoá `_id`); Redis chỉ đọc. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 
