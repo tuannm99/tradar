@@ -20,8 +20,9 @@ use tradar_query_workbench::query_engine::QueryEngine;
 
 use crate::extension::{Ctx, Extension};
 use crate::protocol::{
-    METHOD_NOT_FOUND, PROTOCOL_VERSION, RpcError, StoredResult, parse_insert_values,
-    parse_row_edit, schema_json, statement_json, str_param, u64_param, usize_param,
+    METHOD_NOT_FOUND, PROTOCOL_VERSION, RpcError, StoredResult, order_insert_values,
+    parse_insert_values, parse_row_edit, schema_json, statement_json, str_param, u64_param,
+    usize_param,
 };
 
 /// Rows returned inline by `execute` -- enough to fill a screen, so the
@@ -631,7 +632,8 @@ impl Server {
         let driver = self.driver(params)?;
         if let Some(insert) = params.get("insert") {
             let table = str_param(params, "table")?;
-            let values = parse_insert_values(insert)?;
+            let values =
+                order_insert_values(parse_insert_values(insert)?, params.get("insert_columns"));
             return Ok(json!({"sql": driver.insert_sql(table, &values)}));
         }
         let edit = parse_row_edit(params)?;
