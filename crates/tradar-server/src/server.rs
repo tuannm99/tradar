@@ -408,11 +408,15 @@ impl Server {
         // the driver to interrupt, so when the interrupted statement fails
         // (SQLite: "interrupted") both branches are ready at once -- and a
         // random pick would report the user's own cancel as a database error.
+        let started = std::time::Instant::now();
         let outcome = tokio::select! {
             biased;
             () = cancel.notified() => None,
             result = driver.execute(query) => Some(result),
         };
+        // What the database took, without the socket round trip or the
+        // client's rendering; shown next to the row count.
+        let elapsed_ms = (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0;
         if let Some(id) = query_id {
             self.state.lock().unwrap().running.remove(id);
         }
@@ -425,7 +429,9 @@ impl Server {
         }
         let stored = match StoredResult::from_query(result) {
             Ok(stored) => stored,
-            Err(rows) => return Ok(json!({"kind": "affected", "rows": rows})),
+            Err(rows) => {
+                return Ok(json!({"kind": "affected", "rows": rows, "elapsed_ms": elapsed_ms}));
+            }
         };
 
         let first_page = stored.page(0, page_size);
@@ -435,6 +441,7 @@ impl Server {
             "total": stored.total(),
             "truncated": stored.truncated(),
             "rows": first_page,
+            "elapsed_ms": elapsed_ms,
         });
         if let Some(field_order) = stored.field_order(0, page_size) {
             response["field_order"] = field_order;

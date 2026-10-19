@@ -93,6 +93,10 @@ async fn execute_pages_a_result_through_a_cursor() {
     .await;
     let first = ok(&first);
     assert_eq!(first["kind"], "table");
+    assert!(
+        first["elapsed_ms"].as_f64().is_some_and(|ms| ms >= 0.0),
+        "{first}"
+    );
     assert_eq!(first["columns"], json!(["id", "v"]));
     assert_eq!(first["total"], 5);
     assert_eq!(first["rows"], json!([["0", "v0"], ["1", "v1"]]));
@@ -129,6 +133,7 @@ async fn a_write_reports_affected_rows_and_makes_no_cursor() {
     let response = call(&server, "execute", q("INSERT INTO n VALUES (1)")).await;
 
     assert_eq!(ok(&response)["kind"], "affected");
+    assert!(ok(&response)["elapsed_ms"].as_f64().is_some(), "{response}");
     assert_eq!(ok(&response)["rows"], 1);
     assert!(ok(&response).get("cursor").is_none());
 }

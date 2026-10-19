@@ -27,7 +27,7 @@ Ranh giới statement do chính driver quyết định. Chạy hoàn toàn async
 
 ## Buffer kết quả
 
-Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Mỗi trang 20 dòng (`setup{ page_size }`); trang kế tải bằng `<leader>rm` chứ không tự tải khi cuộn (`setup{ auto_load_more = true }` để như cũ). Query chạy lâu: thanh trên cùng của cửa sổ kết quả hiện spinner + thời gian + cách huỷ.
+Dòng cuối cho biết số dòng và **thời gian database chạy câu lệnh** (`20/5000 rows · 123ms`; câu `UPDATE`/`DELETE`… là `N row(s) affected · 8ms`). Đó là thời gian server đo quanh lời gọi database — không gồm đường truyền socket hay việc vẽ lại — nên đáng tin hơn thời gian bạn cảm nhận được; statusline cũng dùng con số này. Là buffer Neovim thường (`j`/`k`/`gg`/`G`, `/`...). Mỗi trang 20 dòng (`setup{ page_size }`); trang kế tải bằng `<leader>rm` chứ không tự tải khi cuộn (`setup{ auto_load_more = true }` để như cũ). Query chạy lâu: thanh trên cùng của cửa sổ kết quả hiện spinner + thời gian + cách huỷ.
 
 | Phím | Việc |
 |---|---|
