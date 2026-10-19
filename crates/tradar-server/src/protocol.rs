@@ -36,7 +36,7 @@ pub const APP_ERROR: i64 = -32000;
 /// minor bump had this scheme existed from the start -- this is the first
 /// breaking-change-shaped line in the wire surface's history, which is
 /// exactly why it's `(1, 0)` and not `(0, 1)`.
-pub const PROTOCOL_VERSION: (u32, u32) = (1, 4);
+pub const PROTOCOL_VERSION: (u32, u32) = (1, 5);
 
 pub struct RpcError {
     pub code: i64,
@@ -270,7 +270,8 @@ impl StoredResult {
 }
 
 /// `{"table": "t", "key": {"id": "1"}, "change": {"set": {"column": "name", "value": "x"}}}`
-/// or `"change": "delete"`. The key is an object, not pairs, because a
+/// (`set` may also be a list of `{column, value}` for several cells of the
+/// row at once) or `"change": "delete"`. The key is an object, not pairs, because a
 /// column name can only appear once in a row's key anyway.
 pub fn parse_row_edit(params: &Value) -> Result<RowEdit, RpcError> {
     let table = params
@@ -296,6 +297,33 @@ pub fn parse_row_edit(params: &Value) -> Result<RowEdit, RpcError> {
             let set = object
                 .get("set")
                 .ok_or_else(|| RpcError::invalid("`change` must be \"delete\" or {set: {...}}"))?;
+            // `set` is one `{column, value}` or a list of them (a row's
+            // several changed cells, applied as one statement).
+            if let Some(list) = set.as_array() {
+                let pairs = list
+                    .iter()
+                    .map(|item| {
+                        let column = item.get("column").and_then(Value::as_str);
+                        let value = item.get("value").and_then(Value::as_str);
+                        match (column, value) {
+                            (Some(column), Some(value)) => {
+                                Ok((column.to_string(), value.to_string()))
+                            }
+                            _ => Err(RpcError::invalid(
+                                "each `change.set` entry needs string `column` and `value`",
+                            )),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, RpcError>>()?;
+                if pairs.is_empty() {
+                    return Err(RpcError::invalid("`change.set` must not be empty"));
+                }
+                return Ok(RowEdit {
+                    table,
+                    key,
+                    change: RowChange::SetValues(pairs),
+                });
+            }
             let column = set.get("column").and_then(Value::as_str);
             let value = set.get("value").and_then(Value::as_str);
             match (column, value) {

@@ -84,3 +84,4 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`redis-quoting-statusline-2026-10-26.md`](redis-quoting-statusline-2026-10-26.md) — Redis nhận giá trị có dấu cách trong nháy (`SET k "a b"`); statusline đúng connection trong buffer kết quả, cờ sửa chưa commit, badge `tx` tức thì
 - [`grpc-request-skeleton-2026-10-27.md`](grpc-request-skeleton-2026-10-27.md) — buffer request gRPC điền sẵn khung từ message đầu vào (`grpc.skeleton`, protocol 1.4)
 - [`cancel-reconnect-fixes-2026-10-28.md`](cancel-reconnect-fixes-2026-10-28.md) — huỷ query chậm báo `cancelled` thay vì lỗi (`biased` select), plugin tự kết nối lại và lặp một lần khi server đã khởi động lại
+- [`update-multi-cell-2026-10-29.md`](update-multi-cell-2026-10-29.md) — các ô đổi của một dòng gộp thành một câu `UPDATE` (`RowChange::SetValues`, protocol 1.5; SQL, Cassandra, Mongo, ES)

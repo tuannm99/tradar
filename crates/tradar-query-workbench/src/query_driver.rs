@@ -404,7 +404,14 @@ pub struct RowEdit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowChange {
-    SetValue { column: String, value: String },
+    SetValue {
+        column: String,
+        value: String,
+    },
+    /// Several columns of the one row in a single statement (the grid's
+    /// `:w` sends a row's changed cells together, so the row changes
+    /// atomically and costs one statement instead of one per cell).
+    SetValues(Vec<(String, String)>),
     DeleteRow,
 }
 
@@ -440,6 +447,18 @@ pub fn build_sql_edit(edit: &RowEdit) -> String {
             "UPDATE {table} SET {} = {} WHERE {where_clause}",
             quote_identifier(column),
             sql_literal(value)
+        ),
+        RowChange::SetValues(pairs) => format!(
+            "UPDATE {table} SET {} WHERE {where_clause}",
+            pairs
+                .iter()
+                .map(|(column, value)| format!(
+                    "{} = {}",
+                    quote_identifier(column),
+                    sql_literal(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         RowChange::DeleteRow => format!("DELETE FROM {table} WHERE {where_clause}"),
     }
@@ -2091,6 +2110,20 @@ mod tests {
         assert_eq!(
             sql,
             "INSERT INTO \"public\".\"users\" (\"name\", \"nickname\") VALUES ('O''Brien', NULL)"
+        );
+    }
+
+    #[test]
+    fn several_columns_of_a_row_become_one_update() {
+        let sql = build_sql_edit(&RowEdit {
+            table: "users".to_string(),
+            key: key(&[("id", "7")]),
+            change: RowChange::SetValues(key(&[("name", "O'Brien"), ("nickname", "NULL")])),
+        });
+
+        assert_eq!(
+            sql,
+            "UPDATE \"users\" SET \"name\" = 'O''Brien', \"nickname\" = NULL WHERE \"id\" = '7'"
         );
     }
 

@@ -1429,7 +1429,8 @@ end
 
 --- Asks the server for the statement of every change in `d` (a
 --- `gridedit.diff`), in the order they should run -- updates, deletes,
---- inserts -- and calls `cb(statements, counts)`; nothing is run.
+--- inserts, one `UPDATE` per changed row -- and calls
+--- `cb(statements, counts)`; nothing is run.
 local function build_statements(r, d, cols, rows, key_idx, cb)
   local e = r.edit
   local jobs, counts = {}, { update = 0, delete = 0, insert = 0 }
@@ -1447,10 +1448,17 @@ local function build_statements(r, d, cols, rows, key_idx, cb)
     if not key then return notify(('cannot address row %d: key `%s` is NULL'):format(u.row, bad), vim.log.levels.ERROR) end
     local changed = vim.tbl_keys(u.cells)
     table.sort(changed)
-    for _, c in ipairs(changed) do
-      counts.update = counts.update + 1
-      jobs[#jobs + 1] = { connection = r.conn, table = e.table, key = key, change = { set = { column = cols[c], value = u.cells[c] } } }
+    -- A row's changed cells are one statement: the row changes atomically,
+    -- and a single cell keeps the original (older-server-friendly) shape.
+    local set
+    if #changed == 1 then
+      set = { column = cols[changed[1]], value = u.cells[changed[1]] }
+    else
+      set = {}
+      for _, c in ipairs(changed) do set[#set + 1] = { column = cols[c], value = u.cells[c] } end
     end
+    counts.update = counts.update + 1
+    jobs[#jobs + 1] = { connection = r.conn, table = e.table, key = key, change = { set = set } }
   end
   for _, x in ipairs(d.deletes) do
     local key, bad = key_of(x.row)

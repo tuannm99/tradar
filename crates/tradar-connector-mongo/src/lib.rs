@@ -800,6 +800,18 @@ impl QueryDriver for MongoDriver {
                 mongo_field_key(column),
                 mongo_value_literal(value)
             ),
+            query_driver::RowChange::SetValues(pairs) => format!(
+                "db.{collection}.updateOne({filter}, {{$set: {{{}}}}})",
+                pairs
+                    .iter()
+                    .map(|(column, value)| format!(
+                        "{}: {}",
+                        mongo_field_key(column),
+                        mongo_value_literal(value)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             query_driver::RowChange::DeleteRow => {
                 format!("db.{collection}.deleteOne({filter})")
             }
@@ -1879,6 +1891,29 @@ mod tests {
 
     fn id_key(id: &str) -> Vec<(String, String)> {
         vec![("_id".to_string(), id.to_string())]
+    }
+
+    #[test]
+    fn edit_sql_set_values_puts_every_field_in_one_set() {
+        let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+
+        let edit = query_driver::RowEdit {
+            table: "users".to_string(),
+            key: id_key("ObjectId(\"507f1f77bcf86cd799439011\")"),
+            change: query_driver::RowChange::SetValues(vec![
+                ("name".to_string(), "Ada".to_string()),
+                ("age".to_string(), "36".to_string()),
+            ]),
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some(
+                "db.users.updateOne({_id: ObjectId(\"507f1f77bcf86cd799439011\")}, \
+                 {$set: {name: \"Ada\", age: 36}})"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
