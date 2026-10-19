@@ -157,12 +157,21 @@ fn shell_escape_single_quoted(s: &str) -> String {
 /// just comes back as `{"_id": ...}` alone rather than disappearing.
 fn unwrap_search_hits(json: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
     let hits = json.get("hits")?.get("hits")?.as_array()?;
+    // A search over several indices (`logs-*`, `a,b`) mixes hits whose `_id`
+    // alone does not say where they live, so `_index` is kept then. A
+    // single-index search leaves it out -- every row would repeat it.
+    let mut indices = hits.iter().filter_map(|hit| hit.get("_index"));
+    let first = indices.next();
+    let several_indices = indices.any(|index| Some(index) != first);
     Some(
         hits.iter()
             .map(|hit| {
                 let mut doc = serde_json::Map::new();
                 if let Some(id) = hit.get("_id") {
                     doc.insert("_id".to_string(), id.clone());
+                }
+                if several_indices && let Some(index) = hit.get("_index") {
+                    doc.insert("_index".to_string(), index.clone());
                 }
                 if let Some(serde_json::Value::Object(source)) = hit.get("_source") {
                     doc.extend(source.clone());
@@ -980,6 +989,21 @@ mod tests {
             vec![
                 serde_json::json!({"_id": "1", "title": "a"}),
                 serde_json::json!({"_id": "2", "title": "b"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn hits_from_several_indices_keep_their_index() {
+        let mixed = serde_json::json!({"hits": {"hits": [
+            {"_id": "1", "_index": "logs-1", "_source": {"m": "a"}},
+            {"_id": "1", "_index": "logs-2", "_source": {"m": "b"}},
+        ]}});
+        assert_eq!(
+            unwrap_search_hits(&mixed).unwrap(),
+            vec![
+                serde_json::json!({"_id": "1", "_index": "logs-1", "m": "a"}),
+                serde_json::json!({"_id": "1", "_index": "logs-2", "m": "b"}),
             ]
         );
     }

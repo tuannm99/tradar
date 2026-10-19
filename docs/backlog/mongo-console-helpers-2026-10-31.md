@@ -28,3 +28,7 @@ Phản hồi "`.sort` chưa ăn index": không có cách nào kiểm tra, và `f
 ## Bổ sung: Mongo/ES mặc định hiện JSON
 
 Kết quả `documents` (Mongo, Elasticsearch, Redis) giờ mở ở dạng JSON; `<leader>rv` sang bảng để sửa ô/xoá dòng; `setup{ documents_view = 'table' }` đổi mặc định. Thay cho luật tự đoán trước đó (một document lồng nhau → JSON).
+
+## Bổ sung: `_index` cho search nhiều index
+
+`unwrap_search_hits` giữ `_index` khi các hit đến từ nhiều hơn một index (`logs-*`, `a,b`); search một index vẫn như cũ (không lặp `_index` ở mọi dòng, lưới sửa được không đổi). Test `hits_from_several_indices_keep_their_index`.
