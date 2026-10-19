@@ -22,6 +22,7 @@ Dạng `db.<collection>.<method>(<args>)`. Hỗ trợ `find` (kèm projection, v
 - Dấu `;` ở cuối câu được chấp nhận như trong mongosh (`db.users.find();`).
 - **Lệnh console** (không cần collection): `use <db>` đổi database đang thao tác (`target` không cần kèm `/db`); `show dbs` / `show databases`; `show collections` / `show tables`; `show users`; `show roles`; `db` (tên database hiện tại). Các `show` khác báo lỗi và gợi ý danh sách trên.
 - **Lời gọi cấp database**: `db.getName()`, `db.getCollectionNames()`, `db.getCollectionInfos()`, `db.stats()`, `db.version()`, `db.serverStatus()`, `db.runCommand({…})`, `db.adminCommand({…})`. Danh sách trả về là một giá trị mảng; `runCommand`/`adminCommand` trả document phản hồi của server.
+- **Phương thức collection khác**: `distinct("field", {filter})` (mỗi giá trị một dòng cột `value`), `getIndexes()` (cột `name`/`key`/`unique`), `estimatedDocumentCount()`. Không dùng chain và không sửa-tại-chỗ được.
 - `db.getCollection("tên-lạ").find(…)` dùng cho collection có tên không phải định danh thường.
 - Câu lệnh trải nhiều dòng được hiểu đúng: dòng bắt đầu bằng `db`, `db.`, `use`, `show` mở câu mới, dòng khác nối vào câu phía trên.
 - `find`/`aggregate` dừng ở 10.000 document đầu và báo "truncated" nếu còn nhiều hơn; `.count()` vẫn trả số thật.

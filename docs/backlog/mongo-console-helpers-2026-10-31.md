@@ -8,3 +8,7 @@ Chỉ `use` và `show dbs` chạy được; `show collections`, `db.getCollectio
 - `starts_mongo_statement` nhận `show ...` và `db` trơn nên nhiều lệnh trên nhiều dòng tách đúng.
 - Kiểm chứng: unit test phân tích (alias, `;`, comment, lỗi `show` lạ, db vs collection, `getCollection`, tách câu). **Chưa chạy được trên Mongo thật** (không kéo được image Docker); đã thêm test Docker `execute_runs_the_console_helpers_against_a_real_mongo` (chưa chạy) — chạy `make test-mongo` trước khi tin vào phần thực thi.
 - Chưa làm: `show profile`/`show log`, `db.getSiblingDB`, `db.<coll>.getIndexes()/distinct/...` (method cấp collection).
+
+## Bổ sung: `distinct`, `getIndexes`, `estimatedDocumentCount`
+
+Thêm vào `run_method` (không chain, không editable). Chỉ unit-test phần parse; phần thực thi chưa chạy trên Mongo thật (Docker Hub 429 trong sandbox).
