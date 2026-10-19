@@ -698,3 +698,43 @@ async fn cancelling_a_running_query_reports_cancelled_not_the_drivers_interrupt_
         );
     }
 }
+
+#[tokio::test]
+async fn edit_sql_accepts_several_cells_of_a_row_as_one_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+
+    let response = call(
+        &server,
+        "edit.sql",
+        json!({
+            "connection": "local", "table": "n", "key": {"id": "1"},
+            "change": {"set": [
+                {"column": "v", "value": "new"},
+                {"column": "w", "value": "NULL"},
+            ]},
+        }),
+    )
+    .await;
+    assert_eq!(
+        ok(&response)["sql"],
+        "UPDATE \"n\" SET \"v\" = 'new', \"w\" = NULL WHERE \"id\" = '1'"
+    );
+
+    let empty = call(
+        &server,
+        "edit.sql",
+        json!({"connection": "local", "table": "n", "key": {"id": "1"}, "change": {"set": []}}),
+    )
+    .await;
+    assert!(empty.get("error").is_some(), "{empty}");
+
+    let malformed = call(
+        &server,
+        "edit.sql",
+        json!({"connection": "local", "table": "n", "key": {"id": "1"},
+               "change": {"set": [{"column": "v"}]}}),
+    )
+    .await;
+    assert!(malformed.get("error").is_some(), "{malformed}");
+}

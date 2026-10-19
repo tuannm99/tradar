@@ -400,6 +400,18 @@ fn build_cql_edit(edit: &query_driver::RowEdit) -> String {
             query_driver::quote_identifier(column),
             cql_value_literal(value)
         ),
+        query_driver::RowChange::SetValues(pairs) => format!(
+            "UPDATE {table} SET {} WHERE {where_clause}",
+            pairs
+                .iter()
+                .map(|(column, value)| format!(
+                    "{} = {}",
+                    query_driver::quote_identifier(column),
+                    cql_value_literal(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         query_driver::RowChange::DeleteRow => format!("DELETE FROM {table} WHERE {where_clause}"),
     }
 }
@@ -815,6 +827,31 @@ mod tests {
         // Not uuid-shaped (wrong group lengths) -- quoted, not passed
         // through as if it were one.
         assert_eq!(cql_value_literal("1234-56-78"), "'1234-56-78'");
+    }
+
+    #[test]
+    fn edit_sql_sets_several_columns_in_one_update() {
+        let driver = CassandraDriver::new("127.0.0.1:9042");
+        let edit = query_driver::RowEdit {
+            table: "demo.events".to_string(),
+            key: vec![(
+                "id".to_string(),
+                "123e4567-e89b-12d3-a456-426614174000".to_string(),
+            )],
+            change: query_driver::RowChange::SetValues(vec![
+                ("count".to_string(), "7".to_string()),
+                ("label".to_string(), "it's".to_string()),
+            ]),
+        };
+
+        assert_eq!(
+            driver.edit_sql(&edit),
+            Some(
+                "UPDATE \"demo\".\"events\" SET \"count\" = 7, \"label\" = 'it''s' WHERE \"id\" = \
+                 123e4567-e89b-12d3-a456-426614174000"
+                    .to_string()
+            )
+        );
     }
 
     #[test]

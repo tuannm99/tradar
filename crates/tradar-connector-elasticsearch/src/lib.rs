@@ -229,6 +229,24 @@ fn es_infer_value(value: &str) -> serde_json::Value {
 /// gives `{"customer": {"name": v}}`. A bare `path` with no dot gives
 /// `{path: v}` unchanged. See `edit_sql`'s doc comment for why a dotted ES
 /// column name has to become real nesting rather than a literal flat key.
+/// Deep-merges `patch` into `target` (objects merge key by key, anything else
+/// is replaced) -- how two dotted paths under one parent share its object.
+fn merge_json(target: &mut serde_json::Value, patch: serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(into), serde_json::Value::Object(from)) => {
+            for (key, value) in from {
+                match into.get_mut(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => {
+                        into.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, patch) => *target = patch,
+    }
+}
+
 fn nest_dotted_path(path: &str, value: serde_json::Value) -> serde_json::Value {
     path.rsplit('.').fold(value, |acc, segment| {
         let mut map = serde_json::Map::new();
@@ -508,6 +526,19 @@ impl QueryDriver for ElasticsearchDriver {
         Some(match &edit.change {
             query_driver::RowChange::SetValue { column, value } => {
                 let doc = nest_dotted_path(column, es_infer_value(value));
+                let body = serde_json::json!({ "doc": doc });
+                format!(
+                    "POST {index}/_update/{id}?refresh=true\n{}",
+                    serde_json::to_string_pretty(&body).unwrap_or_default()
+                )
+            }
+            query_driver::RowChange::SetValues(pairs) => {
+                // One partial document with every field, nested paths merged
+                // (`a.b` and `a.c` both land inside the same `a` object).
+                let mut doc = serde_json::Value::Object(serde_json::Map::new());
+                for (column, value) in pairs {
+                    merge_json(&mut doc, nest_dotted_path(column, es_infer_value(value)));
+                }
                 let body = serde_json::json!({ "doc": doc });
                 format!(
                     "POST {index}/_update/{id}?refresh=true\n{}",
@@ -1000,6 +1031,30 @@ mod tests {
         assert_eq!(
             driver.edit_sql(&edit),
             Some("DELETE my-index/_doc/abc123?refresh=true".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_sql_set_values_merges_dotted_paths_under_one_parent() {
+        let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+        let edit = query_driver::RowEdit {
+            table: "my-index".to_string(),
+            key: vec![("_id".to_string(), "1".to_string())],
+            change: query_driver::RowChange::SetValues(vec![
+                ("customer.name".to_string(), "Ada".to_string()),
+                ("customer.vip".to_string(), "true".to_string()),
+                ("views".to_string(), "9".to_string()),
+            ]),
+        };
+
+        let statement = driver.edit_sql(&edit).unwrap();
+        let (method, path, body) = parse_query(&statement).unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "my-index/_update/1?refresh=true");
+        let body: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"doc": {"customer": {"name": "Ada", "vip": true}, "views": 9}})
         );
     }
 
