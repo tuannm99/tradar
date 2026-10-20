@@ -77,6 +77,39 @@ ctx.attach_results = function(buf)
     local value = tostring(rows[row][col] or '')
     show_help(vim.split(value, '\n', { plain = true }))
   end, 'preview the full value of this cell')
+  -- A plain vim yank copies what is on screen, `…` included. Put the full
+  -- text of any cut cell the yank covered into the register instead
+  -- (`gyc` / `gyr` already do, from the raw rows; this is for `yy`, `y$`,
+  -- visual `y`...). Block-wise yanks are left as they are.
+  vim.api.nvim_create_autocmd('TextYankPost', {
+    buffer = buf,
+    callback = function()
+      local ev = vim.v.event
+      if ev.operator ~= 'y' or ev.regtype:byte() == 22 then return end
+      local text = table.concat(ev.regcontents, '\n')
+      if not text:find('…', 1, true) then return end
+      local cols, rows, widths = ctx.grid_of(state.result)
+      if not cols or ctx.dirty() then return end
+      local a, b = vim.api.nvim_buf_get_mark(buf, '['), vim.api.nvim_buf_get_mark(buf, ']')
+      local lines, changed = {}, false
+      for l = a[1], b[1] do
+        local line = vim.api.nvim_buf_get_lines(buf, l - 1, l, false)[1] or ''
+        local s, e = 1, #line
+        if ev.regtype == 'v' then
+          if l == a[1] then s = a[2] + 1 end
+          if l == b[1] then e = b[2] + #(vim.fn.strcharpart(line:sub(b[2] + 1), 0, 1)) end
+        end
+        local row = rows[l - 2]
+        local fixed = row and render.expand_truncated(line, row, widths, s, e)
+        lines[#lines + 1] = fixed or line:sub(s, e)
+        if fixed and fixed ~= line:sub(s, e) then changed = true end
+      end
+      if not changed then return end
+      local reg = ev.regname ~= '' and ev.regname or '"'
+      vim.fn.setreg(reg, lines, ev.regtype)
+      if vim.o.clipboard:find('unnamed', 1, true) then pcall(vim.fn.setreg, '+', lines, ev.regtype) end
+    end,
+  })
   map('n', 'q', function()
     local win = vim.fn.bufwinid(buf)
     if win ~= -1 then vim.api.nvim_win_close(win, true) end
