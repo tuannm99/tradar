@@ -62,7 +62,7 @@ Connector dạng query: `QueryEngine` (trong `tradar-query-workbench`) implement
 
 ## Trait `QueryDriver`
 
-Tám connector dạng query (Postgres, MySQL, SQLite, MongoDB, Elasticsearch, Redis, Cassandra, ClickHouse) implement chung một trait (`crates/tradar-query-workbench/src/query_driver.rs`):
+Tám connector dạng query (Postgres, MySQL, SQLite, MongoDB, Elasticsearch, Redis, Cassandra, ClickHouse) implement chung một trait (`crates/tradar-query-workbench/src/query_driver.rs`; kiểu dữ liệu, `fetch`, `edit`, `snippet`, `completion`... nằm trong các module con cùng thư mục, re-export qua `query_driver::*`):
 
 ```rust
 #[async_trait]
@@ -110,9 +110,9 @@ Khai báo một connector *có thể làm gì* mà không hardcode danh tính �
 nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar-server  ──>  QueryDriver  ──>  database
 ```
 
-`tradar-server` phụ thuộc `tradar-core`/`tradar-connector-spi`/`tradar-query-workbench` + các connector crate có `QueryDriver` qua feature (cùng tên feature `tradar-app` dùng). `gRPC`/`Kafka`/`Socket`/`RabbitMQ`/`HTTP` không đi qua `registry`/`QueryDriver` (không có ngôn ngữ query) — mỗi cái sống trong module riêng (`grpc.rs`/`kafka.rs`/`socket.rs`/`rabbitmq.rs`/`http.rs`), **không tái dùng connector crate TUI tương ứng** (shape `Session` của TUI dựng quanh `tick()` cho vòng lặp vẽ, không hợp một server JSON-RPC thuần), tự nói thẳng với client library hoặc (RabbitMQ/HTTP) tự gọi `reqwest`.
+`tradar-server` phụ thuộc `tradar-core`/`tradar-connector-spi`/`tradar-query-workbench` + các connector crate có `QueryDriver` qua feature (cùng tên feature `tradar-app` dùng). `gRPC`/`Kafka`/`Socket`/`RabbitMQ`/`HTTP` không đi qua `registry`/`QueryDriver` (không có ngôn ngữ query) — mỗi cái sống trong module riêng (`grpc.rs` + thư mục `grpc/`, `kafka.rs`/`socket.rs`/`rabbitmq.rs`/`http.rs`), **không tái dùng connector crate TUI tương ứng** (shape `Session` của TUI dựng quanh `tick()` cho vòng lặp vẽ, không hợp một server JSON-RPC thuần), tự nói thẳng với client library hoặc (RabbitMQ/HTTP) tự gọi `reqwest`.
 
-Mỗi module implement trait `Extension` (`extension.rs`): tự giữ state của mình, trả lời các method `<driver>.*`, báo `is_connected` cho `connections.list`, tự dọn khi client ngắt kết nối (`client_disconnected`) và tự nhận `cancel` cho call đang chạy. `server.rs` chỉ route theo tiền tố method tới extension tương ứng — không có field, nhánh dispatch hay feature gate riêng cho từng connector; danh sách extension (và feature gate của chúng) nằm đúng một chỗ, `extension::all()`. Thêm một connector kiểu này = một module mới + một dòng trong `extension::all()`, không sửa `server.rs`.
+Mỗi module implement trait `Extension` (`extension.rs`): tự giữ state của mình, trả lời các method `<driver>.*`, báo `is_connected` cho `connections.list`, tự dọn khi client ngắt kết nối (`client_disconnected`) và tự nhận `cancel` cho call đang chạy. `server.rs` (cùng `server/connections|query|editing.rs`) chỉ route theo tiền tố method tới extension tương ứng — không có field, nhánh dispatch hay feature gate riêng cho từng connector; danh sách extension (và feature gate của chúng) nằm đúng một chỗ, `extension::all()`. Thêm một connector kiểu này = một module mới + một dòng trong `extension::all()`, không sửa `server.rs`.
 
 **Transport.** Mỗi dòng là một JSON-RPC 2.0 request/response (không batch). Request trên cùng kết nối chạy đồng thời (mỗi cái một task), reply có thể tới không theo thứ tự gửi — client ghép theo `id`. Socket mặc định `$XDG_RUNTIME_DIR/tradar/server.sock`, thư mục `0700`, socket `0600`.
 

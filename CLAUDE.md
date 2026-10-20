@@ -16,6 +16,8 @@ Cargo workspace; `cargo run`/`build`/`test` need no `-p` (`default-members = ["c
 - `tradar-connector-<name>` ×12: `postgres mysql sqlite mongo elasticsearch redis cassandra clickhouse` implement `QueryDriver`; `kafka rabbitmq http socket` implement `Connector`/`Session` directly. gRPC lives only in `tradar-server` (no TUI screen).
 - `tradar-app` (TUI) and `tradar-server` (headless server).
 
+Large crates are split by topic (e.g. `QueryDriver` in `query_driver/*`, Mongo in `shell|run|driver|snippets|...`, server in `grpc/` and `server/`, Neovim plugin in `nvim/lua/tradar/*` sharing `ctx.lua`); keep new code in the matching module and tests beside it (`tests.rs` / `tests/`) rather than growing `lib.rs`.
+
 Connectors are gated by Cargo features named after `ConnectorDescriptor::id`; `default` enables all. Slim build: `cargo build -p tradar-app --no-default-features --features mongo,elasticsearch` (or `make build-slim FEATURES=…`) — skips e.g. `rdkafka`, which needs `cmake`/`gcc`/`libcurl-dev`.
 
 ## Rules that matter

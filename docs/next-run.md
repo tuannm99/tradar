@@ -51,7 +51,7 @@ code.
   trả về trước khi `.await` một operation mạng thật, `mongodb::Client::with_uri_str`
   vào một địa chỉ không ai lắng nghe vẫn xây được `Collection` handle an
   toàn (driver connect lười) — xem `unreachable_collection()` trong
-  `crates/tradar-connector-mongo/src/lib.rs`'s test module làm ví dụ.
+  `crates/tradar-connector-mongo/src/tests.rs` làm ví dụ.
 - Container sandbox này thiếu sẵn `libcurl4-openssl-dev` (Kafka connector
   cần để build `librdkafka` qua cmake) — `apt-get install -y
   libcurl4-openssl-dev` trước khi build nếu gặp lỗi `curl/curl.h: No such
