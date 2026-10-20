@@ -31,6 +31,7 @@
 **Đã kiểm tra, ổn:** huỷ query chạy lâu (`<leader>rx`) trả về trong ~1 ms và query kế tiếp chạy ngay (4 ms); lỗi cú pháp hiện đúng vị trí; DML báo `N row(s) affected`.
 
 **ClickHouse 403 dù đúng user/password (đã sửa):** `parse_target` lấy `Url::username()/password()` — trả về dạng *còn mã hoá phần trăm* (`p%40ss`) — rồi gửi nguyên làm `?user=&password=`, nên mật khẩu có ký tự đặc biệt tới server sai và ClickHouse trả `403 … AUTHENTICATION_FAILED`. Giờ giải mã phần trăm và gửi bằng HTTP Basic (mật khẩu không nằm trong URL/log). Tái hiện bằng server HTTP giả lập; test `parse_target_decodes_a_percent_encoded_user_and_password`. Cùng lỗi ở RabbitMQ (`connector-rabbitmq` + `tradar-server/src/rabbitmq.rs`), sửa cùng cách. Cổng native 9000 không dùng được: connector nói HTTP.
+
 **Độ bền / đồng thời (đã đo, không phải sửa):**
 - Khởi động nguội: nvim tự dựng `tradar-server` + kết nối ~120 ms.
 - Server bị tắt giữa chừng: query kế tiếp tự dựng lại server và chạy (~110 ms), không cần `:TradarRestart`.
