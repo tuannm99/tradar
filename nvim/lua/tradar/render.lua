@@ -48,6 +48,33 @@ function M.display_cell(value, width)
   return vim.trim(pad_or_truncate(cell(value), width))
 end
 
+--- Bytes `s..e` of a painted grid line `line`, with every cell that was cut
+--- to `…` (value wider than its column) given back its full text -- what a
+--- plain vim yank (`yy`, `y$`, visual `y`) should put in the register
+--- instead of the truncated display. `row` is the raw row, `widths` the
+--- painted column widths. Newlines/tabs in a value stay flattened to spaces,
+--- as in the grid (`gyc` yanks the exact value). `nil` when the line does
+--- not split into `#widths` cells.
+function M.expand_truncated(line, row, widths, s, e)
+  local parts = vim.split(line, SEP, { plain = true })
+  if #parts ~= #widths then return nil end
+  local out, pos, off = {}, s, 1
+  for i, part in ipairs(parts) do
+    local ell = off + #part - #'…' -- byte offset of a trailing `…`
+    if part:sub(-#'…') == '…' and ell >= s and ell + #'…' - 1 <= e then
+      local full = cell(row[i] or '')
+      if vim.fn.strdisplaywidth(full) > widths[i] then
+        out[#out + 1] = line:sub(pos, ell - 1)
+        out[#out + 1] = vim.fn.strcharpart(full, math.max(widths[i] - 1, 0))
+        pos = ell + #'…'
+      end
+    end
+    off = off + #part + #SEP
+  end
+  out[#out + 1] = line:sub(pos, e)
+  return table.concat(out)
+end
+
 --- Splits a grid line back into its `ncols` trimmed cell texts; `nil` when
 --- the line does not have exactly that many (a value containing the column
 --- separator, or a separator typed/deleted by hand).

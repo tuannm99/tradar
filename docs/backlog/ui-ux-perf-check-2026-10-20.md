@@ -19,3 +19,5 @@
 - Lỗi database hiện nguyên văn (`error returned from database: (code: 1) no such table: nope`) — đủ dùng.
 
 **Căn phải cột số (đã làm):** `render.number_columns` quyết định cột nào toàn số (bỏ rỗng/`NULL`, số 0 đứng đầu coi là chữ); `pad_or_truncate(.., right)` đệm bên trái; `header_lines`/`row_lines`/`table` nhận/trả `aligns`, lưu ở `r.aligns` (`r.taligns` cho bảng phẳng của documents). Trang nạp thêm chỉ được *hạ* một cột từ số xuống chữ (khi đó vẽ lại như khi cột rộng ra). Sửa/`:w` không đổi vì `gridedit`/`split_line` đã cắt khoảng trắng hai đầu; `rowedit` so header theo đúng `aligns`.
+
+**Copy ô bị cắt `…` (đã làm):** `gy*` đã lấy giá trị gốc, nhưng yank thường của vim (`yy`/`y$`/visual `y`) chép chữ trên màn hình. `TextYankPost` trong buffer kết quả (`resultskeys.lua`) dùng `render.expand_truncated` để thay `…` bằng phần còn lại của giá trị trong register (và `+` nếu `clipboard` có `unnamed*`); bỏ qua yank theo khối và khi lưới có sửa chưa commit.

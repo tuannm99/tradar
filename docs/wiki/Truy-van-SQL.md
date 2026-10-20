@@ -49,6 +49,8 @@ Cột rộng hơn 40 ký tự bị cắt và thêm `…`; dùng `K` hoặc `gyc`
 
 **Căn lề**: cột mà mọi ô (bỏ qua rỗng/`NULL`) là số thì căn phải, kể cả tiêu đề; số có số 0 đứng đầu (`007`, mã bưu chính, id) coi là chữ nên căn trái. Nếu một trang nạp thêm (`<leader>rm`) mang giá trị chữ vào cột đang là số, lưới tự vẽ lại và cột đó căn trái.
 
+**Copy ô dài**: ô rộng hơn cột bị cắt `…` trên màn hình, nhưng yank của vim (`yy`, `y$`, `v…y`, `V…y`) vẫn bỏ **toàn bộ** chữ của ô bị cắt vào register (xuống dòng/tab trong giá trị thành khoảng trắng như trên lưới; yank theo khối `Ctrl-v` không được xử lý). Muốn đúng nguyên giá trị gốc: `gyc` (ô), `gyr` (dòng), `K` (xem trước).
+
 Khi kết quả sửa được, lưới là một buffer sửa được như mọi buffer khác: gõ đè ô (`cw`, `ci"`…), xoá dòng (`dd`, `:g/pat/d`), thêm dòng (`o` / `yyp` rồi gõ giá trị), `:s`, macro, `u`/`Ctrl-r`… Chưa có gì chạy xuống DB cho tới khi bạn `:w`:
 
 1. `:w` so lưới với các dòng đã vẽ và mở **buffer xem trước** `tradar://commit` liệt kê mọi câu `UPDATE` / `DELETE` / `INSERT` (do server sinh, thứ tự: update → delete → insert).
