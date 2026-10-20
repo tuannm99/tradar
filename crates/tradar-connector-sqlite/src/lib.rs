@@ -278,36 +278,56 @@ impl QueryDriver for SqliteDriver {
                 .fetch_all(pool)
                 .await?;
 
-        // SQLite has no information_schema, so columns come from a
-        // `PRAGMA` per table. That's one round trip each, which is fine
-        // against a local file -- and there's no join to fetch them all at
-        // once the way Postgres has.
+        // SQLite has no information_schema, so columns and foreign keys come
+        // from the table-valued `pragma_*` functions. Joined against
+        // `sqlite_master` that is one query each for the whole database, not
+        // one round trip per table -- the difference between ~3 s and ~0.1 s
+        // for a few thousand tables, paid on every connect and `snippet`.
+        let mut all_columns: std::collections::HashMap<String, Vec<(String, String, i64)>> =
+            std::collections::HashMap::new();
+        // `pk` is 0 for an ordinary column and 1-based position within the
+        // primary key otherwise -- so any non-zero means "part of the key",
+        // which is what the results grid needs to address a row it wants to
+        // change.
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT m.name, p.name, p.type, p.pk \
+             FROM sqlite_master m, pragma_table_info(m.name) p \
+             WHERE m.type = 'table' ORDER BY m.rowid, p.cid",
+        )
+        .fetch_all(pool)
+        .await?;
+        for (table, name, type_name, pk) in rows {
+            all_columns
+                .entry(table)
+                .or_default()
+                .push((name, type_name, pk));
+        }
+        // Foreign keys -- `to` is the referenced column, `NULL` when the FK
+        // targets the referenced table's primary key implicitly rather than
+        // naming a column, which this connector doesn't try to resolve
+        // further.
+        let mut all_fks: std::collections::HashMap<String, Vec<(String, String, Option<String>)>> =
+            std::collections::HashMap::new();
+        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT m.name, f.\"from\", f.\"table\", f.\"to\" \
+             FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+             WHERE m.type = 'table' ORDER BY m.rowid, f.id, f.seq",
+        )
+        .fetch_all(pool)
+        .await?;
+        for (table, from, target, to) in rows {
+            all_fks.entry(table).or_default().push((from, target, to));
+        }
+
         let mut schema = Vec::with_capacity(tables.len());
         for (name,) in tables {
-            // `pk` is 0 for an ordinary column and 1-based position within
-            // the primary key otherwise -- so any non-zero means "part of
-            // the key", which is what the results grid needs to address a
-            // row it wants to change.
-            let columns: Vec<(i64, String, String, i64)> =
-                sqlx::query_as("SELECT cid, name, type, pk FROM pragma_table_info($1)")
-                    .bind(&name)
-                    .fetch_all(pool)
-                    .await?;
-            // A second `PRAGMA` for foreign keys -- `to` is the referenced
-            // column, `NULL` when the FK targets the referenced table's
-            // primary key implicitly rather than naming a column, which
-            // this connector doesn't try to resolve further.
-            let fks: Vec<(String, String, Option<String>)> = sqlx::query_as(
-                "SELECT \"from\", \"table\", \"to\" FROM pragma_foreign_key_list($1)",
-            )
-            .bind(&name)
-            .fetch_all(pool)
-            .await?;
+            let columns = all_columns.remove(&name).unwrap_or_default();
+            let fks = all_fks.remove(&name).unwrap_or_default();
             schema.push(SchemaInfo {
                 name,
                 columns: columns
                     .into_iter()
-                    .map(|(_, name, type_name, pk)| {
+                    .map(|(name, type_name, pk)| {
                         let foreign_key = fks
                             .iter()
                             .find(|(from, _, to)| *from == name && to.is_some())
