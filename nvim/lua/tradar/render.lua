@@ -26,18 +26,32 @@ local function cell(value)
   return (tostring(value):gsub('[\r\n\t]', ' '))
 end
 
---- `text` padded to `width`, or truncated-with-`…` if it doesn't fit.
---- Character-count truncation (`strcharpart`), not display-width-exact --
---- a cell dense with double-width (CJK) characters can still overflow
---- `width` by a little; good enough without a wcwidth-aware clipper this
---- codebase doesn't otherwise need.
+--- The longest prefix of `text` that, followed by `…`, fits in `width`
+--- display columns -- by display width, so a cell of double-width (CJK,
+--- emoji) characters cannot push the columns after it out of line. Also
+--- returns how many characters it kept.
+local function cut(text, width)
+  local room = math.max(width - vim.fn.strdisplaywidth('…'), 0)
+  local n = room
+  local prefix = vim.fn.strcharpart(text, 0, n)
+  while n > 0 and vim.fn.strdisplaywidth(prefix) > room do
+    n = n - 1
+    prefix = vim.fn.strcharpart(text, 0, n)
+  end
+  return prefix, n
+end
+
+--- `text` padded to `width`, or truncated-with-`…` if it doesn't fit (the
+--- padding after a cut is only ever the one column a double-width character
+--- could not fill).
 local function pad_or_truncate(text, width, right)
   local w = vim.fn.strdisplaywidth(text)
   if w <= width then
     if right then return string.rep(' ', width - w) .. text end
     return text .. string.rep(' ', width - w)
   end
-  return vim.fn.strcharpart(text, 0, math.max(width - 1, 0)) .. '…'
+  local prefix = cut(text, width)
+  return prefix .. '…' .. string.rep(' ', math.max(width - vim.fn.strdisplaywidth(prefix) - vim.fn.strdisplaywidth('…'), 0))
 end
 
 --- One value as the grid shows it in a column of `width`: whitespace
@@ -60,12 +74,14 @@ function M.expand_truncated(line, row, widths, s, e)
   if #parts ~= #widths then return nil end
   local out, pos, off = {}, s, 1
   for i, part in ipairs(parts) do
-    local ell = off + #part - #'…' -- byte offset of a trailing `…`
-    if part:sub(-#'…') == '…' and ell >= s and ell + #'…' - 1 <= e then
+    local body = part:match('^(.-…)%s*$') -- a cut cell: ends in `…` (+ gap)
+    local ell = body and off + #body - #'…' -- byte offset of that `…`
+    if ell and ell >= s and ell + #'…' - 1 <= e then
       local full = cell(row[i] or '')
       if vim.fn.strdisplaywidth(full) > widths[i] then
+        local _, kept = cut(full, widths[i])
         out[#out + 1] = line:sub(pos, ell - 1)
-        out[#out + 1] = vim.fn.strcharpart(full, math.max(widths[i] - 1, 0))
+        out[#out + 1] = vim.fn.strcharpart(full, kept)
         pos = ell + #'…'
       end
     end

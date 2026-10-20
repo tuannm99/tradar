@@ -21,3 +21,7 @@
 **Căn phải cột số (đã làm):** `render.number_columns` quyết định cột nào toàn số (bỏ rỗng/`NULL`, số 0 đứng đầu coi là chữ); `pad_or_truncate(.., right)` đệm bên trái; `header_lines`/`row_lines`/`table` nhận/trả `aligns`, lưu ở `r.aligns` (`r.taligns` cho bảng phẳng của documents). Trang nạp thêm chỉ được *hạ* một cột từ số xuống chữ (khi đó vẽ lại như khi cột rộng ra). Sửa/`:w` không đổi vì `gridedit`/`split_line` đã cắt khoảng trắng hai đầu; `rowedit` so header theo đúng `aligns`.
 
 **Copy ô bị cắt `…` (đã làm):** `gy*` đã lấy giá trị gốc, nhưng yank thường của vim (`yy`/`y$`/visual `y`) chép chữ trên màn hình. `TextYankPost` trong buffer kết quả (`resultskeys.lua`) dùng `render.expand_truncated` để thay `…` bằng phần còn lại của giá trị trong register (và `+` nếu `clipboard` có `unnamed*`); bỏ qua yank theo khối và khi lưới có sửa chưa commit.
+
+**Cắt ô theo độ rộng hiển thị (đã làm):** `pad_or_truncate` cũ cắt theo *số ký tự* (`strcharpart`), nên ô toàn chữ rộng đôi (CJK, emoji) vượt cột (dòng 89 cột thay vì 49) và đẩy mọi cột sau lệch. Giờ `cut()` lấy tiền tố dài nhất mà cùng `…` vẫn vừa `width` cột hiển thị (có thể chừa 1 cột trống khi gặp ký tự rộng đôi); `expand_truncated` dùng cùng `cut()` nên yank vẫn khôi phục đủ chữ.
+
+**Đo thêm (20.000 dòng × 12 cột, `page_size = 20000`):** vẽ ~2,2 s (chủ yếu Lua dựng 240.000 ô; mặc định `page_size = 20` nên không gặp), chuyển JSON view ~0,6 s, yank/export CSV/JSON 110–220 ms, bảng 500 × 201 cột ~0,5 s.
