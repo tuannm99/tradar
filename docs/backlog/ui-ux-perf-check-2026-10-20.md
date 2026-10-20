@@ -25,3 +25,7 @@
 **Cắt ô theo độ rộng hiển thị (đã làm):** `pad_or_truncate` cũ cắt theo *số ký tự* (`strcharpart`), nên ô toàn chữ rộng đôi (CJK, emoji) vượt cột (dòng 89 cột thay vì 49) và đẩy mọi cột sau lệch. Giờ `cut()` lấy tiền tố dài nhất mà cùng `…` vẫn vừa `width` cột hiển thị (có thể chừa 1 cột trống khi gặp ký tự rộng đôi); `expand_truncated` dùng cùng `cut()` nên yank vẫn khôi phục đủ chữ.
 
 **Đo thêm (20.000 dòng × 12 cột, `page_size = 20000`):** vẽ ~2,2 s (chủ yếu Lua dựng 240.000 ô; mặc định `page_size = 20` nên không gặp), chuyển JSON view ~0,6 s, yank/export CSV/JSON 110–220 ms, bảng 500 × 201 cột ~0,5 s.
+
+**Kết quả rỗng vẫn có tên cột (đã làm):** `SELECT` không khớp dòng nào thì stream không có dòng nào, mà tên cột chỉ đến cùng dòng đầu tiên, nên lưới chỉ hiện 3 dòng trống rồi `0/0 rows`. SQLite/MySQL (đường pool) và Postgres (`run_tracked`, trên chính connection vừa chạy) giờ gọi `describe` (prepare, không chạy lại) khi kết quả rỗng và không có cột; lỗi thì giữ nguyên kết quả cũ. Đường transaction của SQLite/MySQL chưa làm (pool có thể chỉ có một connection, đang bị transaction giữ → `describe` trên pool sẽ treo). Test: `an_empty_select_still_reports_its_column_names`; 2 test transaction của SQLite/Postgres/MySQL đổi kỳ vọng từ `columns: []` sang `["id"]` (Postgres/MySQL cần Docker, chưa chạy được ở sandbox).
+
+**Đã kiểm tra, ổn:** huỷ query chạy lâu (`<leader>rx`) trả về trong ~1 ms và query kế tiếp chạy ngay (4 ms); lỗi cú pháp hiện đúng vị trí; DML báo `N row(s) affected`.

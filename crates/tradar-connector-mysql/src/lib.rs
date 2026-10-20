@@ -192,6 +192,39 @@ where
     })
 }
 
+/// A `SELECT` that matched nothing streams no rows, and the column names
+/// only ever arrive with a row -- so the grid would show no header at all.
+/// Ask the database to describe the statement (prepare, don't run) instead.
+/// Best effort: any failure just leaves the empty result as it was.
+async fn with_empty_columns(
+    pool: &sqlx::Pool<MySql>,
+    query: &str,
+    result: anyhow::Result<QueryResult>,
+) -> anyhow::Result<QueryResult> {
+    match result {
+        Ok(QueryResult::Table {
+            columns,
+            rows,
+            truncated,
+        }) if columns.is_empty() && rows.is_empty() => {
+            let columns = match pool.describe(query).await {
+                Ok(described) => described
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect(),
+                Err(_) => columns,
+            };
+            Ok(QueryResult::Table {
+                columns,
+                rows,
+                truncated,
+            })
+        }
+        other => other,
+    }
+}
+
 #[async_trait]
 impl QueryDriver for MySqlDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -384,7 +417,8 @@ impl QueryDriver for MySqlDriver {
         }
         drop(guard);
         let pool = self.pool.as_ref().expect("connect() must be called first");
-        run(pool, query).await
+        let result = run(pool, query).await;
+        with_empty_columns(pool, query, result).await
     }
 
     fn in_transaction(&self) -> bool {
