@@ -16,5 +16,6 @@
 
 **Còn lại (chưa làm):**
 - `snippet` (mở bảng từ navigator) gọi lại `list_schema()` mỗi lần chỉ để tìm một bảng; với Postgres/MySQL (vài truy vấn) chưa đáng kể, nhưng nên cache schema theo connection nếu gặp schema rất lớn.
-- Cột số căn trái (`134.36424411240122` / `93.8595867742349` lệch hàng thập phân); căn phải cột số sẽ dễ đọc hơn nhưng đụng `gridedit` (ánh xạ ô theo vị trí) nên cần làm riêng, có test.
 - Lỗi database hiện nguyên văn (`error returned from database: (code: 1) no such table: nope`) — đủ dùng.
+
+**Căn phải cột số (đã làm):** `render.number_columns` quyết định cột nào toàn số (bỏ rỗng/`NULL`, số 0 đứng đầu coi là chữ); `pad_or_truncate(.., right)` đệm bên trái; `header_lines`/`row_lines`/`table` nhận/trả `aligns`, lưu ở `r.aligns` (`r.taligns` cho bảng phẳng của documents). Trang nạp thêm chỉ được *hạ* một cột từ số xuống chữ (khi đó vẽ lại như khi cột rộng ra). Sửa/`:w` không đổi vì `gridedit`/`split_line` đã cắt khoảng trắng hai đầu; `rowedit` so header theo đúng `aligns`.

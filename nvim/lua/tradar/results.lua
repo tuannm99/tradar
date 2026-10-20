@@ -87,8 +87,8 @@ end
 --- table or documents shown as a table; nil in the JSON view / other kinds.
 local function grid_of(r)
   if not r then return nil end
-  if r.kind == 'table' and r.view ~= 'json' then return r.columns, r.rows, r.widths end
-  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.trows, r.twidths end
+  if r.kind == 'table' and r.view ~= 'json' then return r.columns, r.rows, r.widths, r.aligns end
+  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.trows, r.twidths, r.taligns end
 end
 
 
@@ -120,7 +120,7 @@ local function paint_results(new_from)
   local r = state.result
   local buf = state.results_buf
 
-  if r.kind == 'table' and r.view ~= 'json' and new_from and r.widths then
+  if r.kind == 'table' and r.view ~= 'json' and new_from and r.widths and r.aligns then
     local new_rows = { unpack(r.rows, new_from) }
     local widths = render.column_widths(r.columns, new_rows, r.widths)
     local grew = false
@@ -130,9 +130,17 @@ local function paint_results(new_from)
         break
       end
     end
+    -- A column that stopped being all-numbers is aligned differently now.
+    local aligns = render.number_columns(r.columns, new_rows, r.aligns)
+    for i, a in ipairs(aligns) do
+      if a ~= r.aligns[i] then
+        grew = true
+        break
+      end
+    end
     if not grew then
       r.spans = render.spans_for(widths)
-      local new_lines = render.row_lines(r.columns, widths, new_rows)
+      local new_lines = render.row_lines(r.columns, widths, new_rows, r.aligns)
       local total = vim.api.nvim_buf_line_count(buf)
       local footer_at = math.max(total - 2, 0)
       vim.list_extend(new_lines, { '', results_title(r) })
@@ -149,10 +157,10 @@ local function paint_results(new_from)
     lines = vim.split(render.json(r.columns, r.rows), '\n', { plain = true })
     lines[#lines] = nil -- the trailing newline
   elseif r.kind == 'table' then
-    lines, r.spans, r.widths = render.table(r.columns, r.rows)
+    lines, r.spans, r.widths, r.aligns = render.table(r.columns, r.rows)
   elseif r.view == 'table' then
     r.tcols, r.trows = render.flatten(r.rows, r.field_order)
-    lines, r.spans, r.twidths = render.table(r.tcols, r.trows)
+    lines, r.spans, r.twidths, r.taligns = render.table(r.tcols, r.trows)
   else
     lines = render.documents(r.rows, r.field_order)
   end

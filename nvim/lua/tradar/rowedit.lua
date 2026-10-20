@@ -293,7 +293,7 @@ end
 function M.write()
   local r = state.result
   local buf = state.results_buf
-  local cols, rows, widths = ctx.grid_of(r)
+  local cols, rows, widths, aligns = ctx.grid_of(r)
   if not cols then return notify('nothing to write here', vim.log.levels.WARN) end
   if not r.edit then return notify(r.edit_reason or 'this result cannot be edited', vim.log.levels.WARN) end
   local key_idx = key_indices(cols, r.edit.keys)
@@ -301,7 +301,7 @@ function M.write()
     return notify(('a key column (%s) is not in this result — select it too'):format(table.concat(r.edit.keys, ', ')), vim.log.levels.WARN)
   end
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local head = render.header_lines(cols, widths)
+  local head = render.header_lines(cols, widths, aligns)
   local n = #lines
   if n < 4 or lines[1] ~= head[1] or lines[2] ~= head[2] or lines[n - 1] ~= '' or lines[n] ~= ctx.results_title(r) then
     return notify('only the data rows can change — the header, rule or footer line was edited (' .. (opts.prefix or '<leader>r') .. 'u reverts)', vim.log.levels.ERROR)

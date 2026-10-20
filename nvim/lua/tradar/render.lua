@@ -31,9 +31,12 @@ end
 --- a cell dense with double-width (CJK) characters can still overflow
 --- `width` by a little; good enough without a wcwidth-aware clipper this
 --- codebase doesn't otherwise need.
-local function pad_or_truncate(text, width)
+local function pad_or_truncate(text, width, right)
   local w = vim.fn.strdisplaywidth(text)
-  if w <= width then return text .. string.rep(' ', width - w) end
+  if w <= width then
+    if right then return string.rep(' ', width - w) .. text end
+    return text .. string.rep(' ', width - w)
+  end
   return vim.fn.strcharpart(text, 0, math.max(width - 1, 0)) .. '…'
 end
 
@@ -53,6 +56,43 @@ function M.split_line(line, ncols)
   if #parts ~= ncols then return nil end
   for i, part in ipairs(parts) do parts[i] = vim.trim(part) end
   return parts
+end
+
+--- A value that reads as a plain number: `12`, `-3.5`, `1e9`. Leading zeros
+--- (`007`, a zip code, an id) stay text -- aligning those as numbers would
+--- be a lie about what they are.
+local function is_number(text)
+  if text:match('^[-+]?0%d') then return false end
+  return text:match('^[-+]?%d[%d.]*$') ~= nil
+    or text:match('^[-+]?%d[%d.]*[eE][-+]?%d+$') ~= nil
+    or text:match('^[-+]?%.%d+$') ~= nil
+end
+
+--- Which columns are right-aligned: a column whose every non-empty, non-NULL
+--- cell is a number (and that has at least one). `prev` is the answer for
+--- the rows painted so far, so an appended page can only *demote* a column
+--- to text (`true` -> `false`), never promote one: the caller repaints when
+--- that happens, the same as when a column outgrows its width.
+function M.number_columns(columns, rows, prev)
+  local aligns = {}
+  for i = 1, #columns do
+    local numeric, seen = prev == nil or prev[i] == true, prev ~= nil and prev[i] == true
+    if numeric then
+      for _, row in ipairs(rows) do
+        local text = cell(row[i] or '')
+        if text ~= '' and text ~= 'NULL' then
+          if is_number(text) then
+            seen = true
+          else
+            numeric = false
+            break
+          end
+        end
+      end
+    end
+    aligns[i] = numeric and seen
+  end
+  return aligns
 end
 
 --- Each column's display width (header vs. every cell in `rows`, whichever
@@ -90,10 +130,10 @@ function M.spans_for(widths)
 end
 
 --- The header name row plus its `─┼─` rule, at `widths`.
-function M.header_lines(columns, widths)
+function M.header_lines(columns, widths, aligns)
   local parts, rule = {}, {}
   for i, name in ipairs(columns) do
-    parts[i] = pad_or_truncate(cell(name), widths[i])
+    parts[i] = pad_or_truncate(cell(name), widths[i], aligns and aligns[i])
     rule[i] = string.rep('─', widths[i])
   end
   return { table.concat(parts, SEP), table.concat(rule, '─┼─') }
@@ -102,12 +142,12 @@ end
 --- One line per row in `rows`, at `widths` -- no header, so a caller
 --- appending only the newest page's rows isn't handed lines it didn't ask
 --- for.
-function M.row_lines(columns, widths, rows)
+function M.row_lines(columns, widths, rows, aligns)
   local out = {}
   for r, row in ipairs(rows) do
     local parts = {}
     for i = 1, #columns do
-      parts[i] = pad_or_truncate(cell(row[i] or ''), widths[i])
+      parts[i] = pad_or_truncate(cell(row[i] or ''), widths[i], aligns and aligns[i])
     end
     out[r] = table.concat(parts, SEP)
   end
@@ -121,9 +161,10 @@ end
 --- (see `attach_results`'s `paint_results`).
 function M.table(columns, rows, prev_widths)
   local widths = M.column_widths(columns, rows, prev_widths)
-  local out = M.header_lines(columns, widths)
-  vim.list_extend(out, M.row_lines(columns, widths, rows))
-  return out, M.spans_for(widths), widths
+  local aligns = M.number_columns(columns, rows)
+  local out = M.header_lines(columns, widths, aligns)
+  vim.list_extend(out, M.row_lines(columns, widths, rows, aligns))
+  return out, M.spans_for(widths), widths, aligns
 end
 
 --- Documents as a table: one column per field, nested objects flattened to
