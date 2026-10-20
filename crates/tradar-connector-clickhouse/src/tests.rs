@@ -13,6 +13,15 @@ fn parse_target_splits_userinfo_path_and_leaves_a_clean_base_url() {
 }
 
 #[test]
+fn parse_target_decodes_a_percent_encoded_user_and_password() {
+    let parsed =
+        parse_target("http://me%40corp:p%40ss%3Aw%2Frd%231%20%25x@127.0.0.1:8123/db").unwrap();
+    assert_eq!(parsed.user.as_deref(), Some("me@corp"));
+    assert_eq!(parsed.password.as_deref(), Some("p@ss:w/rd#1 %x"));
+    assert_eq!(parsed.base_url, "http://127.0.0.1:8123");
+}
+
+#[test]
 fn parse_target_with_no_userinfo_or_path_leaves_them_none() {
     let parsed = parse_target("http://127.0.0.1:8123").unwrap();
 

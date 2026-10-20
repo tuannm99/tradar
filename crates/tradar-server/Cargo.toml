@@ -64,6 +64,7 @@ futures-util = { version = "0.3", optional = true }
 # HTTP (http.rs) shares this same `reqwest`/`serde` -- also no push-channel
 # needed, same reasoning.
 reqwest = { version = "0.12", optional = true, features = ["json"] }
+percent-encoding = { version = "2", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
@@ -103,5 +104,5 @@ kafka = ["dep:rdkafka", "dep:futures-util"]
 # (plain `tokio::net::TcpStream`, already a dependency), so it's a normal
 # default feature rather than opt-in.
 socket = []
-rabbitmq = ["dep:reqwest", "dep:serde"]
+rabbitmq = ["dep:reqwest", "dep:serde", "dep:percent-encoding"]
 http = ["dep:reqwest", "dep:serde"]
