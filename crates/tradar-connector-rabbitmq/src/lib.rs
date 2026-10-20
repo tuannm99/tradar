@@ -99,13 +99,17 @@ pub(crate) fn parse_target(target: &str) -> anyhow::Result<RabbitTarget> {
         .ok_or_else(|| anyhow::anyhow!("'{target}' has no host"))?;
     let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
     let base_url = format!("{}://{host}{port}", url.scheme());
+    // `username()`/`password()` come back still percent-encoded (`p%40ss`
+    // for `p@ss`); sending that as Basic credentials is a wrong password.
+    let decode = |s: &str| {
+        percent_encoding::percent_decode_str(s)
+            .decode_utf8_lossy()
+            .into_owned()
+    };
     let auth = if url.username().is_empty() {
         None
     } else {
-        Some((
-            url.username().to_string(),
-            url.password().unwrap_or("").to_string(),
-        ))
+        Some((decode(url.username()), decode(url.password().unwrap_or(""))))
     };
     let vhost = match url.path().trim_start_matches('/') {
         "" => "%2f".to_string(),

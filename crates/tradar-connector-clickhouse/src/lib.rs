@@ -64,18 +64,13 @@ impl ClickHouseDriver {
 
     fn build_request(&self, sql: &str) -> reqwest::RequestBuilder {
         let mut request = self.client.post(&self.base_url).body(sql.to_string());
-        let mut params: Vec<(&str, &str)> = Vec::new();
         if let Some(database) = &self.database {
-            params.push(("database", database));
+            request = request.query(&[("database", database)]);
         }
+        // HTTP Basic rather than `?user=&password=`: the password stays out
+        // of URLs (server logs, proxies) and needs no query escaping.
         if let Some(user) = &self.user {
-            params.push(("user", user));
-        }
-        if let Some(password) = &self.password {
-            params.push(("password", password));
-        }
-        if !params.is_empty() {
-            request = request.query(&params);
+            request = request.basic_auth(user, self.password.as_deref());
         }
         request
     }
@@ -104,6 +99,7 @@ struct ParsedTarget {
 }
 
 /// Parses a target of the form `http://[user[:password]@]host[:port][/database]`
+/// (percent-encode `@ : / # ?` and spaces in the user/password: `p@ss` -> `p%40ss`)
 /// into a clean base URL plus the pieces ClickHouse's HTTP interface takes
 /// separately (`?database=`/`?user=`/`?password=`) -- into `reqwest::Url`
 /// rather than adding a `url` dependency of this crate's own, since
@@ -111,8 +107,16 @@ struct ParsedTarget {
 fn parse_target(target: &str) -> anyhow::Result<ParsedTarget> {
     let url = reqwest::Url::parse(target)
         .map_err(|e| anyhow::anyhow!("invalid ClickHouse target '{target}': {e}"))?;
-    let user = (!url.username().is_empty()).then(|| url.username().to_string());
-    let password = url.password().map(str::to_string);
+    // `Url::username()`/`password()` hand back the userinfo still
+    // percent-encoded (`p%40ss` for `p@ss`); sending that as-is is a wrong
+    // password, which ClickHouse answers with a 403. Decode it.
+    let decode = |s: &str| {
+        percent_encoding::percent_decode_str(s)
+            .decode_utf8_lossy()
+            .into_owned()
+    };
+    let user = (!url.username().is_empty()).then(|| decode(url.username()));
+    let password = url.password().map(decode);
     let database = url.path().trim_matches('/');
     let database = (!database.is_empty()).then(|| database.to_string());
 

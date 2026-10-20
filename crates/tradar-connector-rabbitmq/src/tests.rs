@@ -13,6 +13,18 @@ fn a_url_with_credentials_and_no_path_defaults_to_the_default_vhost() {
 }
 
 #[test]
+fn a_percent_encoded_user_and_password_are_decoded_for_basic_auth() {
+    let target = parse_target("http://me%40corp:p%40ss%3Aw%2Frd@localhost:15672/%2f").unwrap();
+
+    assert_eq!(
+        target.auth,
+        Some(("me@corp".to_string(), "p@ss:w/rd".to_string()))
+    );
+    // The vhost keeps its encoding: it is spliced into a URL path as is.
+    assert_eq!(target.vhost, "%2f");
+}
+
+#[test]
 fn a_url_with_an_explicit_encoded_default_vhost_is_passed_through() {
     let target = parse_target("http://user:password@localhost:15672/%2f").unwrap();
 

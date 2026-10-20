@@ -22,7 +22,7 @@ Thêm/sửa/xoá được ngay trong connection picker của TUI (`a`/`e`/`d`), 
 | `elasticsearch` | `http://host:9200` |
 | `redis` | `redis://host:6379/0` |
 | `cassandra` | `host:port` trần, vd `127.0.0.1:9042` (không phải URI) |
-| `clickhouse` | `http://[user[:password]@]host[:port][/database]` |
+| `clickhouse` | `http://[user[:password]@]host[:port][/database]` — **cổng HTTP** (8123, hoặc `https://…:8443` với ClickHouse Cloud), không phải cổng native 9000; ký tự đặc biệt trong user/password phải mã hoá phần trăm (`@`→`%40`, `:`→`%3A`, `/`→`%2F`, `#`→`%23`, khoảng trắng→`%20`, `%`→`%25`) |
 | `kafka` | bootstrap servers: `host:port[,host:port...]` |
 | `rabbitmq` | URL tới Management API kèm credentials: `http://user:pass@host:15672/%2f` (`%2f` là vhost mặc định `/`) |
 | `http` | base URL tuỳ chọn (có thể để trống nếu luôn gõ URL đầy đủ) |
