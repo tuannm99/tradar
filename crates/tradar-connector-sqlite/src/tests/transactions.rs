@@ -129,12 +129,10 @@ async fn rollback_closes_the_transaction_and_discards_the_change() {
     let result = driver.execute("SELECT * FROM users").await.unwrap();
     assert_eq!(
         result,
-        // Column names come from the first row streamed back; a select
-        // with nothing to return never sees one, same pre-existing
-        // behavior `a_select_that_matches_nothing_is_still_an_empty_table`
-        // already covers -- not something this change alters.
+        // No rows, but the header still comes through (`describe`) -- see
+        // `an_empty_select_still_reports_its_column_names`.
         QueryResult::Table {
-            columns: vec![],
+            columns: vec!["id".to_string()],
             rows: vec![],
             truncated: false,
         },
@@ -226,10 +224,10 @@ async fn an_uncommitted_insert_is_invisible_to_another_connection() {
     let seen_before_commit = reader.execute("SELECT * FROM users").await.unwrap();
     assert_eq!(
         seen_before_commit,
-        // No column names for a zero-row result -- see the comment in
+        // Zero rows, but still the header -- see the comment in
         // `rollback_closes_the_transaction_and_discards_the_change`.
         QueryResult::Table {
-            columns: vec![],
+            columns: vec!["id".to_string()],
             rows: vec![],
             truncated: false,
         }

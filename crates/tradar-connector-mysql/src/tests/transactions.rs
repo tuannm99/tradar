@@ -70,7 +70,7 @@ async fn an_uncommitted_insert_is_invisible_to_another_connection() {
     assert_eq!(
         seen_before_commit,
         QueryResult::Table {
-            columns: vec![],
+            columns: vec!["id".to_string()],
             rows: vec![],
             truncated: false,
         }
@@ -81,7 +81,7 @@ async fn an_uncommitted_insert_is_invisible_to_another_connection() {
     assert_eq!(
         seen_after_rollback,
         QueryResult::Table {
-            columns: vec![],
+            columns: vec!["id".to_string()],
             rows: vec![],
             truncated: false,
         },

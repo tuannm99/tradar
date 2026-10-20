@@ -76,7 +76,22 @@ impl PostgresDriver {
         {
             *self.current.lock().unwrap() = Some((token, pid));
         }
-        let result = run(&mut *conn, query).await;
+        let mut result = run(&mut *conn, query).await;
+        // A `SELECT` that matched nothing streams no rows, and the column
+        // names only ever arrive with a row -- ask Postgres to describe the
+        // statement (prepare, don't run) so the grid still gets its header.
+        // Best effort: a failure (e.g. several statements) leaves it as is.
+        if let Ok(QueryResult::Table { columns, rows, .. }) = &mut result
+            && columns.is_empty()
+            && rows.is_empty()
+            && let Ok(described) = (&mut *conn).describe(query).await
+        {
+            *columns = described
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect();
+        }
         let mut current = self.current.lock().unwrap();
         if matches!(*current, Some((t, _)) if t == token) {
             *current = None;

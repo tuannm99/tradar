@@ -122,6 +122,31 @@ async fn a_select_that_matches_nothing_is_still_an_empty_table() {
 }
 
 #[tokio::test]
+async fn an_empty_select_still_reports_its_column_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let mut driver = SqliteDriver::new(path.to_str().unwrap());
+    driver.connect().await.unwrap();
+    driver
+        .execute("CREATE TABLE users (id INTEGER, name TEXT)")
+        .await
+        .unwrap();
+
+    let result = driver
+        .execute("SELECT name, id FROM users WHERE id < 0")
+        .await
+        .unwrap();
+
+    match result {
+        QueryResult::Table { columns, rows, .. } => {
+            assert_eq!(columns, vec!["name".to_string(), "id".to_string()]);
+            assert!(rows.is_empty());
+        }
+        other => panic!("expected a table, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn execute_returns_columns_and_rows_for_a_select() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.db");
