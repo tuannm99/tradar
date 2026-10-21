@@ -4,7 +4,7 @@
 //! is the thin unix-socket shell around it.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{Notify, mpsc};
@@ -125,6 +125,8 @@ pub struct Server {
     /// Fired by the `shutdown` method; `main` waits on it next to Ctrl-C.
     shutdown: Arc<Notify>,
     next_client_id: AtomicU64,
+    /// Sockets currently open; see `connected_clients`.
+    open_clients: AtomicUsize,
     /// When this process started -- `version` compares it with the binary on disk.
     started: std::time::SystemTime,
 }
@@ -141,6 +143,7 @@ impl Server {
             extensions: crate::extension::all(),
             shutdown: Arc::new(Notify::new()),
             next_client_id: AtomicU64::new(1),
+            open_clients: AtomicUsize::new(0),
             started: std::time::SystemTime::now(),
         }
     }
@@ -157,12 +160,19 @@ impl Server {
     /// ordinary replies on the same line stream.
     pub fn new_client(&self, outbox: mpsc::UnboundedSender<String>) -> ClientConnection {
         let id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
+        self.open_clients.fetch_add(1, Ordering::Relaxed);
         ClientConnection { id, outbox }
+    }
+
+    /// How many client sockets are open right now.
+    pub fn connected_clients(&self) -> usize {
+        self.open_clients.load(Ordering::Relaxed)
     }
 
     /// Call when a client's socket closes: aborts and forgets every
     /// background subscription it started and never explicitly stopped.
     pub fn client_disconnected(&self, client: &ClientConnection) {
+        self.open_clients.fetch_sub(1, Ordering::Relaxed);
         for extension in &self.extensions {
             extension.client_disconnected(client.id);
         }
@@ -172,13 +182,30 @@ impl Server {
     /// batches and notifications -- every call here wants an answer).
     pub async fn handle(&self, request: Value, client: &ClientConnection) -> Value {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
+        let started = std::time::Instant::now();
+        let mut label = String::new();
         let outcome = match request.get("method").and_then(Value::as_str) {
             None => Err(RpcError::invalid("missing `method`")),
             Some(method) => {
                 let params = request.get("params").cloned().unwrap_or(Value::Null);
+                label = method.to_string();
+                if let Some(connection) = params.get("connection").and_then(Value::as_str) {
+                    label = format!("{method} [{connection}]");
+                }
                 self.dispatch(method, &params, client).await
             }
         };
+        let ms = started.elapsed().as_millis();
+        match &outcome {
+            // Cheap, frequent calls (the background `status` poll, every
+            // completion request, paging) would drown the log at `info`.
+            Ok(_) if is_chatty(&label) => tracing::debug!("{label} ok {ms}ms"),
+            Ok(_) => tracing::info!("{label} ok {ms}ms"),
+            Err(error) => tracing::warn!(
+                "{label} failed {ms}ms: {}",
+                crate::logging::brief(&error.message)
+            ),
+        }
         match outcome {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(error) => json!({
@@ -248,6 +275,15 @@ impl Server {
         };
         extension.handle(rest, params, &ctx).await
     }
+}
+
+/// Methods that run constantly in the background -- logged at `debug` only.
+fn is_chatty(label: &str) -> bool {
+    let method = label.split_once(' ').map_or(label, |(m, _)| m);
+    matches!(
+        method,
+        "status" | "version" | "complete" | "keywords" | "split" | "fetch" | "cursor.close"
+    )
 }
 
 /// `query` without the `--` line comments and `/* */` blocks that precede

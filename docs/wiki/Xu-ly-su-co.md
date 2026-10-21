@@ -21,6 +21,20 @@ cargo build --release -p tradar-server
 
 Cảnh báo này chỉ nhắc, không chặn bạn dùng tiếp. Muốn chắc plugin dùng đúng binary, đặt `setup{ server_cmd = "/đường/dẫn/tradar-server" }`.
 
+## Xem log của server
+
+`:TradarLog` mở file log của `tradar-server` trong một split dưới và bám theo dòng mới (con trỏ đang ở dòng cuối thì tự cuộn; cuộn lên để đọc, `G` để bám lại; `q` đóng). Đường dẫn cũng hiện trong `:checkhealth tradar`.
+
+```
+2026-10-21T02:28:57Z  INFO connect [local] ok 1153ms
+2026-10-21T02:28:58Z  WARN execute [local] failed 1ms: near "selec": syntax error
+```
+
+- Mặc định `$XDG_STATE_HOME/tradar/server.log` (thường `~/.local/state/tradar/server.log`). `TRADAR_LOG_FILE=/đường/dẫn` đổi chỗ; `TRADAR_LOG=debug` ghi thêm các lệnh chạy nền (`status`, `complete`, `fetch`…); `TRADAR_LOG=off` tắt. Biến phải có khi server **khởi động** (đặt trong shell/env của Neovim rồi `:TradarRestart`).
+- Chỉ ghi tên method, connection, thời gian và lỗi (dòng đầu) — không ghi câu lệnh hay mật khẩu. Lưu ý lỗi từ database đôi khi trích một đoạn câu lệnh.
+- Quá 5 MB, lần khởi động kế tiếp đổi tên thành `server.log.1` (giữ một bản).
+- Chạy tay `tradar-server [socket]` trong terminal: dòng đầu in đường dẫn log.
+
 ## Build lại server rồi mà hành vi vẫn cũ
 
 Server chạy nền và giữ nguyên binary cũ cho tới khi dừng. Chạy `:TradarRestart`; lệnh kế tiếp sẽ tự khởi động bản mới. Plugin tự phát hiện: nếu binary trên đĩa đã được build lại sau khi server khởi động, lần kết nối kế tiếp báo "the running tradar-server … is older than the binary on disk" (và `:checkhealth tradar` cũng báo, kèm đường dẫn binary đang chạy).

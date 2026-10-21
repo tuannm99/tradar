@@ -90,4 +90,5 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`grpc-streaming-metadata-2026-10-31.md`](grpc-streaming-metadata-2026-10-31.md) — gRPC: metadata request/response, server-/client-streaming và bidi qua `grpc.stream.*` (protocol 1.6), buffer transcript trong plugin
 - [`results-window-layout-zoom-2026-10-31.md`](results-window-layout-zoom-2026-10-31.md) — `<leader>rz` phóng cửa sổ kết quả toàn màn hình, `results_layout` (bottom/right/tab), sửa cửa sổ kết quả bị bé 4 dòng sau "running…"
 - [`ui-ux-perf-check-2026-10-20.md`](ui-ux-perf-check-2026-10-20.md) — rà UI/UX + hiệu năng plugin; sửa `list_schema` SQLite (N+1 `PRAGMA` → 3 truy vấn)
+- [`server-log-2026-10-21.md`](server-log-2026-10-21.md) — file log của `tradar-server`, `:TradarLog`, protocol 1.11; sửa socket đóng không dọn client/subscription
 - [`performance-fetch-cap-2026-10-31.md`](performance-fetch-cap-2026-10-31.md) — `max_rows` (mặc định 1000) thay vì đọc 10 000 dòng, trần 64 MB mỗi kết quả, 256 MB tổng cursor, đóng cursor cũ: `select *` 600 ms → 30 ms, RSS không còn tăng không chặn

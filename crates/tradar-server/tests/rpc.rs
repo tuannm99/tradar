@@ -779,3 +779,35 @@ async fn execute_reads_only_max_rows_and_says_it_was_cut_short() {
     let few = call(&server, "execute", few).await;
     assert_eq!(ok(&few)["total"], 50);
 }
+
+#[tokio::test]
+async fn a_closed_socket_is_cleaned_up_even_with_replies_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(server_with_sqlite(dir.path()));
+    let path = dir.path().join("s.sock");
+    let listener = bind(&path).await.unwrap();
+    tokio::spawn(serve(listener, Arc::clone(&server)));
+
+    let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    write
+        .write_all(b"{\"id\":1,\"method\":\"version\"}\n")
+        .await
+        .unwrap();
+    lines.next_line().await.unwrap().unwrap();
+    assert_eq!(server.connected_clients(), 1);
+
+    drop(write);
+    drop(lines);
+    // The cleanup (`client_disconnected`) must run once the peer is gone.
+    let mut waited = 0;
+    while server.connected_clients() != 0 {
+        assert!(
+            waited < 100,
+            "client never cleaned up after the socket closed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        waited += 1;
+    }
+}

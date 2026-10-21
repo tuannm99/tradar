@@ -21,6 +21,7 @@ impl Server {
             "minor": PROTOCOL_VERSION.1,
             "exe": exe,
             "stale": stale,
+            "log_path": crate::logging::log_path().map(|p| p.display().to_string()),
         })
     }
 

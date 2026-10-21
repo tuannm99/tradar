@@ -5691,6 +5691,8 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tonic-reflection",
+ "tracing",
+ "tracing-subscriber",
  "tradar-connector-cassandra",
  "tradar-connector-clickhouse",
  "tradar-connector-elasticsearch",

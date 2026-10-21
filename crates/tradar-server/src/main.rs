@@ -2,11 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tradar_core::storage::{ConnectionStore, default_connections_path};
-use tradar_server::{Server, bind, default_socket_path, registry, serve};
+use tradar_server::{Server, bind, default_socket_path, logging, registry, serve};
 
 /// `tradar-server [SOCKET_PATH]` -- defaults to `$XDG_RUNTIME_DIR/tradar/server.sock`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let log_file = logging::init();
     let path = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
@@ -17,6 +18,16 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = bind(&path).await?;
     eprintln!("tradar-server listening on {}", path.display());
+    match &log_file {
+        Some(log) => eprintln!("tradar-server log: {}", log.display()),
+        None => eprintln!("tradar-server log: off"),
+    }
+    tracing::info!(
+        "tradar-server {} (pid {}) listening on {}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        path.display()
+    );
 
     tokio::select! {
         _ = serve(listener, server) => {}
@@ -26,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
     }
+    tracing::info!("tradar-server stopping");
     let _ = std::fs::remove_file(&path);
     Ok(())
 }

@@ -12,6 +12,8 @@ name = "tradar-server"
 path = "src/main.rs"
 
 [dependencies]
+tracing = "0.1"
+tracing-subscriber = "0.3"
 tradar-core = { path = "../tradar-core" }
 tradar-connector-spi = { path = "../tradar-connector-spi" }
 tradar-query-workbench = { path = "../tradar-query-workbench" }
