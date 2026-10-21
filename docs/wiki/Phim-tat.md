@@ -97,7 +97,7 @@ Buffer request (HTTP, RabbitMQ publish, gRPC) **sửa được** nên không chi
 
 | Nhóm | Lệnh |
 |---|---|
-| Connection | `:TradarConnect [tên]`, `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền) |
+| Connection | `:TradarConnect [tên]`, `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền), `:TradarLog` (xem log của server) |
 | Chạy | `:TradarRun` (nhận range), `:TradarRunAll`, `:TradarCancel`, `:TradarMore` |
 | Điều hướng | `:TradarSchema`, `:TradarTables`, `:TradarHistory` |
 | Xuất | `:TradarExport csv\|json\|md\|tsv [file]` |

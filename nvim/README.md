@@ -32,7 +32,7 @@ cargo build --release -p tradar-server        # trong repo tradar
 
 Đánh đổi so với `dir=`: mỗi lần sửa tradar phải `git push` rồi `:Lazy update` mới thấy, không còn vòng lặp sửa-restart-thử ngay — chỉ đáng khi code đã đứng, không còn sửa mỗi ngày.
 
-`:checkhealth tradar` kiểm tra binary, server, connection đã lưu. Server chạy nền và giữ nguyên bản binary cũ cho tới khi dừng: sau khi build lại, chạy `:TradarRestart` (lệnh kế tiếp tự khởi động bản mới).
+`:checkhealth tradar` kiểm tra binary, server, connection đã lưu. `:TradarLog` mở file log của server (bám theo dòng mới, `q` đóng) — xem `docs/wiki/Xu-ly-su-co.md`. Server chạy nền và giữ nguyên bản binary cũ cho tới khi dừng: sau khi build lại, chạy `:TradarRestart` (lệnh kế tiếp tự khởi động bản mới).
 
 ## Dùng
 

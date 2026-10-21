@@ -70,7 +70,8 @@ async fn serve_connection(stream: UnixStream, server: Arc<Server>) -> std::io::R
     let (read, mut write) = stream.into_split();
     let (replies, mut outbox) = mpsc::unbounded_channel::<String>();
     let client = server.new_client(replies.clone());
-    let writer = tokio::spawn(async move {
+    tracing::info!("client {} connected", client.id);
+    let mut writer = tokio::spawn(async move {
         while let Some(line) = outbox.recv().await {
             if write.write_all(line.as_bytes()).await.is_err() {
                 break;
@@ -101,13 +102,26 @@ async fn serve_connection(stream: UnixStream, server: Arc<Server>) -> std::io::R
         // Reap finished tasks so a long-lived connection doesn't grow the set.
         while in_flight.try_join_next().is_some() {}
     }
+    // Abort whatever this client still had running first. The order matters:
+    // the writer task below only ends once every sender of the reply channel
+    // is gone, and `client` (and each background subscription it started)
+    // holds one -- so waiting for the writer *before* this cleanup never
+    // finished, and a closed socket left its subscriptions running.
     drop(in_flight);
-    drop(replies);
-    let _ = writer.await;
     // Any subscription (Kafka tail, ...) this client started and never
     // explicitly stopped must not keep running for a socket nobody is
     // reading from anymore.
     server.client_disconnected(&client);
+    tracing::info!("client {} disconnected", client.id);
+    drop(client);
+    drop(replies);
+    // Let replies already queued go out, but never wait on a stuck peer.
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
     Ok(())
 }
 

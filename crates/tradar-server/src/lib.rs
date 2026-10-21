@@ -9,6 +9,7 @@ mod grpc;
 mod http;
 #[cfg(feature = "kafka")]
 mod kafka;
+pub mod logging;
 mod protocol;
 #[cfg(feature = "rabbitmq")]
 mod rabbitmq;

@@ -72,6 +72,12 @@ function M.check()
       end
     end
 
+    if vresult and vresult.log_path then
+      vim.health.ok('server log: ' .. vresult.log_path .. ' (:TradarLog)')
+    elseif vresult then
+      vim.health.info('server log: none reported (older server, or TRADAR_LOG=off)')
+    end
+
     local e, list = rpc.request_sync('connections.list', nil, 1000)
     if e then
       vim.health.warn('connections.list failed: ' .. e)
