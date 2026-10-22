@@ -96,6 +96,12 @@ function M.schema()
       if not (node and node.entry) then return notify('put the cursor on a table', vim.log.levels.WARN) end
       if state.sql_buf and vim.api.nvim_buf_is_valid(state.sql_buf) then M.open_table(state.sql_buf, node.entry) end
     end, { buffer = buf, desc = 'tradar: open the table under the cursor (show its rows)' })
+    vim.keymap.set('n', 'c', function()
+      local node = node_at_cursor()
+      if not (node and node.entry) then return notify('put the cursor on a table', vim.log.levels.WARN) end
+      if not (state.sql_buf and vim.api.nvim_buf_is_valid(state.sql_buf)) then return end
+      M.crud(state.sql_buf, node.entry)
+    end, { buffer = buf, desc = 'tradar: generate create/read/update/delete for the table under the cursor' })
     vim.keymap.set('n', 'r', function()
       local c = state.schema_conn
       if not c then return end
@@ -113,6 +119,7 @@ function M.schema()
         '- `<CR>` insert name into the SQL buffer, or toggle a folder/table',
         '- `<Tab>` expand/collapse the schema or table under the cursor',
         '- `o` open the table under the cursor (runs its "show rows" statement)',
+        '- `c` generate create/read/update/delete for the table under the cursor (inserted, not run)',
         '- `r` refresh the schema (after a migration / DDL elsewhere)',
         '- `/` searches the tree like any buffer',
         '- `q` close',
@@ -258,6 +265,12 @@ function M.hover()
     if not lines then return fallback('hover') end
     vim.lsp.util.open_floating_preview(lines, 'text', { border = 'rounded', focus_id = 'tradar_hover', max_width = 90 })
   end)
+end
+
+--- The schema table whose name is under the cursor, or nil.
+function M.table_at_cursor(entries)
+  local word = word_under_cursor()
+  return word and find_table(entries, word) or nil
 end
 
 --- `gd` on a table name: show its rows. Anything else: the LSP's own.
