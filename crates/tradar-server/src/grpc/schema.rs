@@ -19,7 +19,7 @@ pub(crate) fn get_service(
     service: &str,
 ) -> anyhow::Result<ServiceDescriptor> {
     pool.get_service_by_name(service)
-        .ok_or_else(|| anyhow::anyhow!("không có service `{service}` trong schema đã biết"))
+        .ok_or_else(|| anyhow::anyhow!("no service `{service}` in the known schema"))
 }
 
 pub struct MethodInfo {
@@ -52,7 +52,7 @@ pub(crate) fn get_method(
     get_service(pool, service)?
         .methods()
         .find(|m| m.name() == method)
-        .ok_or_else(|| anyhow::anyhow!("service `{service}` không có method `{method}`"))
+        .ok_or_else(|| anyhow::anyhow!("service `{service}` has no method `{method}`"))
 }
 
 /// Server reflection (`grpc.reflection.v1.ServerReflection`): `ListServices`
@@ -79,9 +79,9 @@ pub async fn discover_via_reflection(channel: Channel) -> anyhow::Result<Descrip
     let list_resp = stream
         .message()
         .await?
-        .ok_or_else(|| anyhow::anyhow!("server không trả lời ListServices"))?;
+        .ok_or_else(|| anyhow::anyhow!("the server did not answer ListServices"))?;
     let Some(MessageResponse::ListServicesResponse(list)) = list_resp.message_response else {
-        anyhow::bail!("response không phải ListServicesResponse");
+        anyhow::bail!("the response is not a ListServicesResponse");
     };
 
     let mut pool = DescriptorPool::new();

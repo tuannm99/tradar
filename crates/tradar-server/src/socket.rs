@@ -244,7 +244,7 @@ impl crate::extension::Extension for SocketExtension {
                     push_client.notify("socket.tail.message", item)
                 })
                 .await
-                .map_err(|e| RpcError::app(format!("không kết nối được tới `{target}`: {e}")))?;
+                .map_err(|e| RpcError::app(format!("could not connect to `{target}`: {e}")))?;
 
                 self.state.lock().unwrap().tails.insert(
                     subscription.clone(),

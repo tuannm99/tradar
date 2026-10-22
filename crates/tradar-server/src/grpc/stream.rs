@@ -23,15 +23,17 @@ impl StreamHandle {
     /// Queue one request message on a client-/bidi-streaming call.
     pub fn send(&self, message: serde_json::Value) -> anyhow::Result<()> {
         if !self.0.client_streaming {
-            anyhow::bail!("method này chỉ stream server -> client, không gửi thêm message được");
+            anyhow::bail!(
+                "this method only streams server -> client; it takes no further messages"
+            );
         }
         let msg = DynamicMessage::deserialize(self.0.input.clone(), message)
-            .map_err(|e| anyhow::anyhow!("message không khớp schema: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("message does not match the schema: {e}"))?;
         match self.0.tx.lock().unwrap().as_ref() {
             Some(tx) => tx
                 .send(msg)
-                .map_err(|_| anyhow::anyhow!("stream đã kết thúc")),
-            None => anyhow::bail!("đã đóng chiều gửi (half-close)"),
+                .map_err(|_| anyhow::anyhow!("the stream has ended")),
+            None => anyhow::bail!("the sending side is already closed (half-close)"),
         }
     }
 
@@ -68,7 +70,7 @@ pub fn start_stream(
         (method.is_client_streaming(), method.is_server_streaming());
     if !client_streaming && !server_streaming {
         anyhow::bail!(
-            "`{}` là unary -- dùng `grpc.invoke`, không phải `grpc.stream.start`",
+            "`{}` is unary -- use `grpc.invoke`, not `grpc.stream.start`",
             method.name()
         );
     }
@@ -76,7 +78,7 @@ pub fn start_stream(
     let first = request
         .map(|v| DynamicMessage::deserialize(input.clone(), v))
         .transpose()
-        .map_err(|e| anyhow::anyhow!("request không khớp schema: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("request does not match the schema: {e}"))?;
     let path = method_path(&method)?;
     let codec = DynamicCodec {
         response_desc: method.output(),
@@ -96,9 +98,7 @@ pub fn start_stream(
         };
         let mut grpc = Grpc::new(channel);
         if let Err(e) = grpc.ready().await {
-            return fail(Status::unavailable(format!(
-                "kênh gRPC không sẵn sàng: {e}"
-            )));
+            return fail(Status::unavailable(format!("gRPC channel not ready: {e}")));
         }
         // The three shapes differ only in how the request goes out and
         // whether the reply is one message or a stream.

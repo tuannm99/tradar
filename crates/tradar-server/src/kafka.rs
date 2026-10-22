@@ -300,7 +300,7 @@ impl crate::extension::Extension for KafkaExtension {
                 }
                 let saved = ctx.saved(name, "kafka")?;
                 let conn = connect(&saved.target).await.map_err(|e| {
-                    RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+                    RpcError::app(format!("could not connect to `{}`: {e}", saved.target))
                 })?;
                 self.state
                     .lock()

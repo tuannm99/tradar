@@ -36,6 +36,7 @@ Là buffer Neovim bình thường: `j`/`k`/`gg`/`G`, `/`, `yy`… đều dùng �
 | `rv` | đổi bảng ↔ JSON (SQL: mảng object; tài liệu: JSON in thụt lề) |
 | `gK` | xem cả dòng hiện tại, mỗi trường một dòng |
 | `K` | xem trọn giá trị một ô (khi ô bị cắt `…`) |
+| `zw` / `zW` | hiện trọn cột dưới con trỏ / mọi cột thay vì cắt ở 40 ký tự; bấm lại để thu về |
 | `gd` | trên ô cột khoá ngoại: chạy `SELECT` dòng được tham chiếu |
 | `rw` | commit các sửa trên lưới (giống `:w`) |
 | `ru` | bỏ các sửa chưa commit, vẽ lại lưới |
@@ -94,6 +95,8 @@ Cả hai theo connection của block/buffer đang đứng; preview tô màu theo
 Buffer request (HTTP, RabbitMQ publish, gRPC) **sửa được** nên không chiếm `q` — đóng bằng `:q`/`:tabclose`.
 
 ## 6. Lệnh `:Tradar…`
+
+Mọi lệnh dưới đây cũng gọi được qua một lệnh chung `:Tradar <lệnh-con>` — `:Tradar kafka tail`, `:Tradar run all`, `:Tradar save tên`… (giữ range và `!`); `<Tab>` gợi ý lệnh con rồi tới tham số. Tên connection được gợi ý bằng `<Tab>` theo đúng loại (`:TradarConnect` chỉ connection SQL/Mongo/…, `:TradarKafkaTail` chỉ Kafka…), đọc từ server nếu đang chạy, không thì từ `connections.toml`.
 
 | Nhóm | Lệnh |
 |---|---|

@@ -186,7 +186,7 @@ impl crate::extension::Extension for RabbitExtension {
                 }
                 let saved = ctx.saved(name, "rabbitmq")?;
                 let conn = connect(&saved.target).await.map_err(|e| {
-                    RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+                    RpcError::app(format!("could not connect to `{}`: {e}", saved.target))
                 })?;
                 self.connections
                     .lock()

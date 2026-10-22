@@ -31,7 +31,7 @@ pub fn parse_timeout(params: &serde_json::Value) -> anyhow::Result<Option<std::t
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(v) => match v.as_u64() {
             Some(ms) if ms > 0 => Ok(Some(std::time::Duration::from_millis(ms))),
-            _ => anyhow::bail!("`timeout_ms` phải là số nguyên dương (mili giây)"),
+            _ => anyhow::bail!("`timeout_ms` must be a positive integer (milliseconds)"),
         },
     }
 }
@@ -75,19 +75,19 @@ pub async fn invoke(
     let method = get_method(pool, service, method)?;
     if method.is_client_streaming() || method.is_server_streaming() {
         anyhow::bail!(
-            "`{}` là method streaming -- dùng `grpc.stream.start`, không phải `grpc.invoke`",
+            "`{}` is a streaming method -- use `grpc.stream.start`, not `grpc.invoke`",
             method.name()
         );
     }
     let request_msg = DynamicMessage::deserialize(method.input(), request_json)
-        .map_err(|e| anyhow::anyhow!("request không khớp schema: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("request does not match the schema: {e}"))?;
 
     let path = method_path(&method)?;
 
     let mut grpc = Grpc::new(channel);
     grpc.ready()
         .await
-        .map_err(|e| anyhow::anyhow!("kênh gRPC không sẵn sàng: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("gRPC channel not ready: {e}"))?;
     let codec = DynamicCodec {
         response_desc: method.output(),
     };
@@ -110,5 +110,5 @@ pub(crate) fn method_path(
 ) -> anyhow::Result<tonic::codegen::http::uri::PathAndQuery> {
     format!("/{}/{}", method.parent_service().full_name(), method.name())
         .parse()
-        .map_err(|e| anyhow::anyhow!("path không hợp lệ: {e}"))
+        .map_err(|e| anyhow::anyhow!("invalid path: {e}"))
 }

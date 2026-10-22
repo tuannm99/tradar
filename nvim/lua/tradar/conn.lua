@@ -108,6 +108,7 @@ ctx.ensure_connected = function(name, cb, on_error)
   end
   call('connect', { connection = name }, function()
     state.connected[name] = true
+    state.idle[name] = nil
     M._start_poller()
     settle(true)
   end, function(err) settle(false, err) end)
@@ -140,7 +141,11 @@ function M.status()
     or M.block_connection(0, vim.api.nvim_win_get_cursor(0)[1])
   if not conn then return '' end
   local parts = { 'db ' .. conn .. (M.is_protected(conn) and ' ⚠' or '') }
-  if state.alive[conn] == false then parts[1] = parts[1] .. ' ✗' end
+  if state.alive[conn] == false then
+    parts[1] = parts[1] .. ' ✗'
+  elseif state.idle[conn] then
+    parts[1] = parts[1] .. ' (idle)'
+  end
   if state.in_tx[conn] then parts[1] = parts[1] .. ' tx' end
   if state.running then
     local frame = SPINNER[(math.floor(uv.hrtime() / 1e8) % #SPINNER) + 1]
@@ -208,8 +213,13 @@ function M._start_poller()
     for name in pairs(state.connected) do
       rpc.request('status', { connection = name }, function(err, result)
         if err then
-          state.alive[name] = false
-          if err:find('not connected', 1, true) then state.connected[name] = nil end
+          if err:find('not connected', 1, true) then
+            -- Closed on purpose (idle, or a restarted server), not broken:
+            -- the next call reconnects, so this is not shown as `✗`.
+            state.connected[name], state.idle[name], state.alive[name] = nil, true, nil
+          else
+            state.alive[name] = false
+          end
         else
           state.alive[name], state.in_tx[name] = result.alive, result.in_transaction
         end

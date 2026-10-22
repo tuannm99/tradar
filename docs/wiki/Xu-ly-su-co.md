@@ -23,7 +23,7 @@ Cảnh báo này chỉ nhắc, không chặn bạn dùng tiếp. Muốn chắc p
 
 ## Connection tự ngắt khi không dùng
 
-Để trả RAM, `tradar-server` đóng connection không có lệnh nào trong **30 phút** (statusline hiện `✗` một lúc, log ghi `idle-disconnect [tên]`) — cả connection SQL/Mongo/… lẫn Kafka/RabbitMQ/HTTP/gRPC. Lệnh tiếp theo (chạy query, gửi request từ buffer HTTP/gRPC đang mở, publish…) tự kết nối lại, chỉ chậm hơn một nhịp; `.proto` đã nạp tay cho gRPC được nạp lại. Không đóng khi đang trong transaction, đang có query chạy, hay đang tail Socket.
+Để trả RAM, `tradar-server` đóng connection không có lệnh nào trong **30 phút** (statusline hiện `(idle)` — không phải `✗`, vốn chỉ dành cho mất kết nối thật; log ghi `idle-disconnect [tên]`) — cả connection SQL/Mongo/… lẫn Kafka/RabbitMQ/HTTP/gRPC. Lệnh tiếp theo (chạy query, gửi request từ buffer HTTP/gRPC đang mở, publish…) tự kết nối lại, chỉ chậm hơn một nhịp; `.proto` đã nạp tay cho gRPC được nạp lại. Không đóng khi đang trong transaction, đang có query chạy, hay đang tail Socket.
 
 - Đổi: `setup{ idle_ttl = "10m" }` (giây hoặc `"90s"`/`"10m"`/`"2h"`; `false` hoặc `0` để tắt), hoặc biến môi trường `TRADAR_IDLE_TTL` — có hiệu lực khi server **khởi động** (`:TradarRestart`).
 - `:checkhealth tradar` hiện giá trị đang dùng.

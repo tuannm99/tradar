@@ -36,6 +36,8 @@ cargo build --release -p tradar-server        # trong repo tradar
 
 ## Dùng
 
+Mọi lệnh có dạng `:Tradar…`; `:Tradar <lệnh-con>` là một lối vào chung (`:Tradar kafka tail`, `:Tradar run all`), `<Tab>` gợi ý lệnh con, tham số và tên connection đã lưu.
+
 Connection lấy từ `~/.config/tradar/connections.toml` (cùng file với TUI); `:TradarConnections` mở đúng file server đang đọc (có template nếu chưa có, `:w` là server thấy ngay và plugin báo số connection hoặc lỗi TOML), picker `:TradarConnect` cũng có dòng `+ edit connections file…`. Gắn một file `.sql` vào connection bằng dòng đầu file:
 
 ```sql

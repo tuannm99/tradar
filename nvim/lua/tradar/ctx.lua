@@ -27,6 +27,7 @@ local state = {
   connecting = {}, -- name -> callbacks waiting on an in-flight `connect`
   alive = {}, -- name -> bool, from the background `status` poll
   in_tx = {}, -- name -> bool
+  idle = {}, -- name -> true: the server closed it as unused (`TRADAR_IDLE_TTL`); the next call reconnects
   history = nil, -- lazily loaded
   running = nil, -- { id, conn, started }
   last = nil, -- summary of the last finished query, for the statusline

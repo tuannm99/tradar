@@ -52,6 +52,8 @@ ctx.attach_results = function(buf)
   map('n', (opts.prefix or '<leader>r') .. 'w', function() M.write() end, 'commit grid edits (same as :w)')
   map('n', (opts.prefix or '<leader>r') .. 'u', function() M.revert() end, 'revert grid edits')
   map('n', 'gK', function() M.row_view() end, 'show this row, one field per line')
+  map('n', 'zw', function() M.toggle_column_width() end, 'show this column in full / cut it back')
+  map('n', 'zW', function() M.toggle_column_width(true) end, 'show every column in full / cut them all back')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
   -- The grid is edited with plain vim; these keys only differ when the
   -- result cannot be edited, where they say why instead of "E21".
@@ -122,12 +124,13 @@ ctx.attach_results = function(buf)
       ('- `%sv` table <-> JSON (SQL rows and documents)'):format(opts.prefix or '<leader>r'),
       ('- `%sm` load the next page of rows'):format(opts.prefix or '<leader>r'),
       ('- `%sz` zoom this window to the full screen / restore (also from the SQL buffer)'):format(opts.prefix or '<leader>r'),
-      '- `gK` ctx.show the current row, one field per line',
+      '- `gK` show the current row, one field per line',
+      '- `zw` show the column under the cursor in full (not cut at 40) / cut it back; `zW` every column',
       '- `gd` follow foreign key under cursor',
       '- edit the grid like any buffer (`cw`, `dd`, `o` + a new row, `:s`, `:g`, `u`…); nothing runs until `:w`',
       '- `:w` lists the UPDATE/DELETE/INSERT statements in a preview; `:w` / `<CR>` there applies them, `q` cancels',
       ('- `%su` revert the grid to the query result'):format(opts.prefix or '<leader>r'),
-      '- `K` preview the full value of this cell',
+      '- `K` preview the full value of this cell (newlines kept)',
       '- `q` close',
     })
   end, 'show keymap help')
