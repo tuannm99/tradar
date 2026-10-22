@@ -329,6 +329,11 @@ mod docker {
     /// `with_mapped_port`/`CASSANDRA_BROADCAST_RPC_ADDRESS` comment
     /// below) -- can't run alongside the long-lived dev instance from
     /// `docker compose up cassandra`.
+    /// Both container tests need host port 9042 itself (see below), so they
+    /// take turns instead of failing with "port is already allocated" when
+    /// the test harness runs them in parallel.
+    static PORT_9042: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn connected_driver() -> (ContainerAsync<GenericImage>, CassandraDriver) {
         let container = GenericImage::new("cassandra", "5.0")
             .with_wait_for(WaitFor::message_on_stdout(
@@ -398,6 +403,7 @@ mod docker {
 
     #[tokio::test]
     async fn ping_succeeds_against_a_running_cassandra() {
+        let _turn = PORT_9042.lock().await;
         let (_container, driver) =
             tokio::time::timeout(Duration::from_secs(350), connected_driver())
                 .await
@@ -410,6 +416,7 @@ mod docker {
 
     #[tokio::test]
     async fn schema_and_execute_round_trip_through_a_real_cluster() {
+        let _turn = PORT_9042.lock().await;
         let (_container, driver) =
             tokio::time::timeout(Duration::from_secs(350), connected_driver())
                 .await

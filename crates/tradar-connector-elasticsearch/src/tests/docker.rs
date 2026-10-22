@@ -1,8 +1,24 @@
 use super::*;
+use testcontainers_modules::testcontainers::ImageExt;
+use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+/// One Elasticsearch node at a time, with a small heap: each JVM otherwise
+/// sizes its heap from the machine's RAM, and the test harness starting
+/// every test's node at once ran a CI runner out of memory (exit 137).
+static ONE_NODE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn node() -> testcontainers_modules::testcontainers::ContainerAsync<ElasticSearch> {
+    ElasticSearch::default()
+        .with_env_var("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
+        .start()
+        .await
+        .unwrap()
+}
 
 #[tokio::test]
 async fn connect_succeeds_for_a_running_cluster() {
-    let container = ElasticSearch::default().start().await.unwrap();
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
     let port = container.get_host_port_ipv4(9200).await.unwrap();
     let mut driver = ElasticsearchDriver::new(&format!("http://127.0.0.1:{port}"));
 
@@ -13,7 +29,8 @@ async fn connect_succeeds_for_a_running_cluster() {
 
 #[tokio::test]
 async fn list_schema_reports_index_fields_from_the_mapping() {
-    let container = ElasticSearch::default().start().await.unwrap();
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
     let port = container.get_host_port_ipv4(9200).await.unwrap();
     let base_url = format!("http://127.0.0.1:{port}");
     let mut driver = ElasticsearchDriver::new(&base_url);
@@ -43,7 +60,8 @@ async fn list_schema_reports_index_fields_from_the_mapping() {
 
 #[tokio::test]
 async fn execute_runs_an_arbitrary_request_and_wraps_the_response_as_documents() {
-    let container = ElasticSearch::default().start().await.unwrap();
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
     let port = container.get_host_port_ipv4(9200).await.unwrap();
     let mut driver = ElasticsearchDriver::new(&format!("http://127.0.0.1:{port}"));
     driver.connect().await.unwrap();
@@ -61,7 +79,8 @@ async fn execute_runs_an_arbitrary_request_and_wraps_the_response_as_documents()
 
 #[tokio::test]
 async fn execute_handles_the_cat_indices_plain_text_response() {
-    let container = ElasticSearch::default().start().await.unwrap();
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
     let port = container.get_host_port_ipv4(9200).await.unwrap();
     let mut driver = ElasticsearchDriver::new(&format!("http://127.0.0.1:{port}"));
     driver.connect().await.unwrap();
@@ -87,7 +106,8 @@ async fn execute_handles_the_cat_indices_plain_text_response() {
 
 #[tokio::test]
 async fn execute_unwraps_a_search_into_one_document_per_hit() {
-    let container = ElasticSearch::default().start().await.unwrap();
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
     let port = container.get_host_port_ipv4(9200).await.unwrap();
     let base_url = format!("http://127.0.0.1:{port}");
     let mut driver = ElasticsearchDriver::new(&base_url);
@@ -128,7 +148,8 @@ async fn execute_unwraps_a_search_into_one_document_per_hit() {
 /// document actually changed -- same for the follow-up delete.
 #[tokio::test]
 async fn edit_sql_round_trips_a_real_update_and_delete_against_a_search_hit() {
-    let container = ElasticSearch::default().start().await.unwrap();
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
     let port = container.get_host_port_ipv4(9200).await.unwrap();
     let base_url = format!("http://127.0.0.1:{port}");
     let mut driver = ElasticsearchDriver::new(&base_url);
@@ -195,7 +216,8 @@ async fn edit_sql_round_trips_a_real_update_and_delete_against_a_search_hit() {
 
 #[tokio::test]
 async fn list_schema_returns_created_indices() {
-    let container = ElasticSearch::default().start().await.unwrap();
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
     let port = container.get_host_port_ipv4(9200).await.unwrap();
     let base_url = format!("http://127.0.0.1:{port}");
     let mut driver = ElasticsearchDriver::new(&base_url);
