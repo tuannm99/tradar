@@ -52,6 +52,8 @@ ctx.attach_results = function(buf)
   map('n', (opts.prefix or '<leader>r') .. 'w', function() M.write() end, 'commit grid edits (same as :w)')
   map('n', (opts.prefix or '<leader>r') .. 'u', function() M.revert() end, 'revert grid edits')
   map('n', 'gK', function() M.row_view() end, 'show this row, one field per line')
+  map('n', '[r', function() M.step_result(-1) end, 'previous kept result')
+  map('n', ']r', function() M.step_result(1) end, 'next kept result')
   map('n', 'zw', function() M.toggle_column_width() end, 'show this column in full / cut it back')
   map('n', 'zW', function() M.toggle_column_width(true) end, 'show every column in full / cut them all back')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
@@ -125,6 +127,7 @@ ctx.attach_results = function(buf)
       ('- `%sm` load the next page of rows'):format(opts.prefix or '<leader>r'),
       ('- `%sz` zoom this window to the full screen / restore (also from the SQL buffer)'):format(opts.prefix or '<leader>r'),
       '- `gK` show the current row, one field per line',
+      '- `[r` / `]r` previous / next result kept from this and earlier runs (`:TradarResults` picks one; `setup{ results_kept }`, default 10)',
       '- `zw` show the column under the cursor in full (not cut at 40) / cut it back; `zW` every column',
       '- `gd` follow foreign key under cursor',
       '- edit the grid like any buffer (`cw`, `dd`, `o` + a new row, `:s`, `:g`, `u`…); nothing runs until `:w`',

@@ -35,6 +35,7 @@ Là buffer Neovim bình thường: `j`/`k`/`gg`/`G`, `/`, `yy`… đều dùng �
 | `rm` | tải trang kế của kết quả (không tự tải khi cuộn) |
 | `rz` | phóng to cửa sổ kết quả toàn màn hình / trả lại cỡ cũ (`:TradarResultsZoom`) |
 | `rv` | đổi bảng ↔ JSON (SQL: mảng object; tài liệu: JSON in thụt lề) |
+| `[r` / `]r` | kết quả trước / sau trong số các kết quả được giữ lại (`:TradarResults` để chọn) |
 | `gK` | xem cả dòng hiện tại, mỗi trường một dòng |
 | `K` | xem trọn giá trị một ô (khi ô bị cắt `…`) |
 | `zw` / `zW` | hiện trọn cột dưới con trỏ / mọi cột thay vì cắt ở 40 ký tự; bấm lại để thu về |

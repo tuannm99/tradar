@@ -118,6 +118,14 @@ Hai chỗ để lưu một query:
 
 `:TradarOpen` (hoặc `<leader>rf`) duyệt thư viện bằng telescope (mới sửa nhất lên đầu, có preview; `<CR>` mở, `<C-s>` mở trong split, `<C-x>` xoá); không có telescope thì dùng `vim.ui.select`.
 
+## Nhiều kết quả
+
+Chạy cả file (`<leader>ra`) hay vài lần liên tiếp không còn ghi đè mất kết quả cũ: plugin giữ lại **10 kết quả gần nhất** (`setup{ results_kept = 20 }` để đổi). Trong buffer kết quả, `[r` / `]r` đi lùi / tiến, `:TradarResults` mở danh sách chọn (mới nhất trên cùng, `◀` đánh dấu cái đang xem). Footer cho biết đang xem cái nào và câu nào sinh ra nó: `[2/3] select name from p · 3/3 rows · 1ms`.
+
+Chỉ kết quả **mới nhất** còn giữ cursor trên server (để phân trang và sửa); các kết quả cũ xem được phần đã tải nhưng ở chế độ chỉ đọc, và nếu còn dòng chưa tải thì footer nói rõ "đã đóng khi có kết quả mới hơn, chạy lại để xem" (export từ kết quả như vậy cảnh báo file không đủ dòng). Không đổi sang kết quả khác khi lưới có sửa chưa commit.
+
+Câu lệnh vừa gửi đi được **nháy sáng** ngắn (`TradarRunning`, mặc định như `IncSearch`; `setup{ flash_ms = 0 }` để tắt, mặc định 200) — hữu ích khi file có nhiều câu và bạn muốn chắc câu nào đã chạy.
+
 ## Ô dài bị cắt
 
 Mỗi cột rộng tối đa 40 ký tự (dài hơn thì cắt bằng `…`), riêng **cột cuối** được tới 400 ký tự — nên kết quả một cột như `EXPLAIN` hay `SHOW CREATE TABLE` hiện gần như đủ. Trong buffer kết quả, `zw` hiện trọn cột dưới con trỏ (tới 400 ký tự như cột cuối), bấm lại để thu về; `zW` cho mọi cột. Ô có xuống dòng được hiển thị trên một dòng (xuống dòng thành dấu cách); `K` trên ô xem trọn giá trị (giữ xuống dòng), `gK` xem cả dòng.

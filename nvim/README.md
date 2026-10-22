@@ -113,6 +113,7 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
 | `rs` / `rc` / `rm` | panel schema / chọn connection / tải thêm dòng |
 | `rz` | phóng cửa sổ kết quả ra toàn màn hình / trả lại (`:TradarResultsZoom`; cũng có trong buffer kết quả) |
+| `[r` / `]r` | (buffer kết quả) kết quả trước / sau trong 10 kết quả giữ lại (`setup{ results_kept }`); `:TradarResults` chọn. Câu vừa chạy nháy sáng (`setup{ flash_ms }`, nhóm `TradarRunning`) |
 | `K` | thông tin bảng/cột dưới con trỏ (kiểu, PK, FK, index; hiểu alias `o.user_id`); không biết thì rơi về hover của LSP |
 | `gd` | trên tên bảng: mở bảng (`SELECT ... LIMIT 100`); chỗ khác: `definition` của LSP |
 | `g?` | liệt kê phím của buffer hiện tại (SQL, kết quả, panel schema đều có) |

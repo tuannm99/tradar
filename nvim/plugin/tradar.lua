@@ -19,6 +19,7 @@ vim.api.nvim_create_user_command('TradarSaveHere', function(a) t().save_here(a.a
 vim.api.nvim_create_user_command('TradarOpen', function() t().open() end, { desc = 'open a query from the library' })
 vim.api.nvim_create_user_command('TradarCancel', function() t().cancel() end, {})
 vim.api.nvim_create_user_command('TradarResultsZoom', function() t().zoom() end, {})
+vim.api.nvim_create_user_command('TradarResults', function() t().pick_result() end, { desc = 'pick one of the kept results' })
 vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})
 vim.api.nvim_create_user_command('TradarSchema', function() t().schema() end, {})
 vim.api.nvim_create_user_command('TradarTables', function() require('tradar.telescope').tables() end, {})
