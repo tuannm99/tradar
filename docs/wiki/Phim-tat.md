@@ -100,6 +100,7 @@ Buffer request (HTTP, RabbitMQ publish, gRPC) **sửa được** nên không chi
 | Connection | `:TradarConnect [tên]`, `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền), `:TradarLog` (xem log của server) |
 | Chạy | `:TradarRun` (nhận range), `:TradarRunAll`, `:TradarCancel`, `:TradarMore` |
 | Điều hướng | `:TradarSchema`, `:TradarTables`, `:TradarHistory` |
+| Lưu / mở query | `:TradarSave[!] [tên]` (vào thư viện, `<leader>rS`), `:TradarSaveHere[!] [đường dẫn]` (cạnh file hiện tại), `:TradarOpen` (duyệt thư viện, `<leader>rf`) |
 | Xuất | `:TradarExport csv\|json\|md\|tsv [file]` |
 | Kafka | `:TradarKafkaConnect [tên]`, `:TradarKafkaTail [tên] [topic]` |
 | Socket | `:TradarSocketTail [tên]` |
