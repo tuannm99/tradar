@@ -14,7 +14,8 @@ Tất cả phím có tiền tố `<leader>r` (đổi được bằng `setup{ pre
 | `ra` | chạy cả file theo thứ tự, dừng ở lỗi đầu tiên |
 | `rx` | huỷ query đang chạy |
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
-| `rt` | picker bảng (telescope): `<CR>` chèn tên, `<C-o>` mở bảng |
+| `rt` | picker bảng (telescope): `<CR>` chèn tên, `<C-o>` mở bảng, `<C-g>` sinh create/read/update/delete |
+| `rg` | sinh câu create/read/update/delete cho bảng dưới con trỏ (hoặc chọn bảng) |
 | `rh` | history: `<CR>` dán, `<C-r>` chạy |
 | `rs` | panel schema (cây schema → bảng → cột) |
 | `rc` | đổi connection |
@@ -71,7 +72,13 @@ Chỉ sửa được khi kết quả đến từ **một bảng có khoá chính
 
 - `K` trên tên bảng/cột: kiểu, khoá chính, khoá ngoại, index; hiểu alias (`o.user_id` lấy từ `FROM`/`JOIN`). Không biết thì rơi về hover của LSP.
 - `gd` trên tên bảng: mở bảng (`SELECT ... LIMIT 100`).
-- Panel schema (`rs`): `<Tab>` gấp/mở bảng hoặc nhóm, `<CR>` chèn tên (hoặc gấp/mở nếu đang ở dòng nhóm).
+- Panel schema (`rs`): `<Tab>` gấp/mở bảng hoặc nhóm, `<CR>` chèn tên (hoặc gấp/mở nếu đang ở dòng nhóm), `o` mở bảng, `c` sinh câu lệnh CRUD.
+
+### Sinh câu lệnh create / read / update / delete
+
+`:TradarCrud [create|read|update|delete]` (hoặc `<leader>rg`, `c` trong panel schema, `<C-g>` trong picker `rt`) sinh câu mẫu của một bảng **bằng ngôn ngữ riêng của connector** — `INSERT`/`SELECT`/`UPDATE`/`DELETE` cho SQL và CQL, `insertOne`/`find`/`updateOne`/`deleteOne` cho Mongo, request cho Elasticsearch, lệnh theo kiểu key cho Redis. Bảng là bảng đang nằm dưới con trỏ (`people` trong `people`); không có thì hỏi chọn. Không gõ tên thao tác thì hỏi tiếp.
+
+Với create/read/update, hỏi có chọn cột không: mặc định là tất cả (hoặc mặc định của thao tác, ví dụ `UPDATE` bỏ cột khoá chính khỏi `SET`); chọn **Pick columns…** để bật/tắt từng cột rồi **Done**. Delete không hỏi cột, điều kiện lấy từ khoá chính. Câu lệnh được **chèn dưới dòng con trỏ** (có dòng trống hai bên), với `<chỗ-trống>` để bạn điền — **không chạy**, vì ba trong bốn thao tác ghi dữ liệu; chạy bằng `<leader>rr` như câu thường (connection protected vẫn hỏi xác nhận).
 
 Schema được cache 1 phút phía plugin và tự làm mới sau khi bạn chạy DDL (`CREATE`/`ALTER`/`DROP`/`RENAME`).
 

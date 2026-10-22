@@ -22,6 +22,10 @@ vim.api.nvim_create_user_command('TradarResultsZoom', function() t().zoom() end,
 vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})
 vim.api.nvim_create_user_command('TradarSchema', function() t().schema() end, {})
 vim.api.nvim_create_user_command('TradarTables', function() require('tradar.telescope').tables() end, {})
+vim.api.nvim_create_user_command('TradarCrud', function(a) require('tradar.crud').crud_command(a.args) end, {
+  nargs = '?', complete = function() return { 'create', 'read', 'update', 'delete' } end,
+  desc = 'generate a create/read/update/delete statement for a table',
+})
 vim.api.nvim_create_user_command('TradarHistory', function() require('tradar.telescope').history() end, {})
 vim.api.nvim_create_user_command('TradarExport', function(a)
   local fmt, path = a.fargs[1], a.fargs[2]

@@ -15,6 +15,7 @@ Quy ước: `<leader>r` là **tiền tố** mặc định, đổi bằng `setup{
 | `rc` | n | chọn connection (cũng có dòng `+ edit connections file…`) |
 | `rs` | n | mở panel schema |
 | `rt` | n | picker bảng (telescope) |
+| `rg` | n | sinh câu create/read/update/delete cho bảng dưới con trỏ (hoặc chọn bảng) |
 | `rh` | n | picker lịch sử (telescope) |
 | `rm` | n | tải thêm dòng của kết quả hiện tại |
 | `rz` | n | phóng cửa sổ kết quả ra toàn màn hình (và nhảy vào đó); bấm lại để trả về cỡ cũ và quay lại editor |
@@ -68,7 +69,7 @@ Lệnh: `:TradarExport csv|json|md|tsv [file]` ghi cả kết quả ra file; `:T
 
 | Picker | `<CR>` | Phím khác |
 |---|---|---|
-| bảng (`rt`) | chèn tên vào buffer | `<C-o>` mở bảng (chạy ngay) |
+| bảng (`rt`) | chèn tên vào buffer | `<C-o>` mở bảng (chạy ngay), `<C-g>` sinh create/read/update/delete |
 | lịch sử (`rh`) | dán câu xuống dưới con trỏ | `<C-r>` dán rồi chạy ngay |
 
 Cả hai theo connection của block/buffer đang đứng; preview tô màu theo dialect của câu.
@@ -103,6 +104,7 @@ Mọi lệnh dưới đây cũng gọi được qua một lệnh chung `:Tradar 
 | Connection | `:TradarConnect [tên]`, `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền), `:TradarLog` (xem log của server) |
 | Chạy | `:TradarRun` (nhận range), `:TradarRunAll`, `:TradarCancel`, `:TradarMore` |
 | Điều hướng | `:TradarSchema`, `:TradarTables`, `:TradarHistory` |
+| Sinh câu lệnh | `:TradarCrud [create\|read\|update\|delete]` (`rg`) — chèn câu lệnh mẫu của bảng vào buffer, không chạy |
 | Lưu / mở query | `:TradarSave[!] [tên]` (vào thư viện, `<leader>rS`), `:TradarSaveHere[!] [đường dẫn]` (cạnh file hiện tại), `:TradarOpen` (duyệt thư viện, `<leader>rf`) |
 | Xuất | `:TradarExport csv\|json\|md\|tsv [file]` |
 | Kafka | `:TradarKafkaConnect [tên]`, `:TradarKafkaTail [tên] [topic]` |

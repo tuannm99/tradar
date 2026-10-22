@@ -108,7 +108,8 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 |---|---|
 | `rr` | chạy statement dưới con trỏ (visual: phần chọn) |
 | `ra` / `rx` | chạy cả file / huỷ query đang chạy |
-| `rt` / `rh` | telescope: bảng (`<CR>` chèn tên, `<C-o>` mở bảng) / history (`<CR>` dán, `<C-r>` chạy) |
+| `rt` / `rh` | telescope: bảng (`<CR>` chèn tên, `<C-o>` mở bảng, `<C-g>` sinh create/read/update/delete) / history (`<CR>` dán, `<C-r>` chạy) |
+| `rg` | `:TradarCrud [create\|read\|update\|delete]`: sinh câu lệnh mẫu của bảng dưới con trỏ vào buffer (không chạy); `c` trong panel schema |
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
 | `rs` / `rc` / `rm` | panel schema / chọn connection / tải thêm dòng |
 | `rz` | phóng cửa sổ kết quả ra toàn màn hình / trả lại (`:TradarResultsZoom`; cũng có trong buffer kết quả) |

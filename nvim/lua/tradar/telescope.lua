@@ -27,7 +27,7 @@ function M.tables(opts)
   opts = opts or {}
   tradar.schema_entries(function(entries, buf)
     t.pickers.new(opts, {
-      prompt_title = 'tradar tables  (<CR> insert · <C-o> open)',
+      prompt_title = 'tradar tables  (<CR> insert · <C-o> open · <C-g> create/read/update/delete)',
       finder = t.finders.new_table({
         results = entries,
         entry_maker = function(e)
@@ -56,6 +56,11 @@ function M.tables(opts)
           local entry = t.state.get_selected_entry()
           t.actions.close(prompt_bufnr)
           if entry then tradar.open_table(buf, entry.value) end
+        end)
+        map({ 'i', 'n' }, '<C-g>', function()
+          local entry = t.state.get_selected_entry()
+          t.actions.close(prompt_bufnr)
+          if entry then tradar.crud(buf, entry.value) end
         end)
         return true
       end,
