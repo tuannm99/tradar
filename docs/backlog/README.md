@@ -93,4 +93,5 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`server-log-2026-10-21.md`](server-log-2026-10-21.md) — file log của `tradar-server`, `:TradarLog`, protocol 1.11; sửa socket đóng không dọn client/subscription
 - [`save-query-library-2026-10-22.md`](save-query-library-2026-10-22.md) — `:TradarSave` (thư viện chung) / `:TradarSaveHere` (cạnh file) / `:TradarOpen`
 - [`idle-disconnect-2026-10-22.md`](idle-disconnect-2026-10-22.md) — connection không dùng quá `TRADAR_IDLE_TTL` thì server tự đóng, protocol 1.12
+- [`nvim-tests-ci-2026-10-22.md`](nvim-tests-ci-2026-10-22.md) — `nvim/tests/` (spec headless + `make test-nvim`) và CI GitHub Actions
 - [`performance-fetch-cap-2026-10-31.md`](performance-fetch-cap-2026-10-31.md) — `max_rows` (mặc định 1000) thay vì đọc 10 000 dòng, trần 64 MB mỗi kết quả, 256 MB tổng cursor, đóng cursor cũ: `select *` 600 ms → 30 ms, RSS không còn tăng không chặn

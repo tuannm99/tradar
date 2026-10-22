@@ -1,7 +1,7 @@
 DOCKER_SERVICES := postgres mysql redis mongo elasticsearch5 elasticsearch7 elasticsearch8 clickhouse cassandra rabbitmq kafka
 
 .PHONY: help build build-slim run fmt fmt-check clippy check \
-	test test-unit test-docker \
+	test test-unit test-docker test-nvim \
 	test-core test-connector-spi test-workbench test-app \
 	test-sqlite test-socket test-kafka test-kafka-server test-postgres test-mysql test-redis test-mongo test-elasticsearch test-clickhouse test-http \
 	up down ps
@@ -34,6 +34,10 @@ clippy: ## Lint the whole workspace, warnings as errors
 	$(CARGO) clippy --all-targets --workspace -- -D warnings
 
 check: fmt-check clippy test-unit ## Fast pre-commit gate: fmt + clippy + tests that don't need Docker
+
+test-nvim: ## Neovim plugin tests (nvim/tests/*_spec.lua, headless, SQLite only; needs nvim + python3). ONLY=name runs matching specs
+	$(CARGO) build -p tradar-server
+	nvim/tests/run.sh $(ONLY)
 
 test: ## Run every test in the workspace (needs Docker for postgres/redis/mongo/elasticsearch)
 	$(CARGO) test --workspace
