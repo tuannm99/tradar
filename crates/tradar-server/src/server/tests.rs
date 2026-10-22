@@ -61,3 +61,21 @@ async fn connections_path_reports_the_store_file() {
     );
     assert!(call(&Server::new(HashMap::new(), None)).await["result"]["path"].is_null());
 }
+
+#[test]
+fn idle_ttl_accepts_seconds_and_suffixes_and_can_be_turned_off() {
+    use std::time::Duration;
+    let secs = |n| Some(Duration::from_secs(n));
+    assert_eq!(idle::parse_ttl(None), Some(idle::DEFAULT_IDLE_TTL));
+    assert_eq!(idle::parse_ttl(Some("")), Some(idle::DEFAULT_IDLE_TTL));
+    assert_eq!(idle::parse_ttl(Some("90")), secs(90));
+    assert_eq!(idle::parse_ttl(Some("90s")), secs(90));
+    assert_eq!(idle::parse_ttl(Some("10m")), secs(600));
+    assert_eq!(idle::parse_ttl(Some(" 2H ")), secs(7200));
+    assert_eq!(idle::parse_ttl(Some("0")), None);
+    assert_eq!(idle::parse_ttl(Some("off")), None);
+    assert_eq!(idle::parse_ttl(Some("Never")), None);
+    // Garbage keeps the default instead of quietly disabling the feature.
+    assert_eq!(idle::parse_ttl(Some("soon")), Some(idle::DEFAULT_IDLE_TTL));
+    assert_eq!(idle::parse_ttl(Some("5d")), Some(idle::DEFAULT_IDLE_TTL));
+}
