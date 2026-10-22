@@ -2,13 +2,18 @@ use super::*;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
-/// One Elasticsearch node at a time, with a small heap: each JVM otherwise
+/// One Elasticsearch node at a time, with a small heap and a JDK that
+/// understands cgroup v2: each JVM otherwise
 /// sizes its heap from the machine's RAM, and the test harness starting
 /// every test's node at once ran a CI runner out of memory (exit 137).
 static ONE_NODE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn node() -> testcontainers_modules::testcontainers::ContainerAsync<ElasticSearch> {
+    // The module's default 7.16.1 bundles a JDK whose cgroup v2 detection
+    // throws on some CI hosts, and the node exits before it is ready; 7.17.x
+    // (the same tag `docker-compose.yml` uses for dev) has a fixed JDK.
     ElasticSearch::default()
+        .with_tag("7.17.26")
         .with_env_var("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
         .start()
         .await
