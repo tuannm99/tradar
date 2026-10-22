@@ -11,6 +11,11 @@ end, { range = true })
 vim.api.nvim_create_user_command('TradarRunAll', function() t().run(nil, nil, true) end, {})
 vim.api.nvim_create_user_command('TradarRestart', function() t().restart() end, {})
 vim.api.nvim_create_user_command('TradarLog', function() require('tradar.serverlog').open() end, {})
+vim.api.nvim_create_user_command('TradarSave', function(a) t().save(a.args, a.bang) end,
+  { nargs = '?', bang = true, complete = 'file', desc = 'save the query into the library (queries_dir)' })
+vim.api.nvim_create_user_command('TradarSaveHere', function(a) t().save_here(a.args, a.bang) end,
+  { nargs = '?', bang = true, complete = 'file', desc = 'save the query next to this file / in the working directory' })
+vim.api.nvim_create_user_command('TradarOpen', function() t().open() end, { desc = 'open a query from the library' })
 vim.api.nvim_create_user_command('TradarCancel', function() t().cancel() end, {})
 vim.api.nvim_create_user_command('TradarResultsZoom', function() t().zoom() end, {})
 vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})

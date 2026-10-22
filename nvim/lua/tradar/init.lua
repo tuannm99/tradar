@@ -12,6 +12,7 @@
 --   nav       schema panel, hover, go-to-table, follow foreign key
 --   rowedit   editing rows in the results grid, commit preview, EXPLAIN
 --   complete  completion
+--   files     saving queries to the library / next to the buffer, :TradarOpen
 local ctx = require('tradar.ctx')
 local M = ctx.M
 local opts = ctx.opts
@@ -29,6 +30,7 @@ require('tradar.connfile')
 require('tradar.nav')
 require('tradar.rowedit')
 require('tradar.complete')
+require('tradar.files')
 
 -- ── buffer setup ─────────────────────────────────────────────────────────
 
@@ -56,6 +58,8 @@ function M.attach(buf)
     map('n', 's', M.schema, 'schema panel')
     map('n', 't', function() require('tradar.telescope').tables() end, 'tables (telescope)')
     map('n', 'h', function() require('tradar.telescope').history() end, 'history (telescope)')
+    map('n', 'S', function() M.save() end, 'save to the query library')
+    map('n', 'f', function() M.open() end, 'open from the query library')
     map('n', 'm', function() M.more() end, 'load more rows')
     map('n', 'z', function() M.zoom() end, 'zoom the results window to full screen / restore')
     map('n', 'e', M.explain, 'explain statement under cursor')
@@ -66,6 +70,7 @@ function M.attach(buf)
         ('- `%sa` / `%sx` run all / cancel'):format(p, p),
         ('- `%sc` / `%ss` choose connection / schema panel'):format(p, p),
         ('- `%st` / `%sh` tables / history (telescope)'):format(p, p),
+        ('- `%sS` / `%sf` save to / open from the query library (`:TradarSave`, `:TradarOpen`)'):format(p, p),
         ('- `%sm` load the next page of rows (scrolling does not)'):format(p),
         ('- `%sz` zoom the results window to the full screen / restore'):format(p),
         ('- `%se` explain statement under cursor'):format(p),

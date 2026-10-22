@@ -101,3 +101,12 @@ Plugin hỏi xác nhận (đáp án mặc định là `Cancel`, nên `<CR>` ph�
 ## Huỷ query
 
 `rx` huỷ phía client ngay; với **PostgreSQL và SQLite** còn huỷ thật phía database. Các database khác chỉ bỏ phần chờ (câu lệnh có thể vẫn chạy nốt ở phía server).
+
+## Lưu và mở query
+
+Hai chỗ để lưu một query:
+
+- **Thư viện** — một thư mục chung cho mọi query, mở được từ bất kỳ project nào. `:TradarSave [tên]` (hoặc `<leader>rS`; bỏ trống tên thì hỏi, điền sẵn tên file hiện tại). Tên trần hoặc `thư-mục/tên` nằm dưới `queries_dir` và tự thêm `.sql` nếu chưa có đuôi; `/tuyệt-đối`, `~/x`, `./x` được hiểu đúng như gõ. File đã tồn tại thì cần `:TradarSave!` để ghi đè. Mặc định thư mục là `~/.config/tradar/queries` (cùng chỗ TUI lưu); đổi bằng `setup{ queries_dir = "~/sql" }`. Buffer đã `:TradarConnect` thì dòng `-- tradar: tên` được ghi vào đầu file để mở lại đúng connection.
+- **Cạnh file hiện tại** — `:TradarSaveHere [đường dẫn]`: buffer đã có file thì chỉ ghi lại (như `:w`); tên trần nằm cùng thư mục file hiện tại (buffer mới thì thư mục làm việc); `thư-mục/tên` được tạo nếu chưa có. Buffer lấy tên file mới.
+
+`:TradarOpen` (hoặc `<leader>rf`) duyệt thư viện bằng telescope (mới sửa nhất lên đầu, có preview; `<CR>` mở, `<C-s>` mở trong split, `<C-x>` xoá); không có telescope thì dùng `vim.ui.select`.
