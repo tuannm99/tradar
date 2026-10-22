@@ -69,7 +69,7 @@ ctx.attach_results = function(buf)
   -- `K` is free here (the SQL buffer's own `K` is schema hover, a
   -- different buffer) -- same "K = more about what's under the cursor"
   -- idiom, useful once a cell is wider than the grid's own column cap
-  -- and its text got truncated (see `render.MAX_COLUMN_WIDTH`).
+  -- and its text got truncated (see `render.MAX_COLUMN_WIDTH`; the last column is allowed `MAX_LAST_COLUMN_WIDTH`).
   map('n', 'K', function()
     local row, col = ctx.cell_at()
     if not row then return end

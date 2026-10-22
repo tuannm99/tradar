@@ -22,6 +22,16 @@ local SEP_WIDTH = 3
 --- a cell's untruncated value instead, see `init.lua`'s `attach_results`.
 M.MAX_COLUMN_WIDTH = 40
 
+--- The last column has no neighbour to push right, so it gets far more room:
+--- a one-column result (ClickHouse `EXPLAIN`, `SHOW CREATE TABLE`, a report
+--- line) used to be cut at 40 columns and was only readable by copying it out.
+--- Still bounded -- a multi-KB blob there would make every line enormous.
+M.MAX_LAST_COLUMN_WIDTH = 400
+
+local function width_cap(i, ncols)
+  return i == ncols and M.MAX_LAST_COLUMN_WIDTH or M.MAX_COLUMN_WIDTH
+end
+
 local function cell(value)
   return (tostring(value):gsub('[\r\n\t]', ' '))
 end
@@ -139,7 +149,7 @@ function M.number_columns(columns, rows, prev)
 end
 
 --- Each column's display width (header vs. every cell in `rows`, whichever
---- is wider), clamped to `MAX_COLUMN_WIDTH`. `prev` (optional, the same
+--- is wider), clamped to `MAX_COLUMN_WIDTH` (`MAX_LAST_COLUMN_WIDTH` for the last column). `prev` (optional, the same
 --- shape this returns) seeds the running max instead of starting from the
 --- header alone -- a caller that already painted earlier pages can pass
 --- their stored widths and scan only the *new* rows, so finding the
@@ -150,11 +160,11 @@ end
 function M.column_widths(columns, rows, prev)
   local widths = {}
   for i, name in ipairs(columns) do
-    widths[i] = math.min(prev and prev[i] or vim.fn.strdisplaywidth(name), M.MAX_COLUMN_WIDTH)
+    widths[i] = math.min(prev and prev[i] or vim.fn.strdisplaywidth(name), width_cap(i, #columns))
   end
   for _, row in ipairs(rows) do
     for i = 1, #columns do
-      widths[i] = math.min(math.max(widths[i], vim.fn.strdisplaywidth(cell(row[i] or ''))), M.MAX_COLUMN_WIDTH)
+      widths[i] = math.min(math.max(widths[i], vim.fn.strdisplaywidth(cell(row[i] or ''))), width_cap(i, #columns))
     end
   end
   return widths

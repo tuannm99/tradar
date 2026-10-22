@@ -110,3 +110,7 @@ Hai chỗ để lưu một query:
 - **Cạnh file hiện tại** — `:TradarSaveHere [đường dẫn]`: buffer đã có file thì chỉ ghi lại (như `:w`); tên trần nằm cùng thư mục file hiện tại (buffer mới thì thư mục làm việc); `thư-mục/tên` được tạo nếu chưa có. Buffer lấy tên file mới.
 
 `:TradarOpen` (hoặc `<leader>rf`) duyệt thư viện bằng telescope (mới sửa nhất lên đầu, có preview; `<CR>` mở, `<C-s>` mở trong split, `<C-x>` xoá); không có telescope thì dùng `vim.ui.select`.
+
+## Ô dài bị cắt
+
+Mỗi cột rộng tối đa 40 ký tự (dài hơn thì cắt bằng `…`), riêng **cột cuối** được tới 400 ký tự — nên kết quả một cột như `EXPLAIN` hay `SHOW CREATE TABLE` hiện gần như đủ. Ô có xuống dòng được hiển thị trên một dòng (xuống dòng thành dấu cách); `K` trên ô xem trọn giá trị, `gK` xem cả dòng.
