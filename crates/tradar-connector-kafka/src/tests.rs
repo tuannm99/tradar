@@ -10,8 +10,8 @@ fn descriptor_declares_streaming_publish_and_tail() {
 
 #[test]
 fn ephemeral_group_ids_never_repeat() {
-    let a = ephemeral_group_id();
-    let b = ephemeral_group_id();
+    let a = ephemeral_group_id("tradar-tail");
+    let b = ephemeral_group_id("tradar-tail");
 
     assert_ne!(a, b);
     assert!(a.starts_with("tradar-tail-"));

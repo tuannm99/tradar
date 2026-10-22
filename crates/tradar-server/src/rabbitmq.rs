@@ -2,95 +2,14 @@
 //! peek/publish messages. Unlike Kafka/Socket, RabbitMQ needs **no**
 //! push-channel -- the Management HTTP API has no streaming endpoint, so
 //! every operation here is a plain request/response, the same shape
-//! `grpc.rs` already uses. Not a reuse of `tradar-connector-rabbitmq`:
-//! that crate's types are `pub(crate)`-scoped to feed its own TUI
-//! `Screen`, and bringing that whole crate in just for a handful of
-//! `reqwest` calls this module can make directly would be a heavier
-//! dependency than writing them fresh (`parse_target` is the only
-//! non-trivial logic, copied below since it's ~25 lines, not a whole
-//! crate's worth of reuse).
+//! `grpc.rs` already uses. The Management API's shapes, `parse_target` and the authenticated
+//! request come from `tradar-connector-rabbitmq` (its TUI-free `api`
+//! module); the calls and the JSON-RPC surface live here.
 
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueueInfo {
-    pub name: String,
-    #[serde(default)]
-    pub messages_ready: u64,
-    #[serde(default)]
-    pub messages_unacknowledged: u64,
-    #[serde(default)]
-    pub consumers: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExchangeInfo {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BindingInfo {
-    pub destination: String,
-    #[serde(default)]
-    pub routing_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageInfo {
-    #[serde(default)]
-    pub exchange: String,
-    #[serde(default)]
-    pub routing_key: String,
-    #[serde(default)]
-    pub redelivered: bool,
-    #[serde(default)]
-    pub payload: String,
-}
-
-/// A parsed `target`: everything needed to call the Management API --
-/// identical shape and reasoning to `tradar-connector-rabbitmq`'s own
-/// `RabbitTarget`/`parse_target` (see that crate's doc comment for why the
-/// vhost is kept pre-percent-encoded rather than re-encoded here).
-#[derive(Debug, Clone)]
-struct RabbitTarget {
-    base_url: String,
-    auth: Option<(String, String)>,
-    vhost: String,
-}
-
-fn parse_target(target: &str) -> anyhow::Result<RabbitTarget> {
-    let url = reqwest::Url::parse(target)
-        .map_err(|e| anyhow::anyhow!("invalid RabbitMQ management URL '{target}': {e}"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("'{target}' has no host"))?;
-    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
-    let base_url = format!("{}://{host}{port}", url.scheme());
-    // `username()`/`password()` come back still percent-encoded (`p%40ss`
-    // for `p@ss`); sending that as Basic credentials is a wrong password.
-    let decode = |s: &str| {
-        percent_encoding::percent_decode_str(s)
-            .decode_utf8_lossy()
-            .into_owned()
-    };
-    let auth = if url.username().is_empty() {
-        None
-    } else {
-        Some((decode(url.username()), decode(url.password().unwrap_or(""))))
-    };
-    let vhost = match url.path().trim_start_matches('/') {
-        "" => "%2f".to_string(),
-        other => other.to_string(),
-    };
-    Ok(RabbitTarget {
-        base_url,
-        auth,
-        vhost,
-    })
-}
+use tradar_connector_rabbitmq::{
+    BindingInfo, ExchangeInfo, MessageInfo, QueueInfo, RabbitTarget, parse_target,
+};
 
 /// Cheap to `Clone` (a `reqwest::Client` is an `Arc` handle internally, and
 /// `RabbitTarget` is plain owned strings) -- `server.rs` clones one out of
@@ -105,12 +24,7 @@ pub struct RabbitConnection {
 
 impl RabbitConnection {
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}{path}", self.target.base_url);
-        let request = self.client.request(method, url);
-        match &self.target.auth {
-            Some((user, pass)) => request.basic_auth(user, Some(pass)),
-            None => request,
-        }
+        self.target.request(&self.client, method, path)
     }
 }
 

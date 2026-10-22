@@ -1,18 +1,14 @@
 //! Kafka tail: the first connector this server pushes background
 //! notifications for (`kafka.tail.message`, with no request behind each
 //! one -- see `docs/backlog/push-channel-design-2026-10-14.md`). Not a
-//! `Connector`/`QueryDriver` and not a reuse of `tradar-connector-kafka`:
-//! that crate's `KafkaSession` is shaped around a `tick()`-driven event
-//! queue for the TUI's render loop, a different consumer than "push a
-//! notification line the instant a message arrives" needs -- same
-//! reasoning `grpc.rs` already set a precedent for (talk to the
-//! underlying client library directly, not through a connector crate built
-//! for a different shape). `server.rs` owns the connection-id/subscription
+//! `Connector`/`QueryDriver`, and not `tradar-connector-kafka`'s TUI
+//! `KafkaSession` (a `tick()`-driven queue for a render loop, not "push a
+//! line the instant a message arrives"); only the throwaway consumer-group
+//! naming comes from that crate. `server.rs` owns the connection-id/subscription
 //! bookkeeping and the `ClientConnection::notify` wiring; this module only
 //! knows `rdkafka`.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,6 +20,7 @@ use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use tradar_connector_kafka::ephemeral_group_id;
 
 const CLUSTER_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -36,20 +33,6 @@ const MAX_BUFFERED_MESSAGES: usize = 500;
 
 pub struct KafkaConnection {
     pub(crate) brokers: String,
-}
-
-fn ephemeral_group_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    // Never joins a real consumer group -- every tail gets its own, so
-    // tailing a topic never steals partitions from (or rebalances) an
-    // application's actual consumers. Same scheme
-    // `tradar-connector-kafka`'s own `ephemeral_group_id` uses.
-    format!("tradar-server-tail-{now}-{n}")
 }
 
 /// Opens a Kafka client and probes the broker's metadata once -- fails
@@ -159,7 +142,7 @@ pub fn start_tail(
             let mut config = ClientConfig::new();
             config
                 .set("bootstrap.servers", &brokers)
-                .set("group.id", ephemeral_group_id())
+                .set("group.id", ephemeral_group_id("tradar-server-tail"))
                 .set("enable.auto.commit", "false");
             let consumer: StreamConsumer<DefaultConsumerContext> = match config.create() {
                 Ok(c) => c,

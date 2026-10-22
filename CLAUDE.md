@@ -13,7 +13,7 @@ Guidance for Claude Code (claude.ai/code) in this repository.
 Cargo workspace; `cargo run`/`build`/`test` need no `-p` (`default-members = ["crates/tradar-app"]`, binary `tradar`). Crates under `crates/`:
 
 - `tradar-query` (`QueryDriver`, result/schema types, statement splitting, completion, edit helpers, `DriverOpener`; no UI, no workspace deps), `tradar-core` (storage; with its default `ui` feature also theme, keymap, shared widgets), `tradar-connector-spi` (TUI `Connector`/`Session` traits), `tradar-query-workbench` (TUI: `QueryEngine`, query screens; `query_driver` re-exports `tradar-query`).
-- `tradar-connector-<name>` ×12: `postgres mysql sqlite mongo elasticsearch redis cassandra clickhouse` implement `QueryDriver`; `kafka rabbitmq http socket` implement `Connector`/`Session` directly. gRPC lives only in `tradar-server` (no TUI screen).
+- `tradar-connector-<name>` ×12: `postgres mysql sqlite mongo elasticsearch redis cassandra clickhouse` implement `QueryDriver`; `kafka rabbitmq http socket` have a TUI-free shared module (`api`/`request`/`preview`/`tail`, used by the server's own modules) and implement `Connector`/`Session` in `session.rs` behind the default `tui` feature. gRPC lives only in `tradar-server` (no TUI screen).
 - `tradar-app` (TUI) and `tradar-server` (headless server).
 
 Large crates are split by topic (e.g. `QueryDriver` in `query_driver/*`, Mongo in `shell|run|driver|snippets|...`, server in `grpc/` and `server/`, Neovim plugin in `nvim/lua/tradar/*` sharing `ctx.lua`); keep new code in the matching module and tests beside it (`tests.rs` / `tests/`) rather than growing `lib.rs`.
