@@ -126,12 +126,19 @@ impl Server {
         Ok(json!({"connected": true, "already": false}))
     }
 
+    /// Closes connection `name` whatever serves it -- a query driver or an
+    /// extension (the same as `<driver>.disconnect`).
     pub(super) fn disconnect(&self, params: &Value) -> Result<Value, RpcError> {
         let name = str_param(params, "connection")?;
-        let mut state = self.state.lock().unwrap();
-        state.completions.remove(name);
-        state.last_used.remove(name);
-        let removed = state.drivers.remove(name).is_some();
+        let mut removed = {
+            let mut state = self.state.lock().unwrap();
+            state.completions.remove(name);
+            state.last_used.remove(name);
+            state.drivers.remove(name).is_some()
+        };
+        for extension in &self.extensions {
+            removed |= extension.close(name);
+        }
         Ok(json!({"disconnected": removed}))
     }
 

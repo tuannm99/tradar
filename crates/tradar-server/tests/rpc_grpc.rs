@@ -285,6 +285,13 @@ async fn connecting_without_reflection_leaves_the_pool_empty_until_load_proto() 
     let services = call(&server, "grpc.services", json!({"connection": "g"})).await;
     assert_eq!(ok(&services), &json!(["greeter.Greeter"]));
 
+    // A reconnect -- after `disconnect`, or the idle reaper closing it --
+    // loads the hand-added `.proto` again rather than losing it.
+    ok(&call(&server, "disconnect", json!({"connection": "g"})).await);
+    ok(&call(&server, "grpc.connect", json!({"connection": "g"})).await);
+    let services = call(&server, "grpc.services", json!({"connection": "g"})).await;
+    assert_eq!(ok(&services), &json!(["greeter.Greeter"]));
+
     // The same unary invoke path works once the pool is filled by hand --
     // confirms the fallback produces a pool just as usable as reflection's.
     let invoked = call(

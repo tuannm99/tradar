@@ -859,3 +859,62 @@ async fn an_idle_connection_is_closed_but_a_busy_or_recent_one_is_not() {
     ok(&call(&server, "connect", json!({"connection": "local"})).await);
     assert!(server.reap_idle(ttl, Instant::now()).is_empty());
 }
+
+/// The idle reaper and the generic `disconnect` cover extension connections
+/// (HTTP here: its connect needs no network) as well as query drivers.
+#[cfg(feature = "http")]
+#[tokio::test]
+async fn idle_reaping_and_disconnect_cover_extension_connections_too() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConnectionStore::at(dir.path().join("connections.toml"));
+    store
+        .save(&[
+            SavedConnection {
+                name: "local".into(),
+                driver: "sqlite".into(),
+                target: dir.path().join("t.db").to_string_lossy().into_owned(),
+            },
+            SavedConnection {
+                name: "web".into(),
+                driver: "http".into(),
+                target: "http://127.0.0.1:1".into(),
+            },
+        ])
+        .unwrap();
+    let server = Server::new(registry(), Some(store));
+    let connected = |list: &Value, name: &str| {
+        ok(list)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()["connected"]
+            .clone()
+    };
+    let ttl = Duration::from_secs(600);
+    let later = Instant::now() + ttl + Duration::from_secs(1);
+
+    ok(&call(&server, "connect", json!({"connection": "local"})).await);
+    ok(&call(&server, "http.connect", json!({"connection": "web"})).await);
+    let list = call(&server, "connections.list", Value::Null).await;
+    assert_eq!(connected(&list, "web"), true);
+
+    assert!(
+        server.reap_idle(ttl, Instant::now()).is_empty(),
+        "just used"
+    );
+    let mut reaped = server.reap_idle(ttl, later);
+    reaped.sort();
+    assert_eq!(reaped, vec!["local".to_string(), "web".to_string()]);
+    let list = call(&server, "connections.list", Value::Null).await;
+    assert_eq!(connected(&list, "local"), false);
+    assert_eq!(connected(&list, "web"), false);
+
+    // The plain `disconnect` closes an extension's connection too.
+    ok(&call(&server, "http.connect", json!({"connection": "web"})).await);
+    let reply = call(&server, "disconnect", json!({"connection": "web"})).await;
+    assert_eq!(ok(&reply)["disconnected"], true);
+    let list = call(&server, "connections.list", Value::Null).await;
+    assert_eq!(connected(&list, "web"), false);
+}

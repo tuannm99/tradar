@@ -241,6 +241,27 @@ impl crate::extension::Extension for KafkaExtension {
         self.state.lock().unwrap().connections.contains_key(name)
     }
 
+    /// A running tail holds its own copy of the brokers, so closing the
+    /// connection never cuts a tail short.
+    fn connected(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .connections
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn close(&self, name: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .connections
+            .remove(name)
+            .is_some()
+    }
+
     /// Aborts and forgets every tail `client_id` started and never
     /// explicitly `kafka.tail.stop`ped.
     fn client_disconnected(&self, client_id: u64) {
@@ -290,13 +311,7 @@ impl crate::extension::Extension for KafkaExtension {
             }
             "disconnect" => {
                 let name = str_param(params, "connection")?;
-                let removed = self
-                    .state
-                    .lock()
-                    .unwrap()
-                    .connections
-                    .remove(name)
-                    .is_some();
+                let removed = self.close(name);
                 Ok(json!({"disconnected": removed}))
             }
             "topics" => {

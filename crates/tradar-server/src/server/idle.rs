@@ -50,18 +50,22 @@ impl Server {
         self.idle_ttl
     }
 
-    /// Marks `name` as used now. Only connections that are actually open are
-    /// tracked (an extension's connection, e.g. Kafka, is not in `drivers`).
+    /// Marks connection `name` as used now -- a query connection or an
+    /// extension's (Kafka, RabbitMQ, HTTP, gRPC) alike. Names that are not
+    /// open are harmless here: the reaper only looks at open ones, and both
+    /// the reaper and `disconnect` forget the entry.
     pub(super) fn touch(&self, name: &str) {
-        let mut state = self.state.lock().unwrap();
-        if state.drivers.contains_key(name) {
-            state.last_used.insert(name.to_string(), Instant::now());
-        }
+        self.state
+            .lock()
+            .unwrap()
+            .last_used
+            .insert(name.to_string(), Instant::now());
     }
 
-    /// Closes every connection idle for `ttl` as of `now`; returns their
-    /// names. Never closes one that is busy: a transaction in progress, a
-    /// cancellable query still running, or any call still holding the driver.
+    /// Closes every connection idle for `ttl` as of `now` -- query drivers and
+    /// extension connections alike; returns their names. Never closes a query
+    /// driver that is busy: a transaction in progress, a cancellable query
+    /// still running, or any call still holding the driver.
     pub fn reap_idle(&self, ttl: Duration, now: Instant) -> Vec<String> {
         let mut state = self.state.lock().unwrap();
         let idle: Vec<String> = state
@@ -84,7 +88,24 @@ impl Server {
             state.completions.remove(name);
             state.last_used.remove(name);
         }
-        idle
+        let mut closed = idle;
+        // Extension connections: what `Extension::connected` lists and
+        // `close` can drop. Each extension keeps its own in-flight work
+        // (a gRPC call, a Kafka tail) alive on its own copy of the client,
+        // so closing never cuts one short.
+        for extension in &self.extensions {
+            for name in extension.connected() {
+                let quiet = state
+                    .last_used
+                    .get(&name)
+                    .is_none_or(|t| now.saturating_duration_since(*t) >= ttl);
+                if quiet && extension.close(&name) {
+                    state.last_used.remove(&name);
+                    closed.push(name);
+                }
+            }
+        }
+        closed
     }
 }
 
