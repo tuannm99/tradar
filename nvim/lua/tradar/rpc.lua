@@ -25,9 +25,35 @@ M.CLIENT_PROTOCOL_MAJOR = CLIENT_PROTOCOL_MAJOR
 local METHOD_NOT_FOUND = -32601
 local warned_version = false
 
+--- Longest unix socket path the OS accepts (`sun_path` is 108 bytes on
+--- Linux, 104 on macOS/BSD, one of them the terminating NUL).
+function M.max_socket_path()
+  return vim.fn.has('linux') == 1 and 107 or 103
+end
+
+--- `$XDG_RUNTIME_DIR/tradar/server.sock`, unless that is too long for a
+--- unix socket (a deep runtime dir, a long `$TMPDIR`): then
+--- `/tmp/tradar-<uid>/server.sock`. The server creates that directory `0700`
+--- and refuses to share it, so a short path in a shared `/tmp` is as private
+--- as the long one. An explicit `setup{ socket }` is never rewritten.
 local function default_socket()
   local base = vim.env.XDG_RUNTIME_DIR or vim.fn.fnamemodify(vim.fn.tempname(), ':h')
-  return base .. '/tradar/server.sock'
+  local path = base .. '/tradar/server.sock'
+  if #path <= M.max_socket_path() then return path end
+  local info = (uv.os_get_passwd and uv.os_get_passwd()) or {}
+  return ('/tmp/tradar-%s/server.sock'):format(info.uid or vim.env.USER or 'user')
+end
+
+--- Where the plugin talks to the server: `setup{ socket }`, else the default.
+function M.socket_path(opts) return opts.socket or default_socket() end
+
+--- `nil` if `path` fits in a unix socket address, else a message saying what
+--- to do about it.
+function M.check_path(path)
+  local limit = M.max_socket_path()
+  if #path <= limit then return nil end
+  return ('socket path is %d bytes, but a unix socket path can be at most %d: %s -- set setup{ socket = "/tmp/tradar.sock" } (or shorten the directory)')
+    :format(#path, limit, path)
 end
 
 --- Where to find the server binary: explicit option, then PATH, then a
@@ -126,7 +152,9 @@ end
 --- Connects to the socket, starting the server once if nothing answers.
 function M.ensure(opts, done)
   if pipe then return done(nil) end
-  local path = opts.socket or default_socket()
+  local path = M.socket_path(opts)
+  local too_long = M.check_path(path)
+  if too_long then return vim.schedule(function() done(too_long) end) end
 
   local function attempt(cb)
     local p = uv.new_pipe(false)

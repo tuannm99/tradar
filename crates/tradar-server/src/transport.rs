@@ -25,11 +25,34 @@ pub fn default_socket_path() -> PathBuf {
     base.join("tradar").join("server.sock")
 }
 
+/// Longest unix socket path the OS accepts, in bytes: `sun_path` is 108 on
+/// Linux and 104 on macOS/BSD, one of which is the terminating NUL.
+#[cfg(target_os = "linux")]
+pub const MAX_SOCKET_PATH: usize = 107;
+#[cfg(not(target_os = "linux"))]
+pub const MAX_SOCKET_PATH: usize = 103;
+
+/// A clear error instead of `path must be shorter than SUN_LEN`.
+fn check_socket_path_length(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let len = path.as_os_str().as_bytes().len();
+    if len > MAX_SOCKET_PATH {
+        anyhow::bail!(
+            "socket path is {len} bytes, but a unix socket path can be at most {MAX_SOCKET_PATH}: {} \
+             -- pass a shorter path (`tradar-server /tmp/tradar.sock`, or `setup{{ socket = ... }}` in the plugin)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Binds `path`, owner-only: the socket is a door to every saved database,
 /// so the directory is `0700` before the socket exists and the socket is
 /// `0600` after -- no window where another local user can connect.
 pub async fn bind(path: &Path) -> anyhow::Result<UnixListener> {
     use std::os::unix::fs::PermissionsExt;
+
+    check_socket_path_length(path)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

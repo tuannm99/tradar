@@ -2,6 +2,7 @@
 # Runs every nvim/tests/*_spec.lua in its own headless Neovim, each against
 # its own tradar-server, config dir and empty SQLite database (connection
 # "local"). Usage: nvim/tests/run.sh [name-filter]
+# Optional plugins (telescope) are cloned into .deps/ first (deps.sh).
 # TRADAR_SERVER (default target/debug/tradar-server) and NVIM override the
 # binaries. A spec may ask for server env with a `-- env: K=V ...` line.
 set -u
@@ -12,6 +13,8 @@ if [ ! -x "$SERVER" ]; then
   echo "no tradar-server at $SERVER -- cargo build -p tradar-server first" >&2
   exit 2
 fi
+
+"$ROOT/nvim/tests/deps.sh"
 
 filter=${1:-}
 specs=0 failed=0

@@ -918,3 +918,26 @@ async fn idle_reaping_and_disconnect_cover_extension_connections_too() {
     let list = call(&server, "connections.list", Value::Null).await;
     assert_eq!(connected(&list, "web"), false);
 }
+
+#[tokio::test]
+async fn a_socket_path_too_long_for_the_os_is_a_clear_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = dir
+        .path()
+        .join("x".repeat(tradar_server::MAX_SOCKET_PATH))
+        .join("s.sock");
+    let error = bind(&long).await.unwrap_err().to_string();
+    assert!(
+        error.contains("can be at most") && error.contains("shorter path"),
+        "{error}"
+    );
+    // And a path at the limit is still fine.
+    let name = "s.sock";
+    let room = tradar_server::MAX_SOCKET_PATH - dir.path().as_os_str().len() - 1;
+    let fits = dir
+        .path()
+        .join("y".repeat(room - name.len() - 1))
+        .join(name);
+    assert_eq!(fits.as_os_str().len(), tradar_server::MAX_SOCKET_PATH);
+    bind(&fits).await.unwrap();
+}

@@ -140,4 +140,4 @@ Hỏi xác nhận (mặc định là `Cancel`, nên `<CR>` phản xạ là đáp
 
 ## Test
 
-`make test-nvim` (hoặc `nvim/tests/run.sh [tên]`) chạy `nvim/tests/*_spec.lua`: mỗi spec một Neovim headless, một `tradar-server` và một database SQLite rỗng riêng (connection `local`). Cần `nvim` và `python3`, không cần Docker. Spec mới dùng `nvim/tests/helpers.lua` (`H.setup`, `H.run_until`, `H.check`, `H.done`); `-- env: K=V` ở đầu file đặt biến môi trường cho server.
+`make test-nvim` (hoặc `nvim/tests/run.sh [tên]`) chạy `nvim/tests/*_spec.lua`: mỗi spec một Neovim headless, một `tradar-server` và một database SQLite rỗng riêng (connection `local`). Cần `nvim` và `python3`, không cần Docker. Telescope và plenary (phiên bản ghim) được `nvim/tests/deps.sh` tải vào `.deps/` (gitignore) lần đầu — cần mạng; `H.telescope()` nạp chúng cho spec cần picker. Spec mới dùng `nvim/tests/helpers.lua` (`H.setup`, `H.run_until`, `H.check`, `H.done`); `-- env: K=V` ở đầu file đặt biến môi trường cho server.

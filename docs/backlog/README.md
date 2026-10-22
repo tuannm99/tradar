@@ -57,6 +57,7 @@ Nhóm theo chủ đề, trong mỗi nhóm theo thứ tự thời gian. Mục m�
 - [`save-query-library-2026-10-22.md`](save-query-library-2026-10-22.md) — `:TradarSave` (thư viện chung) / `:TradarSaveHere` (cạnh file) / `:TradarOpen`
 - [`nvim-ux-batch-2026-10-22.md`](nvim-ux-batch-2026-10-22.md) — `zw`/`zW` hiện trọn cột, statusline `(idle)`, Tab-complete connection, thông báo một ngôn ngữ, `:Tradar <lệnh-con>`
 - [`nvim-crud-generator-2026-10-22.md`](nvim-crud-generator-2026-10-22.md) — `:TradarCrud` / `<leader>rg`: sinh create/read/update/delete cho một bảng, chọn cột, chèn vào buffer
+- [`small-fixes-socket-telescope-2026-10-22.md`](small-fixes-socket-telescope-2026-10-22.md) — lỗi rõ + đường dẫn mặc định ngắn khi socket quá dài; spec cho picker telescope (`deps.sh`)
 
 ## Connector (dùng chung cho cả hai giao diện)
 

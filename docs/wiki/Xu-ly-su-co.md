@@ -58,7 +58,7 @@ Plugin tìm binary theo thứ tự: `server_cmd` → `PATH` → `<repo>/target/r
 
 ## Đường dẫn socket quá dài
 
-Unix socket giới hạn khoảng 108 byte. Nếu `$XDG_RUNTIME_DIR` dài, `:checkhealth` sẽ cảnh báo; đặt `setup{ socket = "/tmp/tradar.sock" }` (đường dẫn ngắn hơn).
+Unix socket giới hạn **107 byte** trên Linux (103 trên macOS). Plugin tự xử lý trường hợp thường gặp: nếu `$XDG_RUNTIME_DIR/tradar/server.sock` quá dài thì dùng `/tmp/tradar-<uid>/server.sock` (thư mục `0700`, chỉ bạn vào được). Đường dẫn bạn tự đặt trong `setup{ socket = ... }` không bị đổi — nếu nó quá dài, lệnh đầu tiên báo rõ "socket path is N bytes, but a unix socket path can be at most 107" kèm cách sửa, và `:checkhealth tradar` hiện lỗi đó; đặt đường dẫn ngắn hơn, ví dụ `setup{ socket = "/tmp/tradar.sock" }`. Chạy `tradar-server <đường dẫn>` bằng tay cũng báo đúng lỗi này thay vì "path must be shorter than SUN_LEN".
 
 ## "`tên` is not connected -- call `connect` first"
 

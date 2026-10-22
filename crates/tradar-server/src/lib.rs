@@ -26,7 +26,7 @@ use tradar_query::DriverOpener;
 
 pub use server::idle::{DEFAULT_IDLE_TTL, parse_ttl, reap_loop};
 pub use server::{ClientConnection, Server};
-pub use transport::{bind, default_socket_path, serve};
+pub use transport::{MAX_SOCKET_PATH, bind, default_socket_path, serve};
 
 /// Every query-language connector compiled into this binary -- same
 /// feature-gated shape as `tradar-app`'s own `registry()`.
