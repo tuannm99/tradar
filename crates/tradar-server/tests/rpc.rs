@@ -811,3 +811,51 @@ async fn a_closed_socket_is_cleaned_up_even_with_replies_pending() {
         waited += 1;
     }
 }
+
+#[tokio::test]
+async fn an_idle_connection_is_closed_but_a_busy_or_recent_one_is_not() {
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+    let ttl = Duration::from_secs(600);
+    let later = Instant::now() + ttl + Duration::from_secs(1);
+
+    // Just used: stays.
+    assert!(server.reap_idle(ttl, Instant::now()).is_empty());
+    assert_eq!(
+        ok(&call(&server, "status", json!({"connection": "local"})).await)["alive"],
+        true
+    );
+
+    // A transaction in progress keeps it open however long it has been quiet.
+    ok(&call(
+        &server,
+        "execute",
+        json!({"connection": "local", "query": "BEGIN"}),
+    )
+    .await);
+    assert!(server.reap_idle(ttl, later).is_empty(), "open transaction");
+    ok(&call(
+        &server,
+        "execute",
+        json!({"connection": "local", "query": "ROLLBACK"}),
+    )
+    .await);
+
+    // The background `status` poll is not use.
+    assert_eq!(server.reap_idle(ttl, later), vec!["local".to_string()]);
+    let after = call(&server, "status", json!({"connection": "local"})).await;
+    assert!(
+        after["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not connected"),
+        "{after}"
+    );
+    let list = call(&server, "connections.list", Value::Null).await;
+    assert_eq!(ok(&list)[0]["connected"], false);
+
+    // And the next call after a reap simply connects again.
+    ok(&call(&server, "connect", json!({"connection": "local"})).await);
+    assert!(server.reap_idle(ttl, Instant::now()).is_empty());
+}

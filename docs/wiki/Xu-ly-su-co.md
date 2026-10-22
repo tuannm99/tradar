@@ -21,6 +21,13 @@ cargo build --release -p tradar-server
 
 Cảnh báo này chỉ nhắc, không chặn bạn dùng tiếp. Muốn chắc plugin dùng đúng binary, đặt `setup{ server_cmd = "/đường/dẫn/tradar-server" }`.
 
+## Connection tự ngắt khi không dùng
+
+Để trả RAM, `tradar-server` đóng connection không có lệnh nào trong **30 phút** (statusline hiện `✗` một lúc, log ghi `idle-disconnect [tên]`). Chạy query tiếp theo sẽ tự kết nối lại, chỉ chậm hơn một nhịp. Không đóng khi đang trong transaction hay đang có query chạy.
+
+- Đổi: `setup{ idle_ttl = "10m" }` (giây hoặc `"90s"`/`"10m"`/`"2h"`; `false` hoặc `0` để tắt), hoặc biến môi trường `TRADAR_IDLE_TTL` — có hiệu lực khi server **khởi động** (`:TradarRestart`).
+- `:checkhealth tradar` hiện giá trị đang dùng.
+
 ## Xem log của server
 
 `:TradarLog` mở file log của `tradar-server` trong một split dưới và bám theo dòng mới (con trỏ đang ở dòng cuối thì tự cuộn; cuộn lên để đọc, `G` để bám lại; `q` đóng). Đường dẫn cũng hiện trong `:checkhealth tradar`.

@@ -72,6 +72,11 @@ function M.check()
       end
     end
 
+    if vresult and vresult.idle_ttl_secs then
+      vim.health.ok(('idle connections close after %ds without use (TRADAR_IDLE_TTL / setup{ idle_ttl })'):format(vresult.idle_ttl_secs))
+    elseif vresult and vresult.idle_ttl_secs == nil and vresult.major then
+      vim.health.info('idle disconnect: off (or an older server)')
+    end
     if vresult and vresult.log_path then
       vim.health.ok('server log: ' .. vresult.log_path .. ' (:TradarLog)')
     elseif vresult then

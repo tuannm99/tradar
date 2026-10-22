@@ -152,7 +152,13 @@ function M.ensure(opts, done)
         done('cannot reach tradar-server at ' .. path .. (cmd and '' or ' (no tradar-server binary found; see :checkhealth tradar)'))
       end)
     end
-    vim.fn.jobstart({ cmd, path }, { detach = true })
+    -- `setup{ idle_ttl = ... }` (seconds, "10m", "2h", false/0 = never) reaches the
+    -- server as TRADAR_IDLE_TTL; it only takes effect when the server starts.
+    local env
+    if opts.idle_ttl ~= nil then
+      env = { TRADAR_IDLE_TTL = opts.idle_ttl == false and 'off' or tostring(opts.idle_ttl) }
+    end
+    vim.fn.jobstart({ cmd, path }, { detach = true, env = env })
     -- Poll until the new server is listening (up to ~3s).
     local tries = 0
     local function retry()

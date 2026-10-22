@@ -92,4 +92,5 @@ Mục lục cho các file trong thư mục này, theo thứ tự thời gian. M�
 - [`ui-ux-perf-check-2026-10-20.md`](ui-ux-perf-check-2026-10-20.md) — rà UI/UX + hiệu năng plugin; sửa `list_schema` SQLite (N+1 `PRAGMA` → 3 truy vấn)
 - [`server-log-2026-10-21.md`](server-log-2026-10-21.md) — file log của `tradar-server`, `:TradarLog`, protocol 1.11; sửa socket đóng không dọn client/subscription
 - [`save-query-library-2026-10-22.md`](save-query-library-2026-10-22.md) — `:TradarSave` (thư viện chung) / `:TradarSaveHere` (cạnh file) / `:TradarOpen`
+- [`idle-disconnect-2026-10-22.md`](idle-disconnect-2026-10-22.md) — connection không dùng quá `TRADAR_IDLE_TTL` thì server tự đóng, protocol 1.12
 - [`performance-fetch-cap-2026-10-31.md`](performance-fetch-cap-2026-10-31.md) — `max_rows` (mặc định 1000) thay vì đọc 10 000 dòng, trần 64 MB mỗi kết quả, 256 MB tổng cursor, đóng cursor cũ: `select *` 600 ms → 30 ms, RSS không còn tăng không chặn

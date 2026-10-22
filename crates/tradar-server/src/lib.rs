@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 use tradar_connector_spi::Connector;
 
+pub use server::idle::{DEFAULT_IDLE_TTL, parse_ttl, reap_loop};
 pub use server::{ClientConnection, Server};
 pub use transport::{bind, default_socket_path, serve};
 

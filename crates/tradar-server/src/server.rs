@@ -21,6 +21,7 @@ use crate::protocol::{METHOD_NOT_FOUND, RpcError, StoredResult};
 
 mod connections;
 mod editing;
+pub mod idle;
 mod query;
 
 /// Rows returned inline by `execute` -- enough to fill a screen, so the
@@ -62,6 +63,8 @@ struct State {
     /// future to stop waiting on, and which connection to tell the
     /// database about).
     running: HashMap<String, (Arc<Notify>, Arc<dyn QueryDriver>)>,
+    /// Last call that named each open connection; see `idle`.
+    last_used: HashMap<String, std::time::Instant>,
 }
 
 /// One live client socket (`transport.rs`'s `serve_connection`) -- *not* a
@@ -129,6 +132,8 @@ pub struct Server {
     open_clients: AtomicUsize,
     /// When this process started -- `version` compares it with the binary on disk.
     started: std::time::SystemTime,
+    /// Close connections unused for this long; `None` keeps them forever.
+    idle_ttl: Option<std::time::Duration>,
 }
 
 impl Server {
@@ -145,6 +150,7 @@ impl Server {
             next_client_id: AtomicU64::new(1),
             open_clients: AtomicUsize::new(0),
             started: std::time::SystemTime::now(),
+            idle_ttl: idle::parse_ttl(std::env::var("TRADAR_IDLE_TTL").ok().as_deref()),
         }
     }
 
@@ -192,7 +198,20 @@ impl Server {
                 if let Some(connection) = params.get("connection").and_then(Value::as_str) {
                     label = format!("{method} [{connection}]");
                 }
-                self.dispatch(method, &params, client).await
+                // The background `status` poll must not count as use, or no
+                // connection would ever go idle.
+                let used = params
+                    .get("connection")
+                    .and_then(Value::as_str)
+                    .filter(|_| !matches!(method, "status" | "version" | "disconnect"));
+                if let Some(name) = used {
+                    self.touch(name);
+                }
+                let outcome = self.dispatch(method, &params, client).await;
+                if let Some(name) = used {
+                    self.touch(name);
+                }
+                outcome
             }
         };
         let ms = started.elapsed().as_millis();
