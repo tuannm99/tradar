@@ -26,11 +26,12 @@ Connectors are gated by Cargo features named after `ConnectorDescriptor::id`; `d
 - Prefer interfaces over concrete types; reuse shared widgets. Keyboard-first; fast startup; large results must paginate rather than load everything.
 - Keep each backend's native query language (SQL, Mongo shell JS, ES Query DSL) — no invented unified language.
 - Additive protocol changes bump the minor in `protocol::PROTOCOL_VERSION`; mirror the number in `docs/architecture.md`.
-- Tests: unit tests for core logic, integration tests per driver. Update docs when behavior changes — concisely; history and "why" go to `docs/backlog/` (index: `docs/backlog/README.md`), not into `docs/architecture.md`.
+- Tests: unit tests for core logic, integration tests per driver, and an `nvim/tests/*_spec.lua` for user-visible plugin behavior (don't leave plugin checks as ad-hoc scripts). Update docs when behavior changes — concisely; history and "why" go to `docs/backlog/` (index: `docs/backlog/README.md`), not into `docs/architecture.md`.
 
 ## Commands
 
 - `cargo build` / `cargo run` / `cargo test [name]` / `cargo clippy --all-targets --workspace -- -D warnings` / `cargo fmt`
+- `make test-nvim` (or `nvim/tests/run.sh [filter]`): the Neovim plugin's tests -- each `nvim/tests/*_spec.lua` runs in its own headless Neovim against its own `tradar-server` and an empty SQLite database (`nvim/tests/helpers.lua`). Needs `nvim` and `python3`; no Docker. CI (`.github/workflows/ci.yml`) runs `make check` + `make test-nvim` on every push.
 - Ten connectors' tests (everything but SQLite/Socket) start a real backend via `testcontainers` and need a Docker daemon. Without Docker: `make test-unit`. With: `make test-docker` (includes `make test-kafka-server`; set `TRADAR_DOCKER_HOST_NETWORK=1` on Docker without a bridge network).
 
 ## Documentation

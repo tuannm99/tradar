@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # fmt + clippy (whole workspace) + every test that needs no Docker,
+    # then the Neovim plugin tests against a real tradar-server (SQLite).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages (librdkafka is built from source by rdkafka's cmake-build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libcurl4-openssl-dev libsasl2-dev libssl-dev pkg-config python3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: make check
+        run: make check
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: v0.10.4
+      - name: make test-nvim
+        run: make test-nvim

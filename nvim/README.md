@@ -134,3 +134,7 @@ Hỏi xác nhận (mặc định là `Cancel`, nên `<CR>` phản xạ là đáp
 - `setup{ confirm = false }` tắt hết.
 
 Đây là phân tích theo token (bỏ qua comment và chuỗi), không phải parser: bắt các lỗi tay thường gặp, không phải rào chắn bảo mật.
+
+## Test
+
+`make test-nvim` (hoặc `nvim/tests/run.sh [tên]`) chạy `nvim/tests/*_spec.lua`: mỗi spec một Neovim headless, một `tradar-server` và một database SQLite rỗng riêng (connection `local`). Cần `nvim` và `python3`, không cần Docker. Spec mới dùng `nvim/tests/helpers.lua` (`H.setup`, `H.run_until`, `H.check`, `H.done`); `-- env: K=V` ở đầu file đặt biến môi trường cho server.

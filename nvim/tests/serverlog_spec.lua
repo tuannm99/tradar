@@ -1,0 +1,43 @@
+-- The server log file and :TradarLog.
+local H = dofile('nvim/tests/helpers.lua')
+local t = H.setup()
+H.sql_buffer('log.sql')
+H.check('connects', H.connect())
+H.run("select 1 as secret_marker where 'hunter2' = 'hunter2'")
+H.wait(3000, function() return H.text():find('rows', 1, true) end)
+H.run('selec 2')
+H.sleep(500)
+local sqlwin = vim.fn.bufwinid(H.sqlbuf)
+
+local log = io.open(os.getenv('TRADAR_LOG_FILE')):read('*a')
+H.check('requests are logged with timing', log:find('execute [local] ok', 1, true) and log:find('connect [local] ok', 1, true), log)
+H.check('failures are logged with the error', log:find('WARN execute [local] failed', 1, true) and log:find('selec', 1, true), log)
+H.check('query text and secrets are never logged', not log:find('secret_marker', 1, true) and not log:find('hunter2', 1, true), log)
+
+vim.cmd('TradarLog')
+H.wait(1500, function() return vim.bo.filetype == 'tradarlog' end)
+local buf = vim.api.nvim_get_current_buf()
+H.check(':TradarLog opens the server log', vim.bo.filetype == 'tradarlog' and vim.api.nvim_buf_get_name(buf) == os.getenv('TRADAR_LOG_FILE'), vim.api.nvim_buf_get_name(buf))
+local n0 = vim.api.nvim_buf_line_count(buf)
+H.check('cursor starts on the last line', vim.api.nvim_win_get_cursor(0)[1] == n0)
+H.check('read-only', not vim.bo[buf].modifiable)
+
+local logwin = vim.fn.bufwinid(buf)
+vim.api.nvim_set_current_win(sqlwin)
+H.run('select 3 as c')
+H.wait(4000, function() return vim.api.nvim_buf_line_count(buf) > n0 end)
+H.check('follows new lines', vim.api.nvim_buf_line_count(buf) > n0)
+H.check('stays on the last line', vim.api.nvim_win_get_cursor(logwin)[1] == vim.api.nvim_buf_line_count(buf))
+
+vim.api.nvim_win_set_cursor(logwin, { 1, 0 })
+local n1 = vim.api.nvim_buf_line_count(buf)
+vim.api.nvim_set_current_win(sqlwin)
+H.run('select 4 as d')
+H.wait(2500, function() return vim.api.nvim_buf_line_count(buf) > n1 end)
+H.check('reading older lines is not yanked to the end', vim.api.nvim_win_get_cursor(logwin)[1] == 1)
+
+vim.api.nvim_set_current_win(logwin)
+vim.api.nvim_feedkeys('q', 'x', false)
+H.check('q closes it', vim.fn.bufwinid(buf) == -1)
+
+H.done()
