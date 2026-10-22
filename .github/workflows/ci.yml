@@ -39,3 +39,40 @@ jobs:
           version: v0.10.4
       - name: make test-nvim
         run: make test-nvim
+
+  docker:
+    # The connectors' integration tests against a real backend
+    # (testcontainers): one job per target so a slow or red backend doesn't
+    # hide the others. Runners ship a Docker daemon with a bridge network.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - test-postgres
+          - test-mysql
+          - test-redis
+          - test-mongo
+          - test-elasticsearch
+          - test-cassandra
+          - test-clickhouse
+          - test-rabbitmq
+          - test-kafka
+          - test-kafka-server
+          - test-http
+    name: docker (${{ matrix.target }})
+    steps:
+      - uses: actions/checkout@v5
+      - name: System packages (librdkafka is built from source by rdkafka's cmake-build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libcurl4-openssl-dev libsasl2-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: make ${{ matrix.target }}
+        run: make ${{ matrix.target }}

@@ -170,7 +170,7 @@ impl KafkaSession {
                         .map(|g| ConsumerGroupInfo {
                             name: g.name().to_string(),
                             state: g.state().to_string(),
-                            members: g.members().len(),
+                            members: member_count(g),
                         })
                         .collect::<Vec<_>>()
                 })
@@ -438,6 +438,21 @@ impl Connector for KafkaConnector {
 
 pub fn connector() -> Box<dyn Connector> {
     Box::new(KafkaConnector)
+}
+
+/// `g.members().len()`, without calling `members()` on a group that has
+/// none: rdkafka (0.36 through 0.39) builds that slice with
+/// `slice::from_raw_parts(members, member_cnt)`, and librdkafka leaves
+/// `members` null when the count is 0 -- undefined behavior, which a debug
+/// build turns into an abort (found by the CI Docker job). Kafka's own
+/// definition of an `Empty`/`Dead` group is one with no members, and a group
+/// in a rebalance may be momentarily memberless, so only a `Stable` or
+/// `CompletingRebalance` group is asked; the rest count as 0.
+fn member_count(g: &rdkafka::groups::GroupInfo) -> usize {
+    match g.state() {
+        "Stable" | "CompletingRebalance" => g.members().len(),
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
