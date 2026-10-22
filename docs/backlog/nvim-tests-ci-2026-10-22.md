@@ -7,3 +7,4 @@ Bước 1 trong review kiến trúc 2026-10-22: plugin là giao diện chính nh
 - 9 spec chuyển từ các kịch bản smoke cũ: `render` (độ rộng cột, diff sửa lưới), `rowedit`, `results` (footer, phân trang, `max_rows`, export), `layout` (bottom/right/tab + zoom), `api` (modeline, schema, completion, keymap, explain, guard), `files`, `serverlog`, `idle` (`-- env: TRADAR_IDLE_TTL=3`), `cancel`. Tổng ~30 s.
 - Hai kiểm tra cũ sai và đã sửa lại theo hành vi đúng: zoom kiểm `width >= W-1` nhưng cửa sổ còn lại giữ tối thiểu 1 cột + vách ngăn (đúng là `W-2`); sửa khoá `'^1'` không khớp vì cột số căn phải.
 - `make test-nvim`; `.github/workflows/ci.yml` chạy `make check` + `make test-nvim` (Neovim v0.10.4) mỗi lần push/PR. Test cần Docker vẫn chưa vào CI.
+- CI ghim Rust `1.94.1` (bản đang dùng local): lượt đầu với `stable` (1.99) đỏ vì lint clippy mới `double_must_use` bắt trong mã `async_trait` sinh ra. Nâng phiên bản thì nâng có chủ đích, kèm các sửa lint.
