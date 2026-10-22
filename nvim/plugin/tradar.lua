@@ -2,8 +2,9 @@ if vim.g.loaded_tradar then return end
 vim.g.loaded_tradar = true
 
 local function t() return require('tradar') end
+local function names(driver) return require('tradar.commands').connection_names(driver) end
 
-vim.api.nvim_create_user_command('TradarConnect', function(a) t().connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarConnect', function(a) t().connect(a.args) end, { nargs = '?', complete = names('query') })
 vim.api.nvim_create_user_command('TradarConnections', function() t().edit_connections() end, {})
 vim.api.nvim_create_user_command('TradarRun', function(a)
   if a.range > 0 then t().run(a.line1, a.line2) else t().run() end
@@ -30,7 +31,7 @@ end, { nargs = '*', complete = function() return { 'csv', 'json', 'md', 'tsv' } 
 -- gRPC: unary-only v1 (docs/architecture.md, "Chốt lại scope v1" under
 -- gRPC) -- a connection, not a buffer's filetype, so these have no `attach`
 -- autocmd the way sql/mongo/redis/esq do; run them from anywhere.
-vim.api.nvim_create_user_command('TradarGrpcConnect', function(a) require('tradar.grpc').connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarGrpcConnect', function(a) require('tradar.grpc').connect(a.args) end, { nargs = '?', complete = names('grpc') })
 vim.api.nvim_create_user_command('TradarGrpcServices', function() require('tradar.grpc').services() end, {})
 vim.api.nvim_create_user_command('TradarGrpcMethods', function(a) require('tradar.grpc').methods(nil, a.args) end, { nargs = 1 })
 vim.api.nvim_create_user_command('TradarGrpcLoadProto', function(a)
@@ -39,30 +40,38 @@ end, { nargs = 1, complete = 'file' })
 
 -- Kafka tail: a push-channel notification stream, not a request/response
 -- method the way everything above is -- see docs/backlog/kafka-tail-server-2026-10-15.md.
-vim.api.nvim_create_user_command('TradarKafkaConnect', function(a) require('tradar.kafka').connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarKafkaConnect', function(a) require('tradar.kafka').connect(a.args) end, { nargs = '?', complete = names('kafka') })
 vim.api.nvim_create_user_command('TradarKafkaTail', function(a)
   require('tradar.kafka').tail(a.fargs[1], a.fargs[2])
-end, { nargs = '*' })
+end, { nargs = '*', complete = names('kafka') })
 
 -- Socket tail: same push-channel, two-way (typing a line sends it) --
 -- see docs/backlog/socket-tail-server-2026-10-15.md.
-vim.api.nvim_create_user_command('TradarSocketTail', function(a) require('tradar.socket').tail(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarSocketTail', function(a) require('tradar.socket').tail(a.args) end, { nargs = '?', complete = names('socket') })
 
 -- RabbitMQ: no push channel needed (Management HTTP API has no streaming
 -- endpoint) -- plain request/response, see docs/backlog/rabbitmq-server-2026-10-16.md.
-vim.api.nvim_create_user_command('TradarRabbitmqConnect', function(a) require('tradar.rabbitmq').connect(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarRabbitmqConnect', function(a) require('tradar.rabbitmq').connect(a.args) end, { nargs = '?', complete = names('rabbitmq') })
 vim.api.nvim_create_user_command('TradarRabbitmqPeek', function(a)
   require('tradar.rabbitmq').peek(a.fargs[1], a.fargs[2])
-end, { nargs = '*' })
+end, { nargs = '*', complete = names('rabbitmq') })
 vim.api.nvim_create_user_command('TradarRabbitmqBindings', function(a)
   require('tradar.rabbitmq').bindings(a.fargs[1], a.fargs[2])
-end, { nargs = '*' })
-vim.api.nvim_create_user_command('TradarRabbitmqPublish', function(a) require('tradar.rabbitmq').publish(a.args) end, { nargs = '?' })
+end, { nargs = '*', complete = names('rabbitmq') })
+vim.api.nvim_create_user_command('TradarRabbitmqPublish', function(a) require('tradar.rabbitmq').publish(a.args) end, { nargs = '?', complete = names('rabbitmq') })
 
 -- HTTP: same reasoning as RabbitMQ above -- no push channel, plain
 -- request/response, see docs/backlog/http-server-2026-10-17.md.
-vim.api.nvim_create_user_command('TradarHttpConnect', function(a) require('tradar.http').connect(a.args) end, { nargs = '?' })
-vim.api.nvim_create_user_command('TradarHttpSend', function(a) require('tradar.http').send(a.args) end, { nargs = '?' })
+vim.api.nvim_create_user_command('TradarHttpConnect', function(a) require('tradar.http').connect(a.args) end, { nargs = '?', complete = names('http') })
+vim.api.nvim_create_user_command('TradarHttpSend', function(a) require('tradar.http').send(a.args) end, { nargs = '?', complete = names('http') })
+
+-- One entry point: `:Tradar kafka tail [conn]` = `:TradarKafkaTail [conn]`,
+-- with completion of every subcommand and its arguments.
+vim.api.nvim_create_user_command('Tradar', function(a) require('tradar.commands').dispatch(a) end, {
+  nargs = '*', range = true, bang = true,
+  complete = function(...) return require('tradar.commands').complete(...) end,
+  desc = 'tradar: :Tradar <subcommand> (Tab lists them)',
+})
 
 -- Query files for the non-SQL connectors. Highlighting borrows a real
 -- grammar where one fits (`.mongo` is JavaScript) -- see README.

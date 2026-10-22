@@ -51,7 +51,7 @@ pub fn split_target(target: &str) -> anyhow::Result<(String, TlsOptions)> {
         *slot = Some(value.to_string());
     }
     if options.cert.is_some() != options.key.is_some() {
-        anyhow::bail!("`cert` và `key` phải đi cùng nhau (client certificate)");
+        anyhow::bail!("`cert` and `key` go together (client certificate)");
     }
     let uri = if rest.is_empty() {
         base.to_string()
@@ -72,7 +72,7 @@ pub async fn connect(target: &str) -> anyhow::Result<Channel> {
     let mut endpoint = Channel::from_shared(uri.clone())?;
     if uri.starts_with("https://") {
         let read = |path: &str| {
-            std::fs::read(path).map_err(|e| anyhow::anyhow!("không đọc được `{path}`: {e}"))
+            std::fs::read(path).map_err(|e| anyhow::anyhow!("could not read `{path}`: {e}"))
         };
         let mut tls = ClientTlsConfig::new().with_webpki_roots();
         if let Some(ca) = &options.ca {
@@ -86,7 +86,7 @@ pub async fn connect(target: &str) -> anyhow::Result<Channel> {
         }
         endpoint = endpoint.tls_config(tls)?;
     } else if options != TlsOptions::default() {
-        anyhow::bail!("`ca`/`cert`/`key`/`domain` chỉ dùng được với target `https://`");
+        anyhow::bail!("`ca`/`cert`/`key`/`domain` only apply to an `https://` target");
     }
     Ok(endpoint.connect().await?)
 }

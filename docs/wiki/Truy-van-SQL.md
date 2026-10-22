@@ -85,7 +85,7 @@ Lỗi cú pháp được gạch chân đúng vị trí bằng `vim.diagnostic` (
 
 ## Statusline
 
-`require('tradar').status()` trả chuỗi như `db demo · 120/5000 rows · 83ms`: spinner khi đang chạy, `✗` khi ping nền (mỗi 15 giây) thấy connection rớt, `tx` khi đang trong transaction (cập nhật ngay sau `BEGIN`/`COMMIT`/`ROLLBACK`, không đợi lần ping kế), `⚠` với connection protected. Trong buffer kết quả, nó hiện connection **của kết quả** đó và thêm `✎ unsaved edits` khi lưới có sửa chưa commit. Rỗng ngoài buffer tradar, nên gắn vào lualine không tốn gì ở file khác.
+`require('tradar').status()` trả chuỗi như `db demo · 120/5000 rows · 83ms`: spinner khi đang chạy, `✗` khi ping nền (mỗi 15 giây) thấy connection rớt, `(idle)` khi server đã đóng nó vì không dùng (lệnh kế tiếp tự nối lại), `tx` khi đang trong transaction (cập nhật ngay sau `BEGIN`/`COMMIT`/`ROLLBACK`, không đợi lần ping kế), `⚠` với connection protected. Trong buffer kết quả, nó hiện connection **của kết quả** đó và thêm `✎ unsaved edits` khi lưới có sửa chưa commit. Rỗng ngoài buffer tradar, nên gắn vào lualine không tốn gì ở file khác.
 
 ## An toàn
 
@@ -113,4 +113,4 @@ Hai chỗ để lưu một query:
 
 ## Ô dài bị cắt
 
-Mỗi cột rộng tối đa 40 ký tự (dài hơn thì cắt bằng `…`), riêng **cột cuối** được tới 400 ký tự — nên kết quả một cột như `EXPLAIN` hay `SHOW CREATE TABLE` hiện gần như đủ. Ô có xuống dòng được hiển thị trên một dòng (xuống dòng thành dấu cách); `K` trên ô xem trọn giá trị, `gK` xem cả dòng.
+Mỗi cột rộng tối đa 40 ký tự (dài hơn thì cắt bằng `…`), riêng **cột cuối** được tới 400 ký tự — nên kết quả một cột như `EXPLAIN` hay `SHOW CREATE TABLE` hiện gần như đủ. Trong buffer kết quả, `zw` hiện trọn cột dưới con trỏ (tới 400 ký tự như cột cuối), bấm lại để thu về; `zW` cho mọi cột. Ô có xuống dòng được hiển thị trên một dòng (xuống dòng thành dấu cách); `K` trên ô xem trọn giá trị (giữ xuống dòng), `gK` xem cả dòng.

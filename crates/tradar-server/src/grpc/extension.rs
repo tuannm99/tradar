@@ -135,7 +135,7 @@ impl crate::extension::Extension for GrpcExtension {
                 }
                 let saved = ctx.saved(name, "grpc")?;
                 let channel = connect(&saved.target).await.map_err(|e| {
-                    RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
+                    RpcError::app(format!("could not connect to `{}`: {e}", saved.target))
                 })?;
                 let mut pool = discover_via_reflection(channel.clone())
                     .await
@@ -173,7 +173,7 @@ impl crate::extension::Extension for GrpcExtension {
                     .get_mut(name)
                     .ok_or_else(|| not_connected("grpc", name))?;
                 let added = load_proto(&mut conn.pool, path)
-                    .map_err(|e| RpcError::app(format!("không parse được `{path}`: {e}")))?;
+                    .map_err(|e| RpcError::app(format!("could not parse `{path}`: {e}")))?;
                 drop(connections);
                 let mut protos = self.protos.lock().unwrap();
                 let paths = protos.entry(name.to_string()).or_default();

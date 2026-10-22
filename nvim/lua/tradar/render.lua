@@ -28,8 +28,10 @@ M.MAX_COLUMN_WIDTH = 40
 --- Still bounded -- a multi-KB blob there would make every line enormous.
 M.MAX_LAST_COLUMN_WIDTH = 400
 
-local function width_cap(i, ncols)
-  return i == ncols and M.MAX_LAST_COLUMN_WIDTH or M.MAX_COLUMN_WIDTH
+--- `wide` (optional, `{[column index] = true}`): columns the user widened
+--- with `zw` -- they get the last column's room too.
+local function width_cap(i, ncols, wide)
+  return (i == ncols or (wide and wide[i])) and M.MAX_LAST_COLUMN_WIDTH or M.MAX_COLUMN_WIDTH
 end
 
 local function cell(value)
@@ -149,7 +151,8 @@ function M.number_columns(columns, rows, prev)
 end
 
 --- Each column's display width (header vs. every cell in `rows`, whichever
---- is wider), clamped to `MAX_COLUMN_WIDTH` (`MAX_LAST_COLUMN_WIDTH` for the last column). `prev` (optional, the same
+--- is wider), clamped to `MAX_COLUMN_WIDTH` (`MAX_LAST_COLUMN_WIDTH` for the last
+--- column and for those in `wide`). `prev` (optional, the same
 --- shape this returns) seeds the running max instead of starting from the
 --- header alone -- a caller that already painted earlier pages can pass
 --- their stored widths and scan only the *new* rows, so finding the
@@ -157,14 +160,14 @@ end
 --- only ever grow (never shrink back down as old wide values scroll out
 --- of view) whether computed this way or from scratch -- same as before
 --- this function was split out of `M.table`.
-function M.column_widths(columns, rows, prev)
+function M.column_widths(columns, rows, prev, wide)
   local widths = {}
   for i, name in ipairs(columns) do
-    widths[i] = math.min(prev and prev[i] or vim.fn.strdisplaywidth(name), width_cap(i, #columns))
+    widths[i] = math.min(prev and prev[i] or vim.fn.strdisplaywidth(name), width_cap(i, #columns, wide))
   end
   for _, row in ipairs(rows) do
     for i = 1, #columns do
-      widths[i] = math.min(math.max(widths[i], vim.fn.strdisplaywidth(cell(row[i] or ''))), width_cap(i, #columns))
+      widths[i] = math.min(math.max(widths[i], vim.fn.strdisplaywidth(cell(row[i] or ''))), width_cap(i, #columns, wide))
     end
   end
   return widths
@@ -212,8 +215,8 @@ end
 --- uses for a full (re)paint; `column_widths`/`header_lines`/`row_lines`
 --- above are what let it paint an *appended* page more cheaply instead
 --- (see `attach_results`'s `paint_results`).
-function M.table(columns, rows, prev_widths)
-  local widths = M.column_widths(columns, rows, prev_widths)
+function M.table(columns, rows, prev_widths, wide)
+  local widths = M.column_widths(columns, rows, prev_widths, wide)
   local aligns = M.number_columns(columns, rows)
   local out = M.header_lines(columns, widths, aligns)
   vim.list_extend(out, M.row_lines(columns, widths, rows, aligns))

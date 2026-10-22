@@ -55,6 +55,7 @@ Nhóm theo chủ đề, trong mỗi nhóm theo thứ tự thời gian. Mục m�
 - [`results-window-layout-zoom-2026-10-31.md`](results-window-layout-zoom-2026-10-31.md) — `<leader>rz` phóng cửa sổ kết quả toàn màn hình, `results_layout` (bottom/right/tab), sửa cửa sổ kết quả bị bé 4 dòng sau "running…"
 - [`ui-ux-perf-check-2026-10-20.md`](ui-ux-perf-check-2026-10-20.md) — rà UI/UX + hiệu năng plugin; sửa `list_schema` SQLite (N+1 `PRAGMA` → 3 truy vấn)
 - [`save-query-library-2026-10-22.md`](save-query-library-2026-10-22.md) — `:TradarSave` (thư viện chung) / `:TradarSaveHere` (cạnh file) / `:TradarOpen`
+- [`nvim-ux-batch-2026-10-22.md`](nvim-ux-batch-2026-10-22.md) — `zw`/`zW` hiện trọn cột, statusline `(idle)`, Tab-complete connection, thông báo một ngôn ngữ, `:Tradar <lệnh-con>`
 
 ## Connector (dùng chung cho cả hai giao diện)
 

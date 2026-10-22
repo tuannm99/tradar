@@ -122,7 +122,7 @@ local function paint_results(new_from)
 
   if r.kind == 'table' and r.view ~= 'json' and new_from and r.widths and r.aligns then
     local new_rows = { unpack(r.rows, new_from) }
-    local widths = render.column_widths(r.columns, new_rows, r.widths)
+    local widths = render.column_widths(r.columns, new_rows, r.widths, r.wide)
     local grew = false
     for i, w in ipairs(widths) do
       if w ~= r.widths[i] then
@@ -157,10 +157,10 @@ local function paint_results(new_from)
     lines = vim.split(render.json(r.columns, r.rows), '\n', { plain = true })
     lines[#lines] = nil -- the trailing newline
   elseif r.kind == 'table' then
-    lines, r.spans, r.widths, r.aligns = render.table(r.columns, r.rows)
+    lines, r.spans, r.widths, r.aligns = render.table(r.columns, r.rows, nil, r.wide)
   elseif r.view == 'table' then
     r.tcols, r.trows = render.flatten(r.rows, r.field_order)
-    lines, r.spans, r.twidths, r.taligns = render.table(r.tcols, r.trows)
+    lines, r.spans, r.twidths, r.taligns = render.table(r.tcols, r.trows, nil, r.twide)
   else
     lines = render.documents(r.rows, r.field_order)
   end
@@ -275,6 +275,41 @@ end
 --- `<leader>rv`: the result as a table (editable) or raw JSON -- documents
 --- as they are, SQL rows as an array of objects. Cell operations are off in
 --- the JSON view (there is no grid to point at).
+--- `zw`: the column under the cursor shows its full value (up to
+--- `render.MAX_LAST_COLUMN_WIDTH`) instead of being cut at
+--- `render.MAX_COLUMN_WIDTH`; again to cut it back. `all`: every column
+--- (`zW`) -- or, when some already are, none.
+function M.toggle_column_width(all)
+  local r = state.result
+  if not r or not grid_of(r) then
+    return notify('column width applies to the table view', vim.log.levels.WARN)
+  end
+  if ctx.dirty() then
+    return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
+  end
+  local doc_table = r.kind == 'documents'
+  local key = doc_table and 'twide' or 'wide'
+  local cols = doc_table and r.tcols or r.columns
+  local wide = r[key] or {}
+  local col = render.column_at(r.spans or {}, vim.fn.virtcol('.'))
+  if all then
+    local any = next(wide) ~= nil
+    wide = {}
+    if not any then
+      for i = 1, #cols do wide[i] = true end
+    end
+  elseif col then
+    wide[col] = (not wide[col]) or nil
+  else
+    return
+  end
+  r[key] = wide
+  paint_results()
+  -- Stay on the same column: its start moved with the widths around it.
+  local span = col and r.spans and r.spans[col]
+  if span then pcall(vim.cmd, ('normal! %d|'):format(span[1])) end
+end
+
 function M.toggle_view()
   local r = state.result
   if not r or (r.kind ~= 'documents' and r.kind ~= 'table') then return notify('no result to switch views on') end
