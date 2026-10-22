@@ -12,11 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
-use tradar_core::capability::Capability;
-use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::QueryDriver;
-use tradar_query_workbench::query_engine::QueryEngine;
+use tradar_query::QueryDriver;
 
 mod convert;
 mod db_helpers;
@@ -29,32 +25,33 @@ mod snippets;
 
 use driver::*;
 
-const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
-    id: "mongo",
-    display_name: "MongoDB",
-    icon: "🍃",
-    capabilities: &[Capability::Query, Capability::Schema],
-};
+#[cfg(feature = "tui")]
+mod tui;
+#[cfg(feature = "tui")]
+pub use tui::connector;
+// The crate's tests drive the TUI path too (`QueryEngine`, `SavedConnection`).
+#[cfg(all(test, feature = "tui"))]
+#[allow(unused_imports)]
+use tui::*;
 
-struct MongoConnector;
-
-#[async_trait]
-impl Connector for MongoConnector {
-    fn descriptor(&self) -> &ConnectorDescriptor {
-        &DESCRIPTOR
-    }
-
-    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
-        let mut driver = MongoDriver::new(&connection.target);
-        tradar_connector_spi::with_connect_timeout(&connection.target, driver.connect()).await?;
-        let driver: Arc<dyn QueryDriver> = Arc::new(driver);
-        let schema = driver.list_schema().await.map_err(|e| e.to_string());
-        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
-    }
+/// Opens a connected driver for `tradar-server` -- no TUI types involved.
+pub fn opener() -> Box<dyn tradar_query::DriverOpener> {
+    Box::new(Opener)
 }
 
-pub fn connector() -> Box<dyn Connector> {
-    Box::new(MongoConnector)
+struct Opener;
+
+#[async_trait]
+impl tradar_query::DriverOpener for Opener {
+    fn id(&self) -> &'static str {
+        "mongo"
+    }
+
+    async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {
+        let mut driver = MongoDriver::new(target);
+        tradar_query::with_connect_timeout(target, driver.connect()).await?;
+        Ok(Arc::new(driver))
+    }
 }
 
 #[cfg(test)]

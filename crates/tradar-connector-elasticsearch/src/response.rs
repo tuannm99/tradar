@@ -1,4 +1,4 @@
-use tradar_query_workbench::query_driver::QueryResult;
+use tradar_query::QueryResult;
 
 /// One row per hit for a `_search`-shaped response (`hits.hits` present,
 /// however many -- zero included), each `_id` merged alongside its
@@ -80,7 +80,7 @@ pub(crate) fn handle_response(
         Some(mut docs) => {
             // A `size` of thousands is legal for ES; the row cap still holds
             // for what we keep (and the stored copy).
-            let cap = tradar_query_workbench::query_driver::max_rows();
+            let cap = tradar_query::max_rows();
             let truncated = docs.len() > cap;
             docs.truncate(cap);
             Ok(QueryResult::Documents {

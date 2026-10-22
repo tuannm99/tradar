@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tradar-core = { path = "../tradar-core" }
-tradar-connector-spi = { path = "../tradar-connector-spi" }
-tradar-query-workbench = { path = "../tradar-query-workbench" }
+tradar-query = { path = "../tradar-query" }
+# The TUI's `Connector`/`Session` (feature `tui`); `tradar-server` uses
+# `opener()` and builds without them.
+tradar-core = { path = "../tradar-core", optional = true }
+tradar-connector-spi = { path = "../tradar-connector-spi", optional = true }
+tradar-query-workbench = { path = "../tradar-query-workbench", optional = true }
 
 async-trait = "0.1"
 anyhow = "1"
@@ -16,3 +19,7 @@ serde_json = "1"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 testcontainers-modules = { version = "0.11", features = ["redis"] }
+
+[features]
+default = ["tui"]
+tui = ["dep:tradar-core", "dep:tradar-connector-spi", "dep:tradar-query-workbench"]

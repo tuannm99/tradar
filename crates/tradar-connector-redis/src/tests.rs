@@ -1,5 +1,5 @@
 use super::*;
-use tradar_query_workbench::query_driver::{MAX_ROWS, QueryDriver, QueryResult, SchemaInfo};
+use tradar_query::{MAX_ROWS, QueryDriver, QueryResult, SchemaInfo};
 
 #[test]
 fn split_command_splits_on_whitespace_like_before() {
@@ -79,19 +79,19 @@ fn crud_snippet_covers_all_four_ops_for_a_hash() {
     };
 
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &[]),
         Some("HGETALL user:1".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Create, &[]),
         Some("HSET user:1 <field> <value>".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Update, &[]),
         Some("HSET user:1 <field> <value>".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Delete, &[]),
         Some("DEL user:1".to_string())
     );
 }
@@ -142,7 +142,7 @@ fn crud_snippet_is_none_for_an_unknown_type() {
     };
 
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &[]),
         None
     );
 }

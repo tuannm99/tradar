@@ -2,8 +2,8 @@ use crate::protocol::{
     RpcError, order_insert_values, parse_insert_values, parse_row_edit, statement_json, str_param,
 };
 use serde_json::{Value, json};
-use tradar_query_workbench::components::completion::CandidateKind;
-use tradar_query_workbench::query_driver::completion_context;
+use tradar_query::CandidateKind;
+use tradar_query::completion_context;
 
 use super::*;
 

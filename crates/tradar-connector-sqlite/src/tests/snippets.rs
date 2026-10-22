@@ -6,7 +6,7 @@ fn crud_snippet_delegates_to_the_shared_sql_builder() {
     let entry = SchemaInfo::new("users");
 
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &[]),
         Some("SELECT * FROM \"users\" LIMIT 100;".to_string())
     );
 }
@@ -27,11 +27,7 @@ fn crud_snippet_forwards_a_column_selection_to_the_shared_sql_builder() {
     };
 
     assert_eq!(
-        driver.crud_snippet(
-            &entry,
-            tradar_core::action::CrudOp::Read,
-            &["email".to_string()]
-        ),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &["email".to_string()]),
         Some("SELECT \"email\" FROM \"users\" LIMIT 100;".to_string())
     );
 }

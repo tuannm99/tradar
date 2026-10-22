@@ -7,13 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
-use tradar_core::capability::Capability;
-use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{
-    MAX_ROWS, QueryDriver, QueryResult, SchemaInfo, Statement,
-};
-use tradar_query_workbench::query_engine::QueryEngine;
+use tradar_query::{MAX_ROWS, QueryDriver, QueryResult, SchemaInfo, Statement};
 
 mod browse;
 mod command;
@@ -258,54 +252,53 @@ impl QueryDriver for RedisDriver {
     fn crud_snippet(
         &self,
         entry: &SchemaInfo,
-        op: tradar_core::action::CrudOp,
+        op: tradar_query::CrudOp,
         _columns: &[String],
     ) -> Option<String> {
         let kind = entry.kind.as_deref()?;
         let key = quote_arg(&entry.name);
         let browse_kind = BrowseKind::parse(kind)?;
         Some(match op {
-            tradar_core::action::CrudOp::Read => browse_kind.command(&entry.name),
-            tradar_core::action::CrudOp::Create | tradar_core::action::CrudOp::Update => {
-                match browse_kind {
-                    BrowseKind::String => format!("SET {key} <value>"),
-                    BrowseKind::Hash => format!("HSET {key} <field> <value>"),
-                    BrowseKind::List => format!("RPUSH {key} <value>"),
-                    BrowseKind::Set => format!("SADD {key} <member>"),
-                    BrowseKind::Zset => format!("ZADD {key} <score> <member>"),
-                }
-            }
-            tradar_core::action::CrudOp::Delete => format!("DEL {key}"),
+            tradar_query::CrudOp::Read => browse_kind.command(&entry.name),
+            tradar_query::CrudOp::Create | tradar_query::CrudOp::Update => match browse_kind {
+                BrowseKind::String => format!("SET {key} <value>"),
+                BrowseKind::Hash => format!("HSET {key} <field> <value>"),
+                BrowseKind::List => format!("RPUSH {key} <value>"),
+                BrowseKind::Set => format!("SADD {key} <member>"),
+                BrowseKind::Zset => format!("ZADD {key} <score> <member>"),
+            },
+            tradar_query::CrudOp::Delete => format!("DEL {key}"),
         })
     }
 }
 
-const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
-    id: "redis",
-    display_name: "Redis",
-    icon: "📕",
-    capabilities: &[Capability::Query, Capability::Schema],
-};
+#[cfg(feature = "tui")]
+mod tui;
+#[cfg(feature = "tui")]
+pub use tui::connector;
+// The crate's tests drive the TUI path too (`QueryEngine`, `SavedConnection`).
+#[cfg(all(test, feature = "tui"))]
+#[allow(unused_imports)]
+use tui::*;
 
-struct RedisConnector;
-
-#[async_trait]
-impl Connector for RedisConnector {
-    fn descriptor(&self) -> &ConnectorDescriptor {
-        &DESCRIPTOR
-    }
-
-    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
-        let mut driver = RedisDriver::new(&connection.target);
-        tradar_connector_spi::with_connect_timeout(&connection.target, driver.connect()).await?;
-        let driver: Arc<dyn QueryDriver> = Arc::new(driver);
-        let schema = driver.list_schema().await.map_err(|e| e.to_string());
-        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
-    }
+/// Opens a connected driver for `tradar-server` -- no TUI types involved.
+pub fn opener() -> Box<dyn tradar_query::DriverOpener> {
+    Box::new(Opener)
 }
 
-pub fn connector() -> Box<dyn Connector> {
-    Box::new(RedisConnector)
+struct Opener;
+
+#[async_trait]
+impl tradar_query::DriverOpener for Opener {
+    fn id(&self) -> &'static str {
+        "redis"
+    }
+
+    async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {
+        let mut driver = RedisDriver::new(target);
+        tradar_query::with_connect_timeout(target, driver.connect()).await?;
+        Ok(Arc::new(driver))
+    }
 }
 
 #[cfg(test)]

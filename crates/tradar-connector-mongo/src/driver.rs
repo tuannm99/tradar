@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use tradar_query_workbench::query_driver::{
+use tradar_query::{
     self as query_driver, QueryDriver, QueryResult, SchemaInfo, Statement, qualify_colliding_names,
 };
 
@@ -373,7 +373,7 @@ impl QueryDriver for MongoDriver {
     fn crud_snippet(
         &self,
         entry: &SchemaInfo,
-        op: tradar_core::action::CrudOp,
+        op: tradar_query::CrudOp,
         columns: &[String],
     ) -> Option<String> {
         let collection = &entry.name;
@@ -412,7 +412,7 @@ impl QueryDriver for MongoDriver {
         };
 
         Some(match op {
-            tradar_core::action::CrudOp::Read => {
+            tradar_query::CrudOp::Read => {
                 let picked: Vec<&str> = all_fields
                     .iter()
                     .copied()
@@ -429,14 +429,14 @@ impl QueryDriver for MongoDriver {
                     format!("db.{collection}.find({{}}, {{{projection}}})")
                 }
             }
-            tradar_core::action::CrudOp::Create => {
+            tradar_query::CrudOp::Create => {
                 let insert_fields = query_driver::pick_columns(columns, &all_fields, &all_fields);
                 format!(
                     "db.{collection}.insertOne({})",
                     nested_insert_literal(&insert_fields, &value_for)
                 )
             }
-            tradar_core::action::CrudOp::Update => {
+            tradar_query::CrudOp::Update => {
                 let non_id: Vec<&str> =
                     all_fields.iter().copied().filter(|c| *c != "_id").collect();
                 let set_fields = query_driver::pick_columns(columns, &all_fields, &non_id);
@@ -445,7 +445,7 @@ impl QueryDriver for MongoDriver {
                     object_literal(&set_fields)
                 )
             }
-            tradar_core::action::CrudOp::Delete => {
+            tradar_query::CrudOp::Delete => {
                 let filter_fields = query_driver::pick_columns(columns, &all_fields, &["_id"]);
                 format!(
                     "db.{collection}.deleteOne({})",

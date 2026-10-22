@@ -5450,6 +5450,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5466,6 +5467,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5481,6 +5483,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5530,6 +5533,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5545,6 +5549,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5560,6 +5565,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5593,6 +5599,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5617,6 +5624,7 @@ dependencies = [
  "async-trait",
  "tokio",
  "tradar-core",
+ "tradar-query",
 ]
 
 [[package]]
@@ -5632,6 +5640,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tradar-query-workbench",
 ]
 
@@ -5648,6 +5657,17 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
+ "tradar-query",
+]
+
+[[package]]
+name = "tradar-query"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -5663,6 +5683,7 @@ dependencies = [
  "tokio",
  "tradar-connector-spi",
  "tradar-core",
+ "tradar-query",
  "tree-sitter-highlight",
  "tree-sitter-sequel",
 ]
@@ -5700,10 +5721,9 @@ dependencies = [
  "tradar-connector-mysql",
  "tradar-connector-postgres",
  "tradar-connector-redis",
- "tradar-connector-spi",
  "tradar-connector-sqlite",
  "tradar-core",
- "tradar-query-workbench",
+ "tradar-query",
 ]
 
 [[package]]

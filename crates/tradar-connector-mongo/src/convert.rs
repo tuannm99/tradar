@@ -1,7 +1,7 @@
 use futures_util::TryStreamExt;
 use mongodb::bson::{Bson, Document};
 
-use tradar_query_workbench::query_driver::ColumnInfo;
+use tradar_query::ColumnInfo;
 
 /// Reformats MongoDB Extended JSON's `{"$oid": "<hex>"}` (an `ObjectId`)
 /// and `{"$date": "<iso>"}` (a `DateTime`) into the same shell-literal

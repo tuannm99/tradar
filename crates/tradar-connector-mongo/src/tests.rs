@@ -5,9 +5,7 @@ use crate::run::*;
 use crate::shell::*;
 use crate::snippets::*;
 use mongodb::bson::Document;
-use tradar_query_workbench::query_driver::{
-    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
-};
+use tradar_query::{self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo};
 pub(crate) fn users_with_fields() -> SchemaInfo {
     let mut column = ColumnInfo::new("_id", "ObjectId");
     column.primary_key = true;

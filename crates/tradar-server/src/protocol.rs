@@ -4,9 +4,7 @@
 
 use serde_json::{Value, json};
 
-use tradar_query_workbench::query_driver::{
-    ColumnInfo, QueryResult, RowChange, RowEdit, SchemaInfo, Statement,
-};
+use tradar_query::{ColumnInfo, QueryResult, RowChange, RowEdit, SchemaInfo, Statement};
 
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;

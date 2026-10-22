@@ -11,13 +11,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{Column, Executor, Row, Sqlite, SqlitePool, Transaction, TypeInfo, ValueRef};
 use tokio::sync::Mutex;
 
-use tradar_connector_spi::{Connector, ConnectorDescriptor, Session};
-use tradar_core::capability::Capability;
-use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{
-    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
-};
-use tradar_query_workbench::query_engine::QueryEngine;
+use tradar_query::{self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo};
 
 /// A raw SQLite connection handle, cached once right after connecting (see
 /// `connect()`) so `cancel_query` can call `sqlite3_interrupt` on it
@@ -292,7 +286,7 @@ impl QueryDriver for SqliteDriver {
     fn crud_snippet(
         &self,
         entry: &SchemaInfo,
-        op: tradar_core::action::CrudOp,
+        op: tradar_query::CrudOp,
         columns: &[String],
     ) -> Option<String> {
         Some(query_driver::build_crud_snippet(entry, op, columns))
@@ -442,32 +436,33 @@ fn stringify_column(row: &SqliteRow, index: usize) -> String {
     .unwrap_or_else(|_| "NULL".to_string())
 }
 
-const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
-    id: "sqlite",
-    display_name: "SQLite",
-    icon: "🗄",
-    capabilities: &[Capability::Query, Capability::Schema, Capability::Export],
-};
+#[cfg(feature = "tui")]
+mod tui;
+#[cfg(feature = "tui")]
+pub use tui::connector;
+// The crate's tests drive the TUI path too (`QueryEngine`, `SavedConnection`).
+#[cfg(all(test, feature = "tui"))]
+#[allow(unused_imports)]
+use tui::*;
 
-struct SqliteConnector;
-
-#[async_trait]
-impl Connector for SqliteConnector {
-    fn descriptor(&self) -> &ConnectorDescriptor {
-        &DESCRIPTOR
-    }
-
-    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
-        let mut driver = SqliteDriver::new(&connection.target);
-        tradar_connector_spi::with_connect_timeout(&connection.target, driver.connect()).await?;
-        let driver: std::sync::Arc<dyn QueryDriver> = std::sync::Arc::new(driver);
-        let schema = driver.list_schema().await.map_err(|e| e.to_string());
-        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
-    }
+/// Opens a connected driver for `tradar-server` -- no TUI types involved.
+pub fn opener() -> Box<dyn tradar_query::DriverOpener> {
+    Box::new(Opener)
 }
 
-pub fn connector() -> Box<dyn Connector> {
-    Box::new(SqliteConnector)
+struct Opener;
+
+#[async_trait]
+impl tradar_query::DriverOpener for Opener {
+    fn id(&self) -> &'static str {
+        "sqlite"
+    }
+
+    async fn open(&self, target: &str) -> anyhow::Result<std::sync::Arc<dyn QueryDriver>> {
+        let mut driver = SqliteDriver::new(target);
+        tradar_query::with_connect_timeout(target, driver.connect()).await?;
+        Ok(std::sync::Arc::new(driver))
+    }
 }
 
 #[cfg(test)]

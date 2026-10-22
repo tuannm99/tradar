@@ -1,14 +1,19 @@
 //! The `QueryDriver` trait every query-shaped database backend implements
-//! (Postgres, SQLite, Elasticsearch, Redis, MongoDB today). Code outside a
-//! concrete driver module must depend only on this trait, never on a
-//! specific driver crate/module directly -- that's what keeps drivers
-//! isolated and pluggable.
+//! (Postgres, MySQL, SQLite, MongoDB, Elasticsearch, Redis, Cassandra,
+//! ClickHouse), with the result/schema types, statement splitting,
+//! completion and edit helpers they share. Code outside a concrete driver
+//! must depend only on this crate, never on a specific driver -- that's what
+//! keeps drivers isolated and pluggable.
+//!
+//! No UI and no other workspace crate: `tradar-server` and the (deprecated)
+//! TUI both build on it, and a connector built for the server only needs
+//! this crate.
 
 use async_trait::async_trait;
 
-use tradar_core::action::CrudOp;
-
+mod candidates;
 mod completion;
+mod connect;
 mod edit;
 mod fetch;
 mod snippet;
@@ -16,13 +21,25 @@ mod source;
 mod sql_split;
 mod types;
 
+pub use candidates::*;
 pub use completion::*;
+pub use connect::*;
 pub use edit::*;
 pub use fetch::*;
 pub use snippet::*;
 pub use source::*;
 pub use sql_split::*;
 pub use types::*;
+
+/// Which CRUD statement to generate a snippet for -- see
+/// `QueryDriver::snippet`. (`tradar_core::action` re-exports it for the TUI.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrudOp {
+    Create,
+    Read,
+    Update,
+    Delete,
+}
 
 #[async_trait]
 pub trait QueryDriver: Send + Sync {

@@ -75,9 +75,7 @@ fn collections_read_the_way_cqlsh_prints_them() {
 
 use super::*;
 use scylla::value::{CqlValue, Row};
-use tradar_query_workbench::query_driver::{
-    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
-};
+use tradar_query::{self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo};
 
 #[test]
 fn cassandra_error_marker_points_at_the_quoted_token_s_position() {
@@ -147,7 +145,7 @@ fn crud_snippet_delegates_to_the_shared_sql_builder() {
     let entry = SchemaInfo::new("demo.events");
 
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &[]),
         Some("SELECT * FROM \"demo\".\"events\" LIMIT 100;".to_string())
     );
 }
@@ -290,11 +288,7 @@ fn crud_snippet_forwards_a_column_selection_to_the_shared_sql_builder() {
     };
 
     assert_eq!(
-        driver.crud_snippet(
-            &entry,
-            tradar_core::action::CrudOp::Read,
-            &["payload".to_string()]
-        ),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &["payload".to_string()]),
         Some("SELECT \"payload\" FROM \"demo\".\"events\" LIMIT 100;".to_string())
     );
 }

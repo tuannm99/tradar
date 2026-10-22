@@ -2,7 +2,7 @@ use futures_util::TryStreamExt;
 use mongodb::bson::{Bson, Document};
 use mongodb::options::Hint;
 
-use tradar_query_workbench::query_driver::{self as query_driver, QueryResult};
+use tradar_query::{self as query_driver, QueryResult};
 
 use crate::convert::*;
 use crate::shell::*;

@@ -1,4 +1,4 @@
-use tradar_query_workbench::query_driver::QueryResult;
+use tradar_query::QueryResult;
 
 use crate::command::*;
 

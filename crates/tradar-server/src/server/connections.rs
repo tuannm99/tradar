@@ -2,9 +2,8 @@ use crate::protocol::{PROTOCOL_VERSION, RpcError, schema_json, str_param};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::components::completion::CompletionSource;
-use tradar_query_workbench::query_driver::QueryDriver;
-use tradar_query_workbench::query_engine::QueryEngine;
+use tradar_query::CompletionSource;
+use tradar_query::QueryDriver;
 
 use super::*;
 
@@ -107,18 +106,13 @@ impl Server {
             .into_iter()
             .find(|c| c.name == name)
             .ok_or_else(|| RpcError::app(format!("no saved connection named `{name}`")))?;
-        let connector = self.registry.get(&saved.driver).ok_or_else(|| {
+        let opener = self.registry.get(&saved.driver).ok_or_else(|| {
             RpcError::app(format!(
                 "this server build has no `{}` connector (or it has no query language to serve)",
                 saved.driver
             ))
         })?;
-        let session = connector.connect(saved).await?;
-        let driver = session
-            .as_any()
-            .and_then(|any| any.downcast_ref::<QueryEngine>())
-            .map(QueryEngine::driver)
-            .ok_or_else(|| RpcError::app("this connector has no query driver to serve"))?;
+        let driver = opener.open(&saved.target).await?;
         // A failed schema load still connects, as in the TUI: completion
         // just has no schema names to offer.
         let schema = driver.list_schema().await.unwrap_or_default();

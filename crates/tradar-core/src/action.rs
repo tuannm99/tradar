@@ -97,17 +97,9 @@ pub struct OutlineEntry {
     pub primary_key: bool,
 }
 
-/// Which CRUD statement to generate a snippet for -- see
-/// `Component::crud_snippet`. Lives here rather than in
-/// `tradar-query-workbench` because `Component` (this trait) can't depend
-/// on a crate that depends on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CrudOp {
-    Create,
-    Read,
-    Update,
-    Delete,
-}
+/// Lives in `tradar-query` with `QueryDriver::snippet`; re-exported here
+/// for `Component::crud_snippet`.
+pub use tradar_query::CrudOp;
 
 /// A navigator-initiated request to change a connection's schema -- see
 /// `Component::open_table_designer`. Lives here rather than in

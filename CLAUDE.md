@@ -6,13 +6,13 @@ Guidance for Claude Code (claude.ai/code) in this repository.
 
 **Primary interface: Neovim + `tradar-server`** (`nvim/`, `crates/tradar-server`) — not the TUI. `tradar-server` is a headless JSON-RPC server (unix socket) that holds every open connection; Neovim is the editor/navigation/vim-motion layer, and several Neovim sessions share one server. Shape, traits and protocol: `docs/architecture.md`. What's open: `docs/roadmap.md`.
 
-**The TUI (`tradar-app`, `tradar-query-workbench`'s `components/`) is deprecated** — no new features and no proactive fixes; touch it only if the user asks (someone requests it). It stays in the tree and must keep building and passing `make check`. The connector crates and the `QueryDriver` trait are shared by both interfaces and are *not* deprecated. New user-facing features go into the Neovim plugin/server.
+**The TUI (`tradar-app`, `tradar-query-workbench`'s `components/`) is deprecated** — no new features and no proactive fixes; touch it only if the user asks (someone requests it). It stays in the tree and must keep building and passing `make check`. The connector crates and `tradar-query` are shared by both interfaces and are *not* deprecated. `tradar-server` must not depend on anything TUI: it uses `tradar-core` without `ui` and connectors without `tui` (check with `cargo tree -p tradar-server`). New user-facing features go into the Neovim plugin/server.
 
 ## Workspace
 
 Cargo workspace; `cargo run`/`build`/`test` need no `-p` (`default-members = ["crates/tradar-app"]`, binary `tradar`). Crates under `crates/`:
 
-- `tradar-core` (storage, theme, keymap, shared widgets), `tradar-connector-spi` (the `Connector`/`Session` traits), `tradar-query-workbench` (`QueryDriver`, `QueryEngine`, shared query UI).
+- `tradar-query` (`QueryDriver`, result/schema types, statement splitting, completion, edit helpers, `DriverOpener`; no UI, no workspace deps), `tradar-core` (storage; with its default `ui` feature also theme, keymap, shared widgets), `tradar-connector-spi` (TUI `Connector`/`Session` traits), `tradar-query-workbench` (TUI: `QueryEngine`, query screens; `query_driver` re-exports `tradar-query`).
 - `tradar-connector-<name>` ×12: `postgres mysql sqlite mongo elasticsearch redis cassandra clickhouse` implement `QueryDriver`; `kafka rabbitmq http socket` implement `Connector`/`Session` directly. gRPC lives only in `tradar-server` (no TUI screen).
 - `tradar-app` (TUI) and `tradar-server` (headless server).
 
@@ -22,7 +22,7 @@ Connectors are gated by Cargo features named after `ConnectorDescriptor::id`; `d
 
 ## Rules that matter
 
-- A connector crate only implements the SPI traits and depends on nothing else in the workspace; `tradar-query-workbench` depends only on `QueryDriver`, never on a concrete connector. This is what lets new databases be added without touching core.
+- A query connector crate implements `QueryDriver` and exports `opener()` (server); its TUI `Connector` lives in `tui.rs` behind the default `tui` feature. It depends on `tradar-query` (plus the TUI crates only under `tui`), never on another connector; nothing shared depends on a concrete connector. This is what lets new databases be added without touching core.
 - Prefer interfaces over concrete types; reuse shared widgets. Keyboard-first; fast startup; large results must paginate rather than load everything.
 - Keep each backend's native query language (SQL, Mongo shell JS, ES Query DSL) — no invented unified language.
 - Additive protocol changes bump the minor in `protocol::PROTOCOL_VERSION`; mirror the number in `docs/architecture.md`.

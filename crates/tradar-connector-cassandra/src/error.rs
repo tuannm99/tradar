@@ -1,4 +1,4 @@
-use tradar_query_workbench::query_driver::{self as query_driver};
+use tradar_query::{self as query_driver};
 
 /// Formats a CQL error the same `LINE N: ... ^` shape
 /// `tradar-connector-postgres`'s `format_pg_error` produces, when there's a
