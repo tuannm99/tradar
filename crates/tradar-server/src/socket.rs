@@ -1,11 +1,9 @@
 //! Socket tail: raw TCP, netcat-style, over the same push-channel this
 //! server already built for Kafka (`kafka.rs`'s sibling module -- same
 //! `ClientConnection`/notification mechanism, see
-//! `docs/backlog/push-channel-design-2026-10-14.md`). Not a reuse of
-//! `tradar-connector-kafka`'s TUI-shaped sibling `tradar-connector-socket`:
-//! that crate's `SocketSession` is shaped around a `tick()`-driven event
-//! queue for the TUI's render loop, same reason Kafka's own server module
-//! didn't reuse its connector crate either.
+//! `docs/backlog/push-channel-design-2026-10-14.md`). The TUI's
+//! `SocketSession` (a `tick()`-driven queue for a render loop) is not used;
+//! only the hex preview comes from `tradar-connector-socket`.
 //!
 //! Unlike Kafka (a tail is a throwaway consumer against an already-probed
 //! broker, decoupled from `kafka.connect`), a Socket "connection" *is* the
@@ -30,6 +28,7 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use tradar_connector_socket::hex_preview;
 
 /// One `read()` can return at most this many bytes -- same bound and
 /// reasoning as `tradar-connector-socket`'s own `READ_CHUNK_SIZE`.
@@ -40,30 +39,11 @@ const READ_CHUNK_SIZE: usize = 8192;
 /// arrives must not grow this server's memory without bound.
 const MAX_BUFFERED_MESSAGES: usize = 500;
 
-/// How many bytes of a binary (non-UTF-8-text) chunk to show as hex --
-/// same bound and reasoning as `tradar-connector-socket`'s own
-/// `HEX_PREVIEW_BYTES`: enough to recognize a protocol's magic bytes,
-/// short enough that one binary chunk doesn't dominate the transcript.
-const HEX_PREVIEW_BYTES: usize = 32;
-
 fn looks_like_text(bytes: &[u8]) -> bool {
     std::str::from_utf8(bytes).is_ok_and(|s| {
         s.chars()
             .all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t')
     })
-}
-
-fn hex_preview(bytes: &[u8]) -> String {
-    let shown = &bytes[..bytes.len().min(HEX_PREVIEW_BYTES)];
-    let mut out: String = shown
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if bytes.len() > HEX_PREVIEW_BYTES {
-        out.push_str(&format!(" … ({} bytes)", bytes.len()));
-    }
-    out
 }
 
 /// Text when the bytes are valid UTF-8 with nothing but ordinary

@@ -26,6 +26,12 @@ tradar-connector-redis = { path = "../tradar-connector-redis", optional = true, 
 tradar-connector-mongo = { path = "../tradar-connector-mongo", optional = true, default-features = false }
 tradar-connector-cassandra = { path = "../tradar-connector-cassandra", optional = true, default-features = false }
 tradar-connector-clickhouse = { path = "../tradar-connector-clickhouse", optional = true, default-features = false }
+# Non-query connectors: only their shared, TUI-free modules (target parsing,
+# request helpers, previews); the server keeps its own request/push logic.
+tradar-connector-rabbitmq = { path = "../tradar-connector-rabbitmq", optional = true, default-features = false }
+tradar-connector-http = { path = "../tradar-connector-http", optional = true, default-features = false }
+tradar-connector-socket = { path = "../tradar-connector-socket", optional = true, default-features = false }
+tradar-connector-kafka = { path = "../tradar-connector-kafka", optional = true, default-features = false }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
 serde_json = "1"
@@ -67,7 +73,6 @@ futures-util = { version = "0.3", optional = true }
 # HTTP (http.rs) shares this same `reqwest`/`serde` -- also no push-channel
 # needed, same reasoning.
 reqwest = { version = "0.12", optional = true, features = ["json"] }
-percent-encoding = { version = "2", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
@@ -102,10 +107,10 @@ redis = ["dep:tradar-connector-redis"]
 cassandra = ["dep:tradar-connector-cassandra"]
 clickhouse = ["dep:tradar-connector-clickhouse"]
 grpc = ["dep:tonic", "dep:tonic-reflection", "dep:prost", "dep:prost-reflect", "dep:protox", "dep:tokio-stream", "dep:bytes"]
-kafka = ["dep:rdkafka", "dep:futures-util"]
-# Socket tail -- unlike `kafka`, needs no extra dependency or toolchain
-# (plain `tokio::net::TcpStream`, already a dependency), so it's a normal
-# default feature rather than opt-in.
-socket = []
-rabbitmq = ["dep:reqwest", "dep:serde", "dep:percent-encoding"]
-http = ["dep:reqwest", "dep:serde"]
+kafka = ["dep:rdkafka", "dep:futures-util", "dep:tradar-connector-kafka"]
+# Socket tail -- unlike `kafka`, needs no extra toolchain (plain
+# `tokio::net::TcpStream`; the connector crate only adds its hex preview), so
+# it's a normal default feature rather than opt-in.
+socket = ["dep:tradar-connector-socket"]
+rabbitmq = ["dep:reqwest", "dep:serde", "dep:tradar-connector-rabbitmq"]
+http = ["dep:reqwest", "dep:serde", "dep:tradar-connector-http"]

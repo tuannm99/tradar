@@ -18,16 +18,8 @@ use tradar_core::keymap::{Command, Context, KeyPress, Resolution, keymap};
 use tradar_core::theme::theme;
 use tradar_core::ui::{self, TextInput};
 
+use crate::preview::hex_preview;
 use crate::{Direction, LogEntry, SocketSession};
-
-/// How many bytes of a non-text entry to show before truncating -- a full
-/// multi-line `xxd`-style dump (as `docs/architecture.md`'s design
-/// describes) would need each entry to expand into several scrollable
-/// lines, complicating the scroll-offset math below for a case that's
-/// mostly "confirms binary data arrived" rather than something read byte
-/// by byte in this grid -- see "Sai khác khi triển khai thật" in
-/// `docs/backlog/socket-connector-2026-09-29.md`.
-const HEX_PREVIEW_BYTES: usize = 32;
 
 /// One log line as it's actually drawn: `[+12.34s] > hello` /
 /// `[+12.34s] < world`. Text when the bytes are valid UTF-8 with nothing
@@ -61,19 +53,6 @@ fn format_entry(entry: &LogEntry) -> Line<'static> {
         Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
         Span::styled(body, Style::default().fg(theme().text)),
     ])
-}
-
-fn hex_preview(bytes: &[u8]) -> String {
-    let shown = &bytes[..bytes.len().min(HEX_PREVIEW_BYTES)];
-    let mut out: String = shown
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if bytes.len() > HEX_PREVIEW_BYTES {
-        out.push_str(&format!(" … ({} bytes)", bytes.len()));
-    }
-    out
 }
 
 pub struct SocketScreen {

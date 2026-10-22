@@ -24,7 +24,8 @@ crates/
   tradar-connector-{postgres,mysql,sqlite,mongo,elasticsearch,redis,cassandra,clickhouse}/
                                 — implement QueryDriver; `opener()` cho server; với feature `tui` (mặc định): Connector/Session cho TUI (`tui.rs`)
   tradar-connector-{kafka,rabbitmq,http,socket}/
-                                — không có ngôn ngữ query, tự implement Connector/Session + Screen riêng (screen.rs)
+                                — không có ngôn ngữ query; phần dùng chung không UI (`api`/`request`/`preview`/`tail`) luôn có,
+                                  Connector/Session + Screen (`session.rs`, `screen.rs`) sau feature `tui` (mặc định)
   tradar-app/   [[bin]] "tradar" — registry() + event loop (TUI)
   tradar-server/                — JSON-RPC server headless cho Neovim (xem "Server headless")
 ```
@@ -113,7 +114,7 @@ Khai báo một connector *có thể làm gì* mà không hardcode danh tính �
 nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar-server  ──>  QueryDriver  ──>  database
 ```
 
-`tradar-server` phụ thuộc `tradar-query` + `tradar-core` (không `ui`, chỉ để đọc `connections.toml`) + các connector crate có `QueryDriver` qua feature, đều tắt `tui`, (cùng tên feature `tradar-app` dùng). `gRPC`/`Kafka`/`Socket`/`RabbitMQ`/`HTTP` không đi qua `registry`/`QueryDriver` (không có ngôn ngữ query) — mỗi cái sống trong module riêng (`grpc.rs` + thư mục `grpc/`, `kafka.rs`/`socket.rs`/`rabbitmq.rs`/`http.rs`), **không tái dùng connector crate TUI tương ứng** (shape `Session` của TUI dựng quanh `tick()` cho vòng lặp vẽ, không hợp một server JSON-RPC thuần), tự nói thẳng với client library hoặc (RabbitMQ/HTTP) tự gọi `reqwest`.
+`tradar-server` phụ thuộc `tradar-query` + `tradar-core` (không `ui`, chỉ để đọc `connections.toml`) + các connector crate có `QueryDriver` qua feature, đều tắt `tui`, (cùng tên feature `tradar-app` dùng). `gRPC`/`Kafka`/`Socket`/`RabbitMQ`/`HTTP` không đi qua `registry`/`QueryDriver` (không có ngôn ngữ query) — mỗi cái sống trong module riêng (`grpc.rs` + thư mục `grpc/`, `kafka.rs`/`socket.rs`/`rabbitmq.rs`/`http.rs`), không dùng `Session` của TUI (dựng quanh `tick()` cho vòng lặp vẽ, không hợp một server JSON-RPC thuần) mà tự nói thẳng với client library hoặc (RabbitMQ/HTTP) tự gọi `reqwest`; phần thuần dùng chung (kiểu Management API + `parse_target` + request có auth của RabbitMQ, `parse_headers`/`resolve_url` của HTTP, `hex_preview` của Socket, `ephemeral_group_id` của Kafka) lấy từ module không UI của connector crate tương ứng, dùng với `default-features = false`.
 
 Mỗi module implement trait `Extension` (`extension.rs`): tự giữ state của mình, trả lời các method `<driver>.*`, báo `is_connected` cho `connections.list`, tự dọn khi client ngắt kết nối (`client_disconnected`) và tự nhận `cancel` cho call đang chạy. `server.rs` (cùng `server/connections|query|editing.rs`) chỉ route theo tiền tố method tới extension tương ứng — không có field, nhánh dispatch hay feature gate riêng cho từng connector; danh sách extension (và feature gate của chúng) nằm đúng một chỗ, `extension::all()`. Thêm một connector kiểu này = một module mới + một dòng trong `extension::all()`, không sửa `server.rs`.
 

@@ -1,16 +1,13 @@
 //! HTTP over `tradar-server`: a Postman-style request/response, no query
 //! language and (like RabbitMQ) no push-channel -- a plain request/response
-//! method, same shape `grpc.rs`/`rabbitmq.rs` already use. Not a reuse of
-//! `tradar-connector-http`: that crate's `HttpSession` is built around a
-//! `tick()`-driven event queue + channel for the TUI's render loop (so a
-//! send doesn't block the UI thread), a shape this server doesn't need --
-//! a JSON-RPC call here already *is* the async boundary, so sending the
-//! request directly inline is simpler than reconstructing that queue.
-//! `parse_headers`/`resolve_url` are copied rather than imported for the
-//! same reason `rabbitmq.rs` copied `parse_target`: tiny, free functions,
-//! not worth a dependency on a crate whose other types are `pub(crate)`.
+//! method, same shape `grpc.rs`/`rabbitmq.rs` already use. Sends inline
+//! rather than through `tradar-connector-http`'s TUI `HttpSession` (a
+//! `tick()`-driven queue for a render loop; a JSON-RPC call already *is* the
+//! async boundary), but `parse_headers`/`resolve_url` come from that crate's
+//! TUI-free `request` module so both interfaces build requests the same way.
 
 use serde::Serialize;
+use tradar_connector_http::{parse_headers, resolve_url};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HttpResponseInfo {
@@ -19,40 +16,6 @@ pub struct HttpResponseInfo {
     pub headers: Vec<(String, String)>,
     pub body: String,
     pub elapsed_ms: u128,
-}
-
-/// Parses `raw` (one `Key: Value` header per line, blank lines ignored)
-/// into pairs -- identical to `tradar-connector-http`'s own `parse_headers`.
-fn parse_headers(raw: &str) -> Vec<(String, String)> {
-    raw.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let (key, value) = line.split_once(':')?;
-            let key = key.trim();
-            if key.is_empty() {
-                return None;
-            }
-            Some((key.to_string(), value.trim().to_string()))
-        })
-        .collect()
-}
-
-/// Resolves what the caller passed as `url` against the connection's base
-/// URL -- identical to `tradar-connector-http`'s own `resolve_url`: used
-/// as-is when it already names a scheme, or when there's no base to
-/// combine it with.
-fn resolve_url(base: &str, path: &str) -> String {
-    if path.starts_with("http://") || path.starts_with("https://") || base.is_empty() {
-        return path.to_string();
-    }
-    format!(
-        "{}/{}",
-        base.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
 }
 
 /// Cheap to `Clone` (a `reqwest::Client` is an `Arc` handle internally) --
