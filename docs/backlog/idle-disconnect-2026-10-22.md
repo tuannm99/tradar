@@ -7,3 +7,5 @@ User: connection không chạy một thời gian thì tự disconnect để gi�
 - Plugin không đổi logic: poll `status` thấy `not connected` thì bỏ cờ connected; `execute` gặp lỗi đó tự `connect` lại rồi thử lại sẵn có.
 
 Chưa làm: TTL riêng theo từng connection (cần thêm field vào `SavedConnection`, đụng ~26 chỗ dựng struct và TUI); áp cho connection của Kafka/RabbitMQ/HTTP/Socket/gRPC (session nằm trong extension, không qua `state.drivers`); giải phóng cursor kết quả cũ (RAM do `MAX_CURSOR_BYTES` giữ, tách khỏi connection).
+
+**Cập nhật (bước 4 review kiến trúc):** đã áp cho Kafka/RabbitMQ/HTTP/gRPC — xem `unified-connection-lifecycle-2026-10-22.md`.

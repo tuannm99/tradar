@@ -8,6 +8,10 @@ pub struct GrpcExtension {
     running:
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Notify>>>,
     streams: std::sync::Mutex<crate::subscriptions::Subscriptions<StreamHandle>>,
+    /// `.proto` files loaded per connection with `grpc.load_proto`. Outlives
+    /// the connection, so a reconnect -- after `disconnect` or the idle
+    /// reaper -- loads them again instead of losing what the user added.
+    protos: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
 }
 
 impl GrpcExtension {
@@ -35,6 +39,7 @@ impl Default for GrpcExtension {
             connections: Default::default(),
             running: Default::default(),
             streams: std::sync::Mutex::new(crate::subscriptions::Subscriptions::new("grpc")),
+            protos: Default::default(),
         }
     }
 }
@@ -47,6 +52,14 @@ impl crate::extension::Extension for GrpcExtension {
 
     fn is_connected(&self, name: &str) -> bool {
         self.connections.lock().unwrap().contains_key(name)
+    }
+
+    fn connected(&self) -> Vec<String> {
+        self.connections.lock().unwrap().keys().cloned().collect()
+    }
+
+    fn close(&self, name: &str) -> bool {
+        self.connections.lock().unwrap().remove(name).is_some()
     }
 
     fn client_disconnected(&self, client_id: u64) {
@@ -124,9 +137,16 @@ impl crate::extension::Extension for GrpcExtension {
                 let channel = connect(&saved.target).await.map_err(|e| {
                     RpcError::app(format!("không kết nối được tới `{}`: {e}", saved.target))
                 })?;
-                let pool = discover_via_reflection(channel.clone())
+                let mut pool = discover_via_reflection(channel.clone())
                     .await
                     .unwrap_or_default();
+                let reload = self.protos.lock().unwrap().get(name).cloned();
+                for path in reload.unwrap_or_default() {
+                    // The file may have moved since; the rest still loads.
+                    if let Err(e) = load_proto(&mut pool, &path) {
+                        tracing::warn!("grpc [{name}] reloading {path} failed: {e}");
+                    }
+                }
                 self.connections
                     .lock()
                     .unwrap()
@@ -134,7 +154,7 @@ impl crate::extension::Extension for GrpcExtension {
                 Ok(json!({"connected": true, "already": false}))
             }
             "disconnect" => {
-                let removed = self.connections.lock().unwrap().remove(name).is_some();
+                let removed = self.close(name);
                 Ok(json!({"disconnected": removed}))
             }
             "services" => {
@@ -154,6 +174,12 @@ impl crate::extension::Extension for GrpcExtension {
                     .ok_or_else(|| not_connected("grpc", name))?;
                 let added = load_proto(&mut conn.pool, path)
                     .map_err(|e| RpcError::app(format!("không parse được `{path}`: {e}")))?;
+                drop(connections);
+                let mut protos = self.protos.lock().unwrap();
+                let paths = protos.entry(name.to_string()).or_default();
+                if !paths.iter().any(|p| p == path) {
+                    paths.push(path.to_string());
+                }
                 Ok(json!({"added": added}))
             }
             "methods" => {

@@ -93,6 +93,14 @@ impl crate::extension::Extension for HttpExtension {
         self.connections.lock().unwrap().contains_key(name)
     }
 
+    fn connected(&self) -> Vec<String> {
+        self.connections.lock().unwrap().keys().cloned().collect()
+    }
+
+    fn close(&self, name: &str) -> bool {
+        self.connections.lock().unwrap().remove(name).is_some()
+    }
+
     async fn handle(
         &self,
         method: &str,
@@ -120,7 +128,7 @@ impl crate::extension::Extension for HttpExtension {
                 Ok(json!({"connected": true, "already": false}))
             }
             "disconnect" => {
-                let removed = self.connections.lock().unwrap().remove(name).is_some();
+                let removed = self.close(name);
                 Ok(json!({"disconnected": removed}))
             }
             "send" => {

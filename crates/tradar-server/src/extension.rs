@@ -59,6 +59,19 @@ pub(crate) trait Extension: Send + Sync {
     /// Whether `name` has live state here, for `connections.list`.
     fn is_connected(&self, name: &str) -> bool;
 
+    /// The connections open here that `close` can drop -- what the idle
+    /// reaper and the generic `disconnect` look at. Empty by default.
+    fn connected(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Drops connection `name` (the same as `<driver>.disconnect`); `false`
+    /// if it was not open. Default: nothing to close -- Socket, whose
+    /// "connection" *is* a running tail, which is never idle.
+    fn close(&self, _name: &str) -> bool {
+        false
+    }
+
     /// Drops whatever background work `client_id` started and never stopped.
     fn client_disconnected(&self, _client_id: u64) {}
 

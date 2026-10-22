@@ -173,12 +173,32 @@ function M.ensure(opts, done)
   end)
 end
 
---- `cb(err, result, data)`, always on the main loop.
-function M.request(method, params, cb)
+local function send(method, params, cb)
   if not pipe then return cb('not connected to tradar-server') end
   next_id = next_id + 1
   pending[next_id] = cb
   pipe:write(vim.json.encode({ jsonrpc = '2.0', id = next_id, method = method, params = params }) .. '\n')
+end
+
+--- `cb(err, result, data)`, always on the main loop.
+---
+--- A `<driver>.*` call (Kafka, RabbitMQ, HTTP, gRPC) whose connection the
+--- server no longer has -- closed as idle (`TRADAR_IDLE_TTL`), or the server
+--- restarted -- reconnects it with `<driver>.connect` and is sent once more,
+--- so a request buffer left open for an hour still just sends.
+function M.request(method, params, cb)
+  local driver = method:match('^([%w_]+)%.')
+  local conn = type(params) == 'table' and params.connection or nil
+  if not driver or not conn or method == driver .. '.connect' then return send(method, params, cb) end
+  send(method, params, function(err, result, data, code)
+    if err and err:find('call `' .. driver .. '.connect` first', 1, true) then
+      return send(driver .. '.connect', { connection = conn }, function(cerr)
+        if cerr then return cb(err, result, data, code) end
+        send(method, params, cb)
+      end)
+    end
+    cb(err, result, data, code)
+  end)
 end
 
 --- Blocking variant for callers that must answer synchronously. Bounded,
