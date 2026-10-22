@@ -48,6 +48,26 @@ end
 
 local TX_VERBS = { begin = true, start = true, commit = true, rollback = true, ['end'] = true, abort = true }
 
+local flash_ns = vim.api.nvim_create_namespace('tradar_flash')
+vim.api.nvim_set_hl(0, 'TradarRunning', { link = 'IncSearch', default = true })
+
+--- Briefly marks the statement that was just sent (`setup{ flash_ms }`,
+--- default 200; 0 turns it off) -- with several statements in a buffer,
+--- which one ran is otherwise a guess. `row`/`col` are where `text` starts.
+local function flash(buf, row, col, text)
+  local ms = opts.flash_ms
+  if ms == nil then ms = 200 end
+  if ms <= 0 or not vim.api.nvim_buf_is_valid(buf) then return end
+  local lines = vim.split(text, '\n', { plain = true })
+  local ok, mark = pcall(vim.api.nvim_buf_set_extmark, buf, flash_ns, row, col, {
+    end_row = row + #lines - 1,
+    end_col = (#lines == 1 and col or 0) + #lines[#lines],
+    hl_group = 'TradarRunning',
+  })
+  if not ok then return end
+  vim.defer_fn(function() pcall(vim.api.nvim_buf_del_extmark, buf, flash_ns, mark) end, ms)
+end
+
 local function run_text(buf, text, base_row, base_col, flags)
   flags = flags or {}
   if state.running then
@@ -78,6 +98,9 @@ local function run_text(buf, text, base_row, base_col, flags)
   end
 
   ctx.ensure_connected(conn, function()
+    -- `flags.flash` is the statement as it stands in the buffer (an EXPLAIN
+    -- sends a rewritten text, but the one to mark is still the original).
+    if flags.flash then flash(buf, base_row, base_col, flags.flash) end
     state.counter = state.counter + 1
     local id = ('nv%d-%d'):format(vim.fn.getpid(), state.counter)
     state.running = { id = id, conn = conn, started = uv.hrtime() }
@@ -197,7 +220,7 @@ function M.run(range_start, range_end, all, transform)
             local st = statements[i]
             if not st then return end
             local row, col = position(st)
-            run_text(buf, st.text, row, col, { confirmed = true })
+            run_text(buf, st.text, row, col, { confirmed = true, flash = st.text })
             local timer = uv.new_timer()
             timer:start(50, 50, vim.schedule_wrap(function()
               if not state.running then
@@ -238,7 +261,7 @@ function M.run(range_start, range_end, all, transform)
       end
       chosen = chosen or statements[1]
       local srow, scol = position(chosen)
-      run_text(buf, transform and transform(chosen.text) or chosen.text, srow, scol)
+      run_text(buf, transform and transform(chosen.text) or chosen.text, srow, scol, { flash = chosen.text })
     end)
   end, function(err) notify(err, vim.log.levels.ERROR) end)
 end

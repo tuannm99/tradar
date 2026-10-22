@@ -66,11 +66,29 @@ local function took_text(ms)
   return ('%dm %ds'):format(math.floor(s / 60), s % 60)
 end
 
+--- `[2/3] select * from p · ` when the results of this run are kept (a
+--- `run all` of several statements, or just several runs): which one this is.
+local function position_text(entry)
+  local log, pos = state.result_log, state.result_pos
+  if not log or #log < 2 or not pos or log[pos] ~= entry then return '' end
+  local q = (entry.query or ''):gsub('%s+', ' ')
+  if #q > 40 then q = q:sub(1, 39) .. '…' end
+  return ('[%d/%d] %s · '):format(pos, #log, q)
+end
+
+local function affected_text(e)
+  return position_text(e) .. ('%d row(s) affected%s'):format(e.rows, e.took_ms and (' · ' .. took_text(e.took_ms)) or '')
+end
+
 local function results_title(r)
-  local text = ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and (' (stopped at %d rows; setup{ max_rows } reads more)'):format(r.total) or '')
+  local text = position_text(r) .. ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and (' (stopped at %d rows; setup{ max_rows } reads more)'):format(r.total) or '')
   if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
   if r.shown < r.total then
-    text = text .. ('  — %d more: %sm loads the next page'):format(r.total - r.shown, opts.prefix or '<leader>r')
+    if r.closed then
+      text = text .. ('  — %d not loaded: this result was closed when a newer one arrived; re-run it'):format(r.total - r.shown)
+    else
+      text = text .. ('  — %d more: %sm loads the next page'):format(r.total - r.shown, opts.prefix or '<leader>r')
+    end
   end
   return text
 end
@@ -179,11 +197,30 @@ local function paint_results(new_from)
   sync_editable(r)
 end
 
---- The previous result's rows live in the server until closed; with one
---- results buffer only the newest is ever reachable, so let the old one go.
+--- A result's rows live in the server until its cursor is closed. Only the
+--- newest result keeps one: older ones stay viewable (`[r`) from what was
+--- already loaded, but can no longer page or be edited -- so the server holds
+--- one result's rows, as before.
 local function release_result(keep)
-  local old = state.result and state.result.id
-  if old and old ~= keep then rpc.request('cursor.close', { cursor = old }, function() end) end
+  for _, e in ipairs(state.result_log or {}) do
+    if e.id and e.id ~= keep then
+      rpc.request('cursor.close', { cursor = e.id }, function() end)
+      e.id, e.closed = nil, true
+      e.edit, e.edit_reason = nil, 'an earlier result — re-run its query to edit it'
+    end
+  end
+end
+
+--- Keeps `entry` as the newest of the last `setup{ results_kept }` (10).
+local function log_result(entry)
+  local log = state.result_log
+  if not log then
+    log = {}
+    state.result_log = log
+  end
+  log[#log + 1] = entry
+  while #log > (opts.results_kept or 10) do table.remove(log, 1) end
+  state.result_pos = #log
 end
 
 ctx.show_message = function(text, height)
@@ -192,6 +229,7 @@ ctx.show_message = function(text, height)
   ctx.attach_results(buf)
   release_result()
   state.result = nil
+  state.result_pos = nil -- showing something that is not in the log
   set_lines(buf, vim.split(text, '\n', { plain = true }))
   show(buf, height or 6)
 end
@@ -216,7 +254,9 @@ local function show_result(r, meta)
   ctx.attach_results(buf)
   if r.kind == 'affected' then
     state.result = nil
-    set_lines(buf, { ('%d row(s) affected%s'):format(r.rows, took and (' · ' .. took_text(took)) or '') })
+    local entry = { kind = 'affected', rows = r.rows, took_ms = took, conn = meta and meta.conn, query = meta and meta.query, closed = true }
+    log_result(entry)
+    set_lines(buf, { affected_text(entry) })
     return show(buf, 4)
   end
   state.result = {
@@ -237,10 +277,66 @@ local function show_result(r, meta)
     conn = meta and meta.conn, query = meta and meta.query,
     took_ms = took,
   }
+  log_result(state.result)
   paint_results()
   local win = show(buf)
   pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
   if not state.result.edit then ctx.resolve_edit(state.result) end
+end
+
+--- Shows logged result `i` (read-only: its cursor is closed, see
+--- `release_result`; the newest one is whatever `show_result` left).
+local function show_entry(i)
+  local e = state.result_log[i]
+  local buf = scratch('tradar://results', state.results_buf)
+  state.results_buf = buf
+  ctx.attach_results(buf)
+  state.result_pos = i
+  if e.kind == 'affected' then
+    state.result = nil
+    set_lines(buf, { affected_text(e) })
+    return show(buf, 4)
+  end
+  state.result = e
+  paint_results()
+  local win = show(buf)
+  pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+end
+
+--- `[r` / `]r`: the previous / next result kept from this and earlier runs.
+function M.step_result(delta)
+  local log = state.result_log or {}
+  if #log == 0 then return notify('no results kept yet', vim.log.levels.WARN) end
+  if ctx.dirty() then
+    return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
+  end
+  local target = (state.result_pos or #log + 1) + delta
+  if target < 1 then return notify('this is the oldest kept result', vim.log.levels.INFO) end
+  if target > #log then return notify('this is the newest result', vim.log.levels.INFO) end
+  show_entry(target)
+end
+
+--- `:TradarResults`: pick one of the kept results.
+function M.pick_result()
+  local log = state.result_log or {}
+  if #log == 0 then return notify('no results kept yet', vim.log.levels.WARN) end
+  if ctx.dirty() then
+    return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
+  end
+  local items = {}
+  for i = #log, 1, -1 do items[#items + 1] = i end
+  vim.ui.select(items, {
+    prompt = 'tradar results',
+    format_item = function(i)
+      local e = log[i]
+      local q = (e.query or ''):gsub('%s+', ' ')
+      if #q > 60 then q = q:sub(1, 59) .. '…' end
+      local what = e.kind == 'affected' and ('%d row(s) affected'):format(e.rows) or ('%d rows'):format(e.total)
+      return ('%d  %s  (%s)%s'):format(i, q, what, i == state.result_pos and '  ◀' or '')
+    end,
+  }, function(i)
+    if i then show_entry(i) end
+  end)
 end
 
 --- `<leader>rz`: blow the results window up to the whole screen (and focus
@@ -332,6 +428,13 @@ function M.more(cb)
     if cb then cb() end
     return
   end
+  if r.closed then
+    -- A newer result took the server's cursor. (A caller that loops until
+    -- everything is loaded checks `closed` itself.)
+    notify('this result was closed when a newer one arrived — re-run its query to load more rows', vim.log.levels.WARN)
+    if cb then cb() end
+    return
+  end
   r.fetching = true
   call('fetch', { cursor = r.id, offset = r.shown, limit = cb and 2000 or (opts.page_size or DEFAULT_PAGE) }, function(page)
     r.fetching = false
@@ -352,6 +455,10 @@ local function all_rows(cb)
   local r = state.result
   if not r then return notify('no result to use', vim.log.levels.WARN) end
   if r.shown >= r.total then return cb(r) end
+  if r.closed then
+    notify(('only the %d rows loaded before a newer result closed this one'):format(r.shown), vim.log.levels.WARN)
+    return cb(r)
+  end
   local function step()
     if r.shown >= r.total or state.result ~= r then return cb(r) end
     M.more(step)
@@ -407,6 +514,9 @@ end
 --- " — NOT the whole result …" when the server stopped reading early: an
 --- export or yank of a cut-short result must not look complete.
 local function cut_note(r)
+  if r.closed and r.shown < r.total then
+    return (' — NOT the whole result: only the %d of %d rows loaded before a newer result closed it'):format(r.shown, r.total)
+  end
   if not r.truncated then return '' end
   return (' — NOT the whole result: stopped at %d rows (setup{ max_rows } reads more)'):format(#r.rows)
 end
