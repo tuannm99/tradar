@@ -542,10 +542,12 @@ mod docker {
             .execute("SELECT role FROM demo.memberships WHERE user_id = 1 AND group_id = 2")
             .await
             .unwrap();
+        // Empty, but still naming its column: an empty SELECT reports its
+        // columns from the result metadata, like every SQL driver (#76).
         assert_eq!(
             after_delete,
             QueryResult::Table {
-                columns: vec![],
+                columns: vec!["role".to_string()],
                 rows: vec![],
                 truncated: false,
             },
