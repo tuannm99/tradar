@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/tradar-core",
+  "crates/tradar-query",
   "crates/tradar-connector-spi",
   "crates/tradar-query-workbench",
   "crates/tradar-connector-postgres",

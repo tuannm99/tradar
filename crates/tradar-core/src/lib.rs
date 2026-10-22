@@ -1,8 +1,14 @@
+#[cfg(feature = "ui")]
 pub mod action;
 pub mod capability;
+#[cfg(feature = "ui")]
 pub mod config;
+#[cfg(feature = "ui")]
 pub mod keymap;
 pub mod storage;
+#[cfg(feature = "ui")]
 pub mod theme;
+#[cfg(feature = "ui")]
 pub mod ui;
+#[cfg(feature = "ui")]
 pub mod vim_list;

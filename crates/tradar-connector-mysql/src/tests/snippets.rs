@@ -6,7 +6,7 @@ fn crud_snippet_delegates_to_the_shared_sql_builder() {
     let entry = SchemaInfo::new("users");
 
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &[]),
         Some("SELECT * FROM \"users\" LIMIT 100;".to_string())
     );
 }

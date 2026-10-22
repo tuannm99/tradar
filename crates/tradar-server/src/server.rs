@@ -11,10 +11,10 @@ use tokio::sync::{Notify, mpsc};
 
 use serde_json::{Value, json};
 
-use tradar_connector_spi::Connector;
 use tradar_core::storage::ConnectionStore;
-use tradar_query_workbench::components::completion::CompletionSource;
-use tradar_query_workbench::query_driver::QueryDriver;
+use tradar_query::CompletionSource;
+use tradar_query::DriverOpener;
+use tradar_query::QueryDriver;
 
 use crate::extension::{Ctx, Extension};
 use crate::protocol::{METHOD_NOT_FOUND, RpcError, StoredResult};
@@ -40,7 +40,7 @@ const MAX_CURSOR_BYTES: usize = 256 * 1024 * 1024;
 
 /// Rows an `execute` reads from the database when the client does not say
 /// (`max_rows`): a grid shows tens of rows, and every row read is stringified,
-/// held and (for the first page) sent. `query_driver::MAX_ROWS` stays the
+/// held and (for the first page) sent. `tradar_query::MAX_ROWS` stays the
 /// ceiling for a client that asks for more.
 const DEFAULT_FETCH_ROWS: usize = 1_000;
 
@@ -121,7 +121,7 @@ impl ClientConnection {
 }
 
 pub struct Server {
-    registry: HashMap<String, Box<dyn Connector>>,
+    registry: HashMap<String, Box<dyn DriverOpener>>,
     store: Option<ConnectionStore>,
     state: Mutex<State>,
     extensions: Vec<Box<dyn Extension>>,
@@ -138,7 +138,7 @@ pub struct Server {
 
 impl Server {
     pub fn new(
-        registry: HashMap<String, Box<dyn Connector>>,
+        registry: HashMap<String, Box<dyn DriverOpener>>,
         store: Option<ConnectionStore>,
     ) -> Self {
         Self {

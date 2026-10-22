@@ -9,18 +9,20 @@ Mô tả **kiến trúc hiện tại** của tradar — hình dạng thật củ
 - **Neovim + `tradar-server`** — giao diện chính. `tradar-server` là một JSON-RPC server headless giữ mọi connection đã mở; nhiều session Neovim dùng chung một tiến trình server. Xem "Server headless" bên dưới.
 - **TUI (`tradar-app`)** — **deprecated** (không phát triển thêm, không sửa chủ động; chỉ làm khi có người yêu cầu). Vẫn phải build/test qua, vẫn là một client hợp lệ của cùng connector.
 
-Cả hai không phụ thuộc lẫn nhau — chúng chỉ cùng phụ thuộc `tradar-query-workbench`/`tradar-connector-spi`/các connector crate.
+Cả hai không phụ thuộc lẫn nhau — chúng chỉ cùng phụ thuộc `tradar-query` và các connector crate. Server **không** kéo theo gì của TUI (ratatui, `tradar-query-workbench`, `tradar-connector-spi`).
 
 ## Bố cục workspace
 
 ```
 Cargo.toml                    [workspace], default-members = ["crates/tradar-app"]
 crates/
-  tradar-core/                 — Action, trait Component, Capability, storage, config, theme, keymap, ui (widget dùng chung)
-  tradar-connector-spi/        — trait Connector, trait Session, ConnectorDescriptor, CONNECT_TIMEOUT
-  tradar-query-workbench/      — trait QueryDriver, QueryEngine (implement Session), QueryScreenComponent + sub-component
+  tradar-query/                — trait QueryDriver + kiểu kết quả/schema, tách statement, completion (CompletionSource), edit, CrudOp,
+                                  with_connect_timeout, trait DriverOpener. Không UI, không phụ thuộc crate nào trong workspace
+  tradar-core/                 — storage, Capability; với feature `ui` (mặc định): Action, trait Component, config, theme, keymap, ui
+  tradar-connector-spi/        — (TUI) trait Connector, trait Session, ConnectorDescriptor
+  tradar-query-workbench/      — (TUI) QueryEngine (implement Session), QueryScreenComponent + sub-component; `query_driver` = re-export `tradar-query`
   tradar-connector-{postgres,mysql,sqlite,mongo,elasticsearch,redis,cassandra,clickhouse}/
-                                — implement QueryDriver + Connector/Session, dùng chung QueryScreenComponent
+                                — implement QueryDriver; `opener()` cho server; với feature `tui` (mặc định): Connector/Session cho TUI (`tui.rs`)
   tradar-connector-{kafka,rabbitmq,http,socket}/
                                 — không có ngôn ngữ query, tự implement Connector/Session + Screen riêng (screen.rs)
   tradar-app/   [[bin]] "tradar" — registry() + event loop (TUI)
@@ -29,13 +31,14 @@ crates/
 
 Hướng phụ thuộc, Cargo enforce (không chỉ quy ước):
 
-- `tradar-core` không phụ thuộc gì trong workspace.
-- `tradar-connector-spi` phụ thuộc `tradar-core`.
-- `tradar-query-workbench` phụ thuộc `tradar-core` + `tradar-connector-spi`.
-- Mỗi connector crate phụ thuộc `tradar-connector-spi`, và phụ thuộc `tradar-query-workbench` chỉ khi có ngôn ngữ query (8 connector dạng SQL/document). 4 connector còn lại (Kafka/RabbitMQ/HTTP/Socket) chỉ phụ thuộc `tradar-connector-spi`/`tradar-core`.
+- `tradar-query` không phụ thuộc gì trong workspace (và không có UI).
+- `tradar-core` không phụ thuộc gì trong workspace khi tắt `ui`; feature `ui` thêm ratatui/crossterm/arboard và `tradar-query` (để re-export `CrudOp`).
+- `tradar-connector-spi` phụ thuộc `tradar-core` + `tradar-query`.
+- `tradar-query-workbench` phụ thuộc `tradar-core` + `tradar-connector-spi` + `tradar-query`.
+- 8 connector dạng query phụ thuộc `tradar-query`; chỉ với feature `tui` mới thêm `tradar-core`/`tradar-connector-spi`/`tradar-query-workbench`. `tradar-server` dùng chúng với `default-features = false`, nên `cargo tree -p tradar-server` không có crate TUI nào. 4 connector còn lại (Kafka/RabbitMQ/HTTP/Socket) chỉ phụ thuộc `tradar-connector-spi`/`tradar-core`.
 - `tradar-app` là crate duy nhất phụ thuộc mọi connector crate. Không connector nào phụ thuộc connector khác hay phụ thuộc `tradar-app`.
 
-**Quy tắc cách ly**: code trong mỗi connector crate chỉ implement `QueryDriver`/`Connector`/`Session`, không `pub` ra struct cụ thể nào — chỉ `pub fn connector() -> Box<dyn Connector>`. Thêm một database mới = một crate connector mới implement đúng các trait này, một dòng dependency + feature trong `tradar-app/Cargo.toml` (và `tradar-server/Cargo.toml` nếu nó có `QueryDriver`), một dòng trong `registry()`. Không bao giờ cần sửa `tradar-query-workbench`, `tradar-connector-spi`, `tradar-core`, hay connector crate khác.
+**Quy tắc cách ly**: code trong mỗi connector crate chỉ implement `QueryDriver`/`Connector`/`Session`, không `pub` ra struct cụ thể nào — chỉ `pub fn opener() -> Box<dyn DriverOpener>` (server) và, với `tui`, `pub fn connector() -> Box<dyn Connector>` (TUI). Thêm một database mới = một crate connector mới implement đúng các trait này, một dòng dependency + feature trong `tradar-app/Cargo.toml` (và `tradar-server/Cargo.toml` nếu nó có `QueryDriver`), một dòng trong `registry()`. Không bao giờ cần sửa `tradar-query`, `tradar-query-workbench`, `tradar-connector-spi`, `tradar-core`, hay connector crate khác.
 
 ## `Connector` → `Session` → `Screen`
 
@@ -62,7 +65,7 @@ Connector dạng query: `QueryEngine` (trong `tradar-query-workbench`) implement
 
 ## Trait `QueryDriver`
 
-Tám connector dạng query (Postgres, MySQL, SQLite, MongoDB, Elasticsearch, Redis, Cassandra, ClickHouse) implement chung một trait (`crates/tradar-query-workbench/src/query_driver.rs`; kiểu dữ liệu, `fetch`, `edit`, `snippet`, `completion`... nằm trong các module con cùng thư mục, re-export qua `query_driver::*`):
+Tám connector dạng query (Postgres, MySQL, SQLite, MongoDB, Elasticsearch, Redis, Cassandra, ClickHouse) implement chung một trait (`crates/tradar-query/src/lib.rs`; kiểu dữ liệu, `fetch`, `edit`, `snippet`, `completion`, `candidates`... nằm trong các module con của crate, re-export ở gốc; TUI vẫn gọi qua đường cũ `tradar_query_workbench::query_driver`):
 
 ```rust
 #[async_trait]
@@ -102,7 +105,7 @@ Khai báo một connector *có thể làm gì* mà không hardcode danh tính �
 
 ## Registry + feature flags
 
-`registry()` (`tradar-app/src/main.rs`, và tương tự trong `tradar-server`) là nơi duy nhất biết toàn bộ tập connector: gọi `connector()` của mỗi crate đã compile vào, dựng `HashMap<String, Box<dyn Connector>>` key theo `descriptor().id`. Mỗi connector nằm sau một Cargo feature cùng tên id (`postgres`, `kafka`, ...), `default` gộp tất cả. Một `connection.driver` không match trong registry là lỗi runtime (`"unknown connector '{id}': not compiled into this build"`), không phải lỗi compile-time.
+`registry()` là nơi duy nhất biết toàn bộ tập connector: ở `tradar-app/src/main.rs` gọi `connector()` của mỗi crate đã compile vào, dựng `HashMap<String, Box<dyn Connector>>` key theo `descriptor().id`; ở `tradar-server/src/lib.rs` gọi `opener()`, dựng `HashMap<String, Box<dyn DriverOpener>>` key theo `DriverOpener::id()` (cùng id). `connect` của server: `opener.open(target)` rồi tải schema **một lần** (trước đây đi qua `Connector::connect` → `QueryEngine` của TUI rồi ép kiểu ngược bằng `as_any().downcast_ref`, tải schema hai lần). Mỗi connector nằm sau một Cargo feature cùng tên id (`postgres`, `kafka`, ...), `default` gộp tất cả. Một `connection.driver` không match trong registry là lỗi runtime (`"unknown connector '{id}': not compiled into this build"`), không phải lỗi compile-time.
 
 ## Server headless (`tradar-server`) + plugin Neovim
 
@@ -110,7 +113,7 @@ Khai báo một connector *có thể làm gì* mà không hardcode danh tính �
 nvim (nvim/lua/tradar)  ──JSON-RPC, từng dòng, unix socket──>  tradar-server  ──>  QueryDriver  ──>  database
 ```
 
-`tradar-server` phụ thuộc `tradar-core`/`tradar-connector-spi`/`tradar-query-workbench` + các connector crate có `QueryDriver` qua feature (cùng tên feature `tradar-app` dùng). `gRPC`/`Kafka`/`Socket`/`RabbitMQ`/`HTTP` không đi qua `registry`/`QueryDriver` (không có ngôn ngữ query) — mỗi cái sống trong module riêng (`grpc.rs` + thư mục `grpc/`, `kafka.rs`/`socket.rs`/`rabbitmq.rs`/`http.rs`), **không tái dùng connector crate TUI tương ứng** (shape `Session` của TUI dựng quanh `tick()` cho vòng lặp vẽ, không hợp một server JSON-RPC thuần), tự nói thẳng với client library hoặc (RabbitMQ/HTTP) tự gọi `reqwest`.
+`tradar-server` phụ thuộc `tradar-query` + `tradar-core` (không `ui`, chỉ để đọc `connections.toml`) + các connector crate có `QueryDriver` qua feature, đều tắt `tui`, (cùng tên feature `tradar-app` dùng). `gRPC`/`Kafka`/`Socket`/`RabbitMQ`/`HTTP` không đi qua `registry`/`QueryDriver` (không có ngôn ngữ query) — mỗi cái sống trong module riêng (`grpc.rs` + thư mục `grpc/`, `kafka.rs`/`socket.rs`/`rabbitmq.rs`/`http.rs`), **không tái dùng connector crate TUI tương ứng** (shape `Session` của TUI dựng quanh `tick()` cho vòng lặp vẽ, không hợp một server JSON-RPC thuần), tự nói thẳng với client library hoặc (RabbitMQ/HTTP) tự gọi `reqwest`.
 
 Mỗi module implement trait `Extension` (`extension.rs`): tự giữ state của mình, trả lời các method `<driver>.*`, báo `is_connected` cho `connections.list`, tự dọn khi client ngắt kết nối (`client_disconnected`) và tự nhận `cancel` cho call đang chạy. `server.rs` (cùng `server/connections|query|editing.rs`) chỉ route theo tiền tố method tới extension tương ứng — không có field, nhánh dispatch hay feature gate riêng cho từng connector; danh sách extension (và feature gate của chúng) nằm đúng một chỗ, `extension::all()`. Thêm một connector kiểu này = một module mới + một dòng trong `extension::all()`, không sửa `server.rs`.
 

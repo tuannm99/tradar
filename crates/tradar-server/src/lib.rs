@@ -22,7 +22,7 @@ mod transport;
 
 use std::collections::HashMap;
 
-use tradar_connector_spi::Connector;
+use tradar_query::DriverOpener;
 
 pub use server::idle::{DEFAULT_IDLE_TTL, parse_ttl, reap_loop};
 pub use server::{ClientConnection, Server};
@@ -31,26 +31,26 @@ pub use transport::{bind, default_socket_path, serve};
 /// Every query-language connector compiled into this binary -- same
 /// feature-gated shape as `tradar-app`'s own `registry()`.
 #[allow(clippy::vec_init_then_push)]
-pub fn registry() -> HashMap<String, Box<dyn Connector>> {
-    let mut connectors: Vec<Box<dyn Connector>> = Vec::new();
+pub fn registry() -> HashMap<String, Box<dyn DriverOpener>> {
+    let mut connectors: Vec<Box<dyn DriverOpener>> = Vec::new();
     #[cfg(feature = "postgres")]
-    connectors.push(tradar_connector_postgres::connector());
+    connectors.push(tradar_connector_postgres::opener());
     #[cfg(feature = "mysql")]
-    connectors.push(tradar_connector_mysql::connector());
+    connectors.push(tradar_connector_mysql::opener());
     #[cfg(feature = "sqlite")]
-    connectors.push(tradar_connector_sqlite::connector());
+    connectors.push(tradar_connector_sqlite::opener());
     #[cfg(feature = "elasticsearch")]
-    connectors.push(tradar_connector_elasticsearch::connector());
+    connectors.push(tradar_connector_elasticsearch::opener());
     #[cfg(feature = "redis")]
-    connectors.push(tradar_connector_redis::connector());
+    connectors.push(tradar_connector_redis::opener());
     #[cfg(feature = "mongo")]
-    connectors.push(tradar_connector_mongo::connector());
+    connectors.push(tradar_connector_mongo::opener());
     #[cfg(feature = "cassandra")]
-    connectors.push(tradar_connector_cassandra::connector());
+    connectors.push(tradar_connector_cassandra::opener());
     #[cfg(feature = "clickhouse")]
-    connectors.push(tradar_connector_clickhouse::connector());
+    connectors.push(tradar_connector_clickhouse::opener());
     connectors
         .into_iter()
-        .map(|c| (c.descriptor().id.to_string(), c))
+        .map(|c| (c.id().to_string(), c))
         .collect()
 }

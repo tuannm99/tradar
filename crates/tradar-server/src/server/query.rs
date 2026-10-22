@@ -2,9 +2,9 @@ use crate::protocol::{RpcError, StoredResult, str_param, u64_param, usize_param}
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tradar_core::action::CrudOp;
-use tradar_query_workbench::components::completion::CompletionSource;
-use tradar_query_workbench::query_driver::{self, QueryDriver};
+use tradar_query::CompletionSource;
+use tradar_query::CrudOp;
+use tradar_query::QueryDriver;
 
 use super::*;
 
@@ -36,7 +36,7 @@ impl Server {
         let outcome = tokio::select! {
             biased;
             () = cancel.notified() => None,
-            result = query_driver::with_max_rows(max_rows, driver.execute(query)) => Some(result),
+            result = tradar_query::with_max_rows(max_rows, driver.execute(query)) => Some(result),
         };
         // What the database took, without the socket round trip or the
         // client's rendering; shown next to the row count.

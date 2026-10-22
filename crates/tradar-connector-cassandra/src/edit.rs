@@ -1,4 +1,4 @@
-use tradar_query_workbench::query_driver::{self as query_driver};
+use tradar_query::{self as query_driver};
 
 /// Whether `value`'s own text reads as a CQL identifier/UUID literal --
 /// the hyphenated hex shape (`8-4-4-4-12`) CQL accepts unquoted for both

@@ -1,4 +1,4 @@
-use tradar_query_workbench::query_driver::ColumnInfo;
+use tradar_query::ColumnInfo;
 
 /// The fields of one index, read out of a `GET /_mapping` response.
 pub(crate) fn index_fields(mappings: &serde_json::Value, index: &str) -> Vec<ColumnInfo> {

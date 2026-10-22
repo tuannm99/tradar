@@ -6,19 +6,19 @@ fn crud_snippet_covers_all_four_ops() {
     let entry = SchemaInfo::new("my-index");
 
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &[]),
         Some("GET my-index/_search\n{\n  \"query\": {\n    \"match_all\": {}\n  }\n}".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Create, &[]),
         Some("POST my-index/_doc\n{\n}".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Update, &[]),
         Some("POST my-index/_update/<id>\n{\n  \"doc\": {\n  }\n}".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Delete, &[]),
         Some("DELETE my-index/_doc/<id>".to_string())
     );
 }
@@ -28,11 +28,7 @@ fn crud_snippet_create_with_a_real_mapping_lists_every_field() {
     let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
 
     assert_eq!(
-        driver.crud_snippet(
-            &my_index_with_fields(),
-            tradar_core::action::CrudOp::Create,
-            &[]
-        ),
+        driver.crud_snippet(&my_index_with_fields(), tradar_query::CrudOp::Create, &[]),
         Some("POST my-index/_doc\n{\n  \"title\": <value>,\n  \"views\": <value>\n}".to_string())
     );
 }
@@ -44,7 +40,7 @@ fn crud_snippet_create_with_an_explicit_selection_lists_only_those_fields() {
     assert_eq!(
         driver.crud_snippet(
             &my_index_with_fields(),
-            tradar_core::action::CrudOp::Create,
+            tradar_query::CrudOp::Create,
             &["title".to_string()]
         ),
         Some("POST my-index/_doc\n{\n  \"title\": <value>\n}".to_string())
@@ -58,7 +54,7 @@ fn crud_snippet_read_with_a_selection_adds_a_source_filter() {
     assert_eq!(
         driver.crud_snippet(
             &my_index_with_fields(),
-            tradar_core::action::CrudOp::Read,
+            tradar_query::CrudOp::Read,
             &["title".to_string()]
         ),
         Some(
@@ -75,7 +71,7 @@ fn crud_snippet_update_with_a_real_mapping_sets_every_field_in_the_doc_body() {
     assert_eq!(
         driver.crud_snippet(
             &my_index_with_fields(),
-            tradar_core::action::CrudOp::Update,
+            tradar_query::CrudOp::Update,
             &[]
         ),
         Some(
@@ -92,7 +88,7 @@ fn crud_snippet_delete_ignores_columns_since_it_deletes_by_id_only() {
     assert_eq!(
         driver.crud_snippet(
             &my_index_with_fields(),
-            tradar_core::action::CrudOp::Delete,
+            tradar_query::CrudOp::Delete,
             &["title".to_string()]
         ),
         Some("DELETE my-index/_doc/<id>".to_string())

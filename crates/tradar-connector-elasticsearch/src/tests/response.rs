@@ -87,7 +87,7 @@ async fn a_search_with_more_hits_than_the_row_cap_is_cut_and_marked() {
         .map(|i| serde_json::json!({"_id": i.to_string(), "_source": {"n": i}}))
         .collect();
     let body = serde_json::json!({"hits": {"hits": hits}}).to_string();
-    let result = tradar_query_workbench::query_driver::with_max_rows(5, async {
+    let result = tradar_query::with_max_rows(5, async {
         handle_response(reqwest::StatusCode::OK, body).unwrap()
     })
     .await;

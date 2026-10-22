@@ -11,13 +11,8 @@ use sqlx::postgres::{PgConnection, PgPoolOptions, PgRow};
 use sqlx::{Column, Executor, PgPool, Postgres, Row, Transaction, TypeInfo, ValueRef};
 use tokio::sync::Mutex;
 
-use tradar_connector_spi::{CONNECT_TIMEOUT, Connector, ConnectorDescriptor, Session};
-use tradar_core::capability::Capability;
-use tradar_core::storage::SavedConnection;
-use tradar_query_workbench::query_driver::{
-    self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo,
-};
-use tradar_query_workbench::query_engine::QueryEngine;
+use tradar_query::CONNECT_TIMEOUT;
+use tradar_query::{self as query_driver, ColumnInfo, QueryDriver, QueryResult, SchemaInfo};
 
 struct PostgresDriver {
     connection_string: String,
@@ -279,7 +274,7 @@ impl QueryDriver for PostgresDriver {
     fn crud_snippet(
         &self,
         entry: &SchemaInfo,
-        op: tradar_core::action::CrudOp,
+        op: tradar_query::CrudOp,
         columns: &[String],
     ) -> Option<String> {
         Some(query_driver::build_crud_snippet(entry, op, columns))
@@ -494,32 +489,33 @@ fn stringify_column(row: &PgRow, index: usize) -> String {
     text
 }
 
-const DESCRIPTOR: ConnectorDescriptor = ConnectorDescriptor {
-    id: "postgres",
-    display_name: "PostgreSQL",
-    icon: "🐘",
-    capabilities: &[Capability::Query, Capability::Schema, Capability::Export],
-};
+#[cfg(feature = "tui")]
+mod tui;
+#[cfg(feature = "tui")]
+pub use tui::connector;
+// The crate's tests drive the TUI path too (`QueryEngine`, `SavedConnection`).
+#[cfg(all(test, feature = "tui"))]
+#[allow(unused_imports)]
+use tui::*;
 
-struct PostgresConnector;
-
-#[async_trait]
-impl Connector for PostgresConnector {
-    fn descriptor(&self) -> &ConnectorDescriptor {
-        &DESCRIPTOR
-    }
-
-    async fn connect(&self, connection: SavedConnection) -> anyhow::Result<Box<dyn Session>> {
-        let mut driver = PostgresDriver::new(&connection.target);
-        tradar_connector_spi::with_connect_timeout(&connection.target, driver.connect()).await?;
-        let driver: Arc<dyn QueryDriver> = Arc::new(driver);
-        let schema = driver.list_schema().await.map_err(|e| e.to_string());
-        Ok(Box::new(QueryEngine::new(driver, connection, schema)))
-    }
+/// Opens a connected driver for `tradar-server` -- no TUI types involved.
+pub fn opener() -> Box<dyn tradar_query::DriverOpener> {
+    Box::new(Opener)
 }
 
-pub fn connector() -> Box<dyn Connector> {
-    Box::new(PostgresConnector)
+struct Opener;
+
+#[async_trait]
+impl tradar_query::DriverOpener for Opener {
+    fn id(&self) -> &'static str {
+        "postgres"
+    }
+
+    async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {
+        let mut driver = PostgresDriver::new(target);
+        tradar_query::with_connect_timeout(target, driver.connect()).await?;
+        Ok(Arc::new(driver))
+    }
 }
 
 #[cfg(test)]

@@ -6,19 +6,19 @@ fn crud_snippet_covers_all_four_ops() {
     let entry = SchemaInfo::new("users");
 
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Read, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Read, &[]),
         Some("db.users.find({})".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Create, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Create, &[]),
         Some("db.users.insertOne({})".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Update, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Update, &[]),
         Some("db.users.updateOne({_id: ObjectId(\"<id>\")}, {$set: {}})".to_string())
     );
     assert_eq!(
-        driver.crud_snippet(&entry, tradar_core::action::CrudOp::Delete, &[]),
+        driver.crud_snippet(&entry, tradar_query::CrudOp::Delete, &[]),
         Some("db.users.deleteOne({_id: ObjectId(\"<id>\")})".to_string())
     );
 }
@@ -28,11 +28,7 @@ fn crud_snippet_create_with_a_real_schema_lists_every_field_with_a_named_placeho
     let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
 
     assert_eq!(
-        driver.crud_snippet(
-            &users_with_fields(),
-            tradar_core::action::CrudOp::Create,
-            &[]
-        ),
+        driver.crud_snippet(&users_with_fields(), tradar_query::CrudOp::Create, &[]),
         Some("db.users.insertOne({\n  _id: ObjectId(\"<id>\"),\n  name: <value>\n})".to_string())
     );
 }
@@ -44,7 +40,7 @@ fn crud_snippet_create_with_an_explicit_selection_lists_only_those_fields() {
     assert_eq!(
         driver.crud_snippet(
             &users_with_fields(),
-            tradar_core::action::CrudOp::Create,
+            tradar_query::CrudOp::Create,
             &["name".to_string()]
         ),
         Some("db.users.insertOne({name: <value>})".to_string())
@@ -58,7 +54,7 @@ fn crud_snippet_create_nests_dotted_fields_into_a_real_object_instead_of_a_flat_
     let snippet = driver
         .crud_snippet(
             &orders_with_a_nested_address(),
-            tradar_core::action::CrudOp::Create,
+            tradar_query::CrudOp::Create,
             &[],
         )
         .unwrap();
@@ -80,7 +76,7 @@ fn crud_snippet_create_with_only_one_nested_field_selected_stays_a_single_line()
     assert_eq!(
         driver.crud_snippet(
             &orders_with_a_nested_address(),
-            tradar_core::action::CrudOp::Create,
+            tradar_query::CrudOp::Create,
             &["address.city".to_string()]
         ),
         Some("db.orders.insertOne({address: {city: <value>}})".to_string())
@@ -99,7 +95,7 @@ fn crud_snippet_update_and_delete_still_quote_a_dotted_field_flat() {
     assert_eq!(
         driver.crud_snippet(
             &orders_with_a_nested_address(),
-            tradar_core::action::CrudOp::Update,
+            tradar_query::CrudOp::Update,
             &["address.city".to_string()]
         ),
         Some(
@@ -110,7 +106,7 @@ fn crud_snippet_update_and_delete_still_quote_a_dotted_field_flat() {
     assert_eq!(
         driver.crud_snippet(
             &orders_with_a_nested_address(),
-            tradar_core::action::CrudOp::Delete,
+            tradar_query::CrudOp::Delete,
             &["address.city".to_string()]
         ),
         Some("db.orders.deleteOne({\"address.city\": <value>})".to_string())
@@ -124,7 +120,7 @@ fn crud_snippet_read_with_a_selection_projects_only_those_fields() {
     assert_eq!(
         driver.crud_snippet(
             &users_with_fields(),
-            tradar_core::action::CrudOp::Read,
+            tradar_query::CrudOp::Read,
             &["name".to_string()]
         ),
         Some("db.users.find({}, {name: 1})".to_string())
@@ -136,11 +132,7 @@ fn crud_snippet_update_defaults_to_setting_non_id_fields() {
     let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
 
     assert_eq!(
-        driver.crud_snippet(
-            &users_with_fields(),
-            tradar_core::action::CrudOp::Update,
-            &[]
-        ),
+        driver.crud_snippet(&users_with_fields(), tradar_query::CrudOp::Update, &[]),
         Some("db.users.updateOne({_id: ObjectId(\"<id>\")}, {$set: {name: <value>}})".to_string())
     );
 }
@@ -152,7 +144,7 @@ fn crud_snippet_delete_can_filter_by_a_non_id_field() {
     assert_eq!(
         driver.crud_snippet(
             &users_with_fields(),
-            tradar_core::action::CrudOp::Delete,
+            tradar_query::CrudOp::Delete,
             &["name".to_string()]
         ),
         Some("db.users.deleteOne({name: <value>})".to_string())

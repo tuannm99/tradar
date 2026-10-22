@@ -21,13 +21,17 @@ async fn a_transaction_through_query_engine_does_not_get_stuck_pending() {
         Ok(Vec::new()),
     );
 
+    // Bounded by wall-clock time, not by a count of yields: the query runs
+    // on sqlx's own SQLite worker thread, which on a loaded CI machine can
+    // take longer than any fixed number of `yield_now`s.
     async fn settle(engine: &mut QueryEngine) {
-        for _ in 0..10_000 {
-            tokio::task::yield_now().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             engine.tick();
             if !engine.is_pending() {
                 return;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         panic!("query never settled");
     }

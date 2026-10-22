@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 tradar-core = { path = "../tradar-core" }
+tradar-query = { path = "../tradar-query" }
 
 anyhow = "1"
 async-trait = "0.1"
