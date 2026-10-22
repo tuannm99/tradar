@@ -64,7 +64,7 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] Bước 2 — crate `tradar-query`, server bỏ phụ thuộc TUI, schema tải một lần — `docs/backlog/split-tradar-query-2026-10-22.md`
 - [x] Bước 3 — gom logic trùng Kafka/RabbitMQ/HTTP/Socket — `docs/backlog/dedupe-non-query-connectors-2026-10-22.md`
 - [x] Bước 4 — idle TTL/`disconnect` cho mọi loại connection — `docs/backlog/unified-connection-lifecycle-2026-10-22.md`
-- [ ] CI chạy test Docker của từng connector (job `docker` trong `.github/workflows/ci.yml`)
+- [x] CI chạy test Docker của từng connector (job `docker` trong `.github/workflows/ci.yml`) — `docs/backlog/nvim-tests-ci-2026-10-22.md`
 - [ ] TTL riêng theo từng connection (field trong `connections.toml`) — chỉ khi có nhu cầu; hiện TTL chung toàn server
 - [ ] Kết quả nhiều cột: cột giữa vẫn cắt ở 40 ký tự (cột cuối đã tới 400) — chờ ví dụ cụ thể (ClickHouse "report disk") để chọn cách: nâng giới hạn hay phím phóng to cột
 
