@@ -13,6 +13,8 @@
 --   rowedit   editing rows in the results grid, commit preview, EXPLAIN
 --   complete  completion
 --   crud      CRUD statements for a table (:TradarCrud, schema panel `c`)
+--   refresh   re-running the result on screen (<leader>rR, :TradarWatch)
+--   addconn   :TradarAddConnection, the add-a-connection questions
 --   files     saving queries to the library / next to the buffer, :TradarOpen
 local ctx = require('tradar.ctx')
 local M = ctx.M
@@ -33,6 +35,8 @@ require('tradar.rowedit')
 require('tradar.complete')
 require('tradar.files')
 require('tradar.crud')
+require('tradar.refresh')
+require('tradar.addconn')
 
 -- ── buffer setup ─────────────────────────────────────────────────────────
 

@@ -1,0 +1,13 @@
+# Tham số, làm mới/watch, thêm connection bằng hỏi đáp (2026-10-22)
+
+Ba mục user chọn trong danh sách gợi ý UX (1, 2, 3).
+
+**1. Tham số `${tên}` / `${tên=mặc định}`** (`lua/tradar/params.lua`). Không dùng `:tên` — đụng `::cast` của Postgres, giờ `12:30`, object `{a: 1}` của Mongo. Là thay chữ chứ không phải ràng buộc tham số (server không có khái niệm đó, và Mongo/ES/Redis không có): giá trị đặt trong cặp nháy thì được escape theo ngôn ngữ (SQL nhân đôi nháy, Mongo/ES/Redis dùng `\`), nằm trần thì vào nguyên văn. Hỏi một lần cho cả lô `run all`, nhớ giá trị theo tên (`state.params`), `vim.ui.input` nên đổi giao diện được. Bỏ qua dòng chỉ có comment. Chèn vào `M.run` trước `run_text`/guard, nên guard xét **văn bản đã thay** (`delete from p ${where}` với `where` rỗng vẫn bị bắt); `flash` vẫn đánh dấu văn bản gốc. History lưu bản đã thay; `:TradarSave` lưu bản có `${}`.
+
+**2. Làm mới/watch** (`lua/tradar/refresh.lua`). `run_text` nhận `flags.conn` (connection của kết quả, không phải của buffer SQL) và `flags.refresh`: không đổi `state.sql_buf`, không ghi history, lỗi chỉ `notify` (không thay lưới bằng thông báo lỗi), và `show_result` thay **đúng ô** trong danh sách kết quả (`log_result(entry, replacing)`) rồi giữ con trỏ. Watch là một timer; bỏ tick nếu đang chạy query hoặc lưới có sửa chưa commit, tự dừng khi lỗi hoặc khi kết quả trên màn hình không còn là cái đang theo dõi.
+- An toàn: `guard.is_read_only(text, driver)` — SQL (đầu câu `select/show/describe/values/table/explain/with`, không có từ ghi, `into`, `analyze`, `call`, `nextval`, `setval`), Mongo (không method ghi, không `$out`/`$merge`/`runCommand`), Redis (danh sách lệnh đọc), Elasticsearch (`GET`, `_search`/`_count`/`_msearch`/`_mget`). Cố ý bảo thủ: "không" tốn một phím, "có" nhầm lặp lại một câu ghi. 30 trường hợp trong spec.
+- `R` là lệnh replace của vim và lưới sửa được, nên phím là `<leader>rR` / `<leader>rW`.
+
+**3. `:TradarAddConnection`** (`lua/tradar/addconn.lua`): chọn loại → tên → target (điền sẵn mẫu đúng dạng của loại, kèm lưu ý như mã hoá phần trăm). Chỉ **nối thêm** một bảng TOML vào cuối file (comment và connection khác nguyên vẹn), rồi thử kết nối; lỗi thì hỏi *Edit the target* / *Keep it anyway* / *Remove it* (đặt lại file đúng từng byte). Chuỗi TOML escape đúng (`\`, `"`, điều khiển). Tên: chữ, số, `_ - .` và dấu cách giữa các từ. Từ chối khi buffer `connections.toml` đang có sửa chưa lưu. Có trong picker `:TradarConnect` (`+ add a connection…`); chưa có connection nào thì `:TradarConnect` vào thẳng đây. Socket không được thử (nó chỉ nối khi tail).
+
+Test: `params_spec` (29), `refresh_spec` (24), `addconn_spec` (27).

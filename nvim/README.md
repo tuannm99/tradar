@@ -36,7 +36,7 @@ cargo build --release -p tradar-server        # trong repo tradar
 
 ## Dùng
 
-Mọi lệnh có dạng `:Tradar…`; `:Tradar <lệnh-con>` là một lối vào chung (`:Tradar kafka tail`, `:Tradar run all`), `<Tab>` gợi ý lệnh con, tham số và tên connection đã lưu.
+`${tên}` / `${tên=mặc-định}` trong câu lệnh được hỏi lúc chạy (thay chữ, nhớ giá trị). `:TradarAddConnection` thêm connection bằng hỏi đáp và thử kết nối ngay. Mọi lệnh có dạng `:Tradar…`; `:Tradar <lệnh-con>` là một lối vào chung (`:Tradar kafka tail`, `:Tradar run all`), `<Tab>` gợi ý lệnh con, tham số và tên connection đã lưu.
 
 Connection lấy từ `~/.config/tradar/connections.toml` (cùng file với TUI); `:TradarConnections` mở đúng file server đang đọc (có template nếu chưa có, `:w` là server thấy ngay và plugin báo số connection hoặc lỗi TOML), picker `:TradarConnect` cũng có dòng `+ edit connections file…`. Gắn một file `.sql` vào connection bằng dòng đầu file:
 
@@ -113,6 +113,7 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
 | `rs` / `rc` / `rm` | panel schema / chọn connection / tải thêm dòng |
 | `rz` | phóng cửa sổ kết quả ra toàn màn hình / trả lại (`:TradarResultsZoom`; cũng có trong buffer kết quả) |
+| `rR` / `rW` | (buffer kết quả) chạy lại kết quả tại chỗ / theo dõi mỗi vài giây; chỉ câu không ghi dữ liệu |
 | `[r` / `]r` | (buffer kết quả) kết quả trước / sau trong 10 kết quả giữ lại (`setup{ results_kept }`); `:TradarResults` chọn. Câu vừa chạy nháy sáng (`setup{ flash_ms }`, nhóm `TradarRunning`) |
 | `K` | thông tin bảng/cột dưới con trỏ (kiểu, PK, FK, index; hiểu alias `o.user_id`); không biết thì rơi về hover của LSP |
 | `gd` | trên tên bảng: mở bảng (`SELECT ... LIMIT 100`); chỗ khác: `definition` của LSP |

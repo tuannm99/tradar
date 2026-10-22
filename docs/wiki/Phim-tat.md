@@ -36,6 +36,7 @@ Là buffer Neovim bình thường: `j`/`k`/`gg`/`G`, `/`, `yy`… đều dùng �
 | `rz` | phóng to cửa sổ kết quả toàn màn hình / trả lại cỡ cũ (`:TradarResultsZoom`) |
 | `rv` | đổi bảng ↔ JSON (SQL: mảng object; tài liệu: JSON in thụt lề) |
 | `[r` / `]r` | kết quả trước / sau trong số các kết quả được giữ lại (`:TradarResults` để chọn) |
+| `rR` / `rW` | chạy lại kết quả đang xem tại chỗ / theo dõi (lặp mỗi 5 giây, bấm lại để dừng) — chỉ với câu không ghi dữ liệu (`:TradarRefresh`, `:TradarWatch [giây\|off]`) |
 | `gK` | xem cả dòng hiện tại, mỗi trường một dòng |
 | `K` | xem trọn giá trị một ô (khi ô bị cắt `…`) |
 | `zw` / `zW` | hiện trọn cột dưới con trỏ / mọi cột thay vì cắt ở 40 ký tự; bấm lại để thu về |
@@ -102,7 +103,7 @@ Mọi lệnh dưới đây cũng gọi được qua một lệnh chung `:Tradar 
 
 | Nhóm | Lệnh |
 |---|---|
-| Connection | `:TradarConnect [tên]`, `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền), `:TradarLog` (xem log của server) |
+| Connection | `:TradarConnect [tên]`, `:TradarAddConnection` (thêm bằng hỏi đáp, thử kết nối ngay), `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền), `:TradarLog` (xem log của server) |
 | Chạy | `:TradarRun` (nhận range), `:TradarRunAll`, `:TradarCancel`, `:TradarMore` |
 | Điều hướng | `:TradarSchema`, `:TradarTables`, `:TradarHistory` |
 | Sinh câu lệnh | `:TradarCrud [create\|read\|update\|delete]` (`rg`) — chèn câu lệnh mẫu của bảng vào buffer, không chạy |
