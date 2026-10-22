@@ -95,9 +95,12 @@ function M.check()
     vim.health.info('server not running yet (it autostarts on first use): ' .. tostring(err))
   end
 
-  local sock = vim.env.XDG_RUNTIME_DIR
-  if sock and #sock > 70 then
-    vim.health.warn('XDG_RUNTIME_DIR is long; unix sockets are limited to ~108 bytes', { 'pass a shorter socket path in setup{ socket = ... }' })
+  local path = rpc.socket_path(require('tradar').rpc_opts())
+  local too_long = rpc.check_path(path)
+  if too_long then
+    vim.health.error(too_long)
+  else
+    vim.health.ok('socket: ' .. path .. (#path > 70 and (' (%d of %d bytes)'):format(#path, rpc.max_socket_path()) or ''))
   end
   for _, mod in ipairs({ 'telescope', 'blink.cmp' }) do
     if pcall(require, mod) then vim.health.ok(mod .. ' found') else vim.health.info(mod .. ' not installed (optional)') end

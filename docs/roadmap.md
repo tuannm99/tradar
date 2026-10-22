@@ -56,7 +56,8 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] Kafka tail: tạm dừng/lọc/xoá/nối lại — `docs/backlog/kafka-tail-controls-2026-10-21.md`
 - [x] Quyết định cuối: **TUI deprecated** (không xoá, chỉ làm khi có người yêu cầu) — 2026-10-31
 - [x] Tách phần client dùng chung giữa connector crate và module `tradar-server` — `docs/backlog/dedupe-non-query-connectors-2026-10-22.md` (bước 3 review kiến trúc 2026-10-22)
-- [ ] Đóng gói: đường dẫn socket dài hơn ~108 byte, Windows named pipe
+- [x] Đường dẫn socket quá dài — `docs/backlog/small-fixes-socket-telescope-2026-10-22.md`
+- [ ] Đóng gói: Windows named pipe
 
 **Review kiến trúc 2026-10-22** — server không còn phụ thuộc TUI, một vòng đời connection chung
 

@@ -31,7 +31,7 @@ Connectors are gated by Cargo features named after `ConnectorDescriptor::id`; `d
 ## Commands
 
 - `cargo build` / `cargo run` / `cargo test [name]` / `cargo clippy --all-targets --workspace -- -D warnings` / `cargo fmt`
-- `make test-nvim` (or `nvim/tests/run.sh [filter]`): the Neovim plugin's tests -- each `nvim/tests/*_spec.lua` runs in its own headless Neovim against its own `tradar-server` and an empty SQLite database (`nvim/tests/helpers.lua`). Needs `nvim` and `python3`; no Docker. CI (`.github/workflows/ci.yml`) runs `make check` + `make test-nvim` on every push.
+- `make test-nvim` (or `nvim/tests/run.sh [filter]`): the Neovim plugin's tests -- each `nvim/tests/*_spec.lua` runs in its own headless Neovim against its own `tradar-server` and an empty SQLite database (`nvim/tests/helpers.lua`). Needs `nvim`, `python3` and (first run) network for telescope/plenary, cloned pinned into `.deps/` by `nvim/tests/deps.sh`; no Docker. CI (`.github/workflows/ci.yml`) runs `make check` + `make test-nvim` on every push.
 - Ten connectors' tests (everything but SQLite/Socket) start a real backend via `testcontainers` and need a Docker daemon. Without Docker: `make test-unit`. With: `make test-docker` (includes `make test-kafka-server`; set `TRADAR_DOCKER_HOST_NETWORK=1` on Docker without a bridge network).
 
 ## Documentation

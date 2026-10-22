@@ -46,6 +46,18 @@ print(json.dumps([['NULL' if v is None else str(v) for v in r] for r in rows]))
   return vim.json.decode(res)
 end
 
+--- Puts telescope.nvim (and plenary) on the runtimepath, from the copies
+--- `deps.sh` cloned. Returns whether telescope loads.
+function H.telescope()
+  local deps = vim.fn.getcwd() .. '/.deps'
+  vim.opt.rtp:append(deps .. '/plenary.nvim')
+  vim.opt.rtp:append(deps .. '/telescope.nvim')
+  vim.cmd('runtime! plugin/plenary.vim')
+  local ok, err = pcall(require, 'telescope')
+  if not ok then H.check('telescope.nvim loads (.deps/, see nvim/tests/deps.sh)', false, err) end
+  return ok
+end
+
 function H.wait(ms, pred) return vim.wait(ms, pred, 20) end
 function H.sleep(ms) vim.wait(ms, function() return false end, 20) end
 
