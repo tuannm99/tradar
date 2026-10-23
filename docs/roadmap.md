@@ -13,6 +13,13 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét. 
 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước — bảo mật hiện dựa vào quyền `0600` của unix socket); Windows named pipe.
 
+**Mongo/Elasticsearch — ý tưởng chưa scope** (chuyển từ `docs/next-run.md` cũ, ghi 2026-09-10, chưa việc nào được code; làm khi có nhu cầu thật, mỗi mục cần hỏi lại chủ dự án trước khi code):
+- **ES `GET <index>/_doc/<id>` tách thành 1 row có `_id`** (rủi ro thấp nhất): response này vẫn hiện nguyên envelope `{_index,_id,_version,found,_source}` trong khi `_search` đã được `unwrap_search_hits` (`crates/tradar-connector-elasticsearch/src/response.rs`) tách thành từng hit. Thêm hàm tương tự (gộp `_id` + field của `_source`; `found:false` → 0 row, không lỗi), gọi trong `execute()` cạnh `unwrap_search_hits`, nhận diện bằng body (`found` + `_source` ở top-level, không có `hits`).
+- **Row-edit cho `GET <index>/_doc/<id>`** — `edit_source` chỉ nhận đúng 1 index tường minh; shape này chỉ có 1 document nên không lo multi-index, tách index + id thẳng từ path. **Row-edit cho multi-index/wildcard `_search`** thì khó hơn hẳn: phải mang `_index` của từng hit vào row và đổi `RowEdit`/`edit_sql` (dùng chung với SQL/Mongo) đọc `_index` từ row thay vì giả định 1 index cố định. Lưu ý row-edit hiện là tính năng của TUI đã deprecated — cân nhắc lại có đáng làm không trước khi đụng tới.
+- **Mongo `bulkWrite`** — mongosh có, ta chưa hỗ trợ. Đường vào cụ thể: thêm 1 nhánh `"bulkWrite"` cạnh `insertOne`/`updateMany` trong `run_method` (`crates/tradar-connector-mongo/src/run.rs`), parse mảng operation (mỗi phần tử đúng 1 key `insertOne`/`updateOne`/`deleteOne`/...) thành `WriteModel` rồi gọi `Collection::bulk_write` thật (không tự lặp từng op — mất tính "1 write" của MongoDB); `reject_chain()` như các method khác; không editable. **Câu cần hỏi trước khi code**: có hỗ trợ option `ordered: false` ngay không, hay giữ mặc định `ordered: true` (dừng ở lỗi đầu tiên).
+- **Elasticsearch**: chưa có auth (Basic/API key) hay TLS client-cert cho cluster cần bảo mật; `_bulk` chỉ forward nguyên văn, không có trợ giúp gì thêm; `_msearch` (`{responses:[...]}`) cần logic tách riêng. `_count` không có `hits` nên không có gì để tách row — đúng, không phải thiếu sót.
+- **Mongo**: `startSession`/transaction vẫn cố tình ngoài phạm vi (`docs/architecture.md`); `aggregate(...)` chưa nhận chain (`.explain()` có thể hữu ích).
+
 ## Checklist tổng quan
 
 Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.md` qua link ở mỗi dòng.
