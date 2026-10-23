@@ -130,6 +130,12 @@ Nhiều câu dùng chung một tham số (`<leader>ra`) thì chỉ hỏi một l
 
 Đây là **thay chữ**, không phải tham số ràng buộc: `${id}` trong `where id = ${id}` là đúng những gì bạn gõ (số vào thẳng câu lệnh). Giá trị nằm giữa hai dấu nháy thì dấu nháy trong giá trị được escape (`O'Brien` an toàn trong `'${name}'` — SQL nhân đôi `''`, Mongo/ES/Redis dùng `\`). Câu lệnh sau khi thay mới được kiểm tra bởi cơ chế bảo vệ (`${where}` rỗng thành `DELETE` không có `WHERE` vẫn bị hỏi lại), và lưu vào history là bản đã thay; `:TradarSave` lưu bản có `${...}`.
 
+## Làm mới và theo dõi
+
+Trong buffer kết quả, `<leader>rR` chạy lại **đúng câu đã sinh ra kết quả đang xem**, ngay tại tab đó (con trỏ giữ nguyên, lỗi chỉ báo `refresh failed` và lưới cũ còn đó). `<leader>rW` / `:TradarWatch [giây]` lặp lại mỗi 5 giây (hoặc số giây bạn đưa vào) cho tới khi bấm lại, `:TradarWatch off`, gặp lỗi, hoặc bạn chuyển sang tab khác / có kết quả khác lên màn hình; footer ghi `· watching every 5s`. Dùng cho log, queue, `show processlist`.
+
+Chỉ câu **không ghi dữ liệu** mới được lặp (`SELECT`, `find`/`aggregate` không `$out`/`$merge`, lệnh Redis chỉ đọc, `GET`/`_search` của Elasticsearch). `INSERT … RETURNING` bị từ chối: chạy lại từ buffer SQL một cách có chủ đích. Watch bỏ qua nhịp khi đang có query chạy hoặc lưới có sửa chưa lưu.
+
 ## Nhiều kết quả (tab theo bảng / collection)
 
 Mỗi **đích** của câu lệnh có một tab kết quả riêng: bảng của `SELECT … FROM users` (câu có JOIN lấy bảng đầu tiên), collection của `db.orders.find(…)` / `db.getCollection("x")`, index của `GET /logs/_search`, key của `HGETALL user:1`. Chạy lại một câu cùng đích (đổi `WHERE`, thêm `LIMIT`…) thì **thay đúng tab đó**, các tab khác nằm yên. Câu không có đích rõ ràng (`EXPLAIN`, `SHOW`, `UPDATE`…) có tab riêng theo từng câu.
