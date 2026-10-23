@@ -7,6 +7,7 @@ local DEFAULT_PAGE = ctx.DEFAULT_PAGE
 local state = ctx.state
 local notify = ctx.notify
 local call = ctx.call
+local slots = require('tradar.slots')
 
 -- ── results buffer ───────────────────────────────────────────────────────
 
@@ -20,14 +21,36 @@ local function scratch(name, existing)
   return buf
 end
 
+--- The window showing results -- whichever slot (or message) is in it.
+local function results_win()
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.b[b].tradar_results_attached then return w end
+  end
+end
+
+--- The slot tabs on the results window (see `slots.bar`); while a query runs
+--- `conn.lua` owns the winbar and puts these back when it is done.
+local function update_bar()
+  local win = results_win()
+  if win and not state.running then vim.wo[win].winbar = slots.bar(state.result_log, state.result_pos) end
+end
+
 local function show(buf, height)
-  local win = vim.fn.bufwinid(buf)
-  if win ~= -1 then
+  local win = results_win()
+  if win then
     -- A thin strip (the "running…" note, a one-line message) is replaced by
     -- the real layout once a full result arrives, instead of staying 4 rows.
     if height == nil and vim.w[win].tradar_strip and #vim.api.nvim_tabpage_list_wins(0) > 1 then
       vim.api.nvim_win_close(win, true)
+      win = nil
     else
+      if vim.api.nvim_win_get_buf(win) ~= buf then
+        vim.api.nvim_win_set_buf(win, buf)
+        vim.wo[win].wrap = false
+        vim.wo[win].cursorline = true
+      end
+      update_bar()
       return win
     end
   end
@@ -49,8 +72,11 @@ local function show(buf, height)
   vim.w[win].tradar_strip = height ~= nil or nil
   -- Results are for looking at: keep the editor focused, as an IDE would.
   vim.api.nvim_set_current_win(origin)
+  update_bar()
   return win
 end
+
+ctx.slots_bar = function() return slots.bar(state.result_log, state.result_pos) end
 
 local function set_lines(buf, lines)
   vim.bo[buf].modifiable = true
@@ -199,45 +225,119 @@ local function paint_results(new_from)
   sync_editable(r)
 end
 
---- A result's rows live in the server until its cursor is closed. Only the
---- newest result keeps one: older ones stay viewable (`[r`) from what was
---- already loaded, but can no longer page or be edited -- so the server holds
---- one result's rows, as before.
-local function release_result(keep)
-  for _, e in ipairs(state.result_log or {}) do
-    if e.id and e.id ~= keep then
-      rpc.request('cursor.close', { cursor = e.id }, function() end)
-      e.id, e.closed = nil, true
-      e.edit, e.edit_reason = nil, 'an earlier result — re-run its query to edit it'
+local function close_cursor(e)
+  if not e.id then return end
+  rpc.request('cursor.close', { cursor = e.id }, function() end)
+  e.id, e.closed = nil, true
+  e.edit, e.edit_reason = nil, 'an earlier result — re-run its query to edit it'
+end
+
+--- A slot's buffer goes with the slot -- unless it is on screen right now
+--- (a message may still be about to replace it).
+local function drop_buffer(e)
+  local b = e.buf
+  e.buf = nil
+  if not b then return end
+  vim.schedule(function()
+    if vim.api.nvim_buf_is_valid(b) and b ~= state.results_buf and vim.fn.bufwinid(b) == -1 then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
     end
+  end)
+end
+
+--- A result's rows live in the server until its cursor is closed. The
+--- `setup{ results_cursors }` (4) most recently used slots keep theirs, so
+--- they still page and edit; the others stay viewable from what was already
+--- loaded but go read-only -- the server holds a handful of results, not all.
+local function release_result(keep)
+  local open = {}
+  for _, e in ipairs(state.result_log or {}) do
+    if e.id and e.id ~= keep then open[#open + 1] = e end
+  end
+  table.sort(open, function(x, y) return (x.used or 0) > (y.used or 0) end)
+  local room = math.max((opts.results_cursors or 4) - (keep and 1 or 0), 0)
+  for i, e in ipairs(open) do
+    if i > room then close_cursor(e) end
   end
 end
 
---- Keeps `entry` as the newest of the last `setup{ results_kept }` (10).
-local function log_result(entry, replacing)
+local function touch(entry)
+  state.result_clock = (state.result_clock or 0) + 1
+  entry.used = state.result_clock
+end
+
+--- Files `entry` under its slot: a new result for a target that already has
+--- one takes that slot (and its buffer, and its place among the tabs); a new
+--- target gets a new slot, and the least recently used one goes when more
+--- than `setup{ results_kept }` (10) exist.
+local function log_result(entry)
   local log = state.result_log
   if not log then
     log = {}
     state.result_log = log
   end
-  -- A refresh takes the slot of the result it refreshes.
-  for i, e in ipairs(replacing and log or {}) do
-    if e == replacing then
+  touch(entry)
+  for i, e in ipairs(log) do
+    if e.key == entry.key then
+      entry.buf = e.buf
+      if e.id and e.id ~= entry.id then close_cursor(e) end
       log[i] = entry
       state.result_pos = i
       return
     end
   end
   log[#log + 1] = entry
-  while #log > (opts.results_kept or 10) do table.remove(log, 1) end
+  while #log > (opts.results_kept or 10) do
+    local lru = 1
+    for i = 2, #log - 1 do
+      if (log[i].used or 0) < (log[lru].used or 0) then lru = i end
+    end
+    local gone = table.remove(log, lru)
+    close_cursor(gone)
+    drop_buffer(gone)
+  end
   state.result_pos = #log
 end
 
-ctx.show_message = function(text, height)
-  local buf = scratch('tradar://results', state.results_buf)
+--- Messages ("running…", an error, "3 row(s) affected") share one buffer
+--- of their own, so they never overwrite a slot's grid.
+local function message_buffer()
+  local buf = scratch('tradar://results', state.message_buf)
+  state.message_buf = buf
   state.results_buf = buf
   ctx.attach_results(buf)
-  release_result()
+  return buf
+end
+
+--- The slot's own buffer, named after its target.
+local function slot_buffer(e)
+  if e.buf and vim.api.nvim_buf_is_valid(e.buf) then return e.buf end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = 'acwrite' -- so `:w` reaches BufWriteCmd
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  local base, n = 'tradar://results/' .. (e.label or 'result'), 1
+  local name = base
+  while not pcall(vim.api.nvim_buf_set_name, buf, name) do
+    n = n + 1
+    name = ('%s (%d)'):format(base, n)
+  end
+  e.buf = buf
+  return buf
+end
+
+--- Remembers where the cursor is in the slot on screen, to come back to it.
+local function save_cursor()
+  local win = results_win()
+  local r = state.result
+  if win and r and r.buf and vim.api.nvim_win_get_buf(win) == r.buf then
+    r.cursor = vim.api.nvim_win_get_cursor(win)
+  end
+end
+
+ctx.show_message = function(text, height)
+  save_cursor()
+  local buf = message_buffer()
   state.result = nil
   state.result_pos = nil -- showing something that is not in the log
   set_lines(buf, vim.split(text, '\n', { plain = true }))
@@ -260,20 +360,25 @@ end
 
 local function show_result(r, meta)
   local took = r.took_ms
-  release_result(r.cursor)
-  if ctx.dirty() then notify('discarded unsaved grid edits', vim.log.levels.WARN) end
-  local buf = scratch('tradar://results', state.results_buf)
-  state.results_buf = buf
-  vim.bo[buf].buftype = 'acwrite' -- so `:w` reaches BufWriteCmd
-  ctx.attach_results(buf)
+  local refresh = meta and meta.refresh
+  if ctx.dirty() then
+    notify('discarded unsaved grid edits', vim.log.levels.WARN)
+    paint_results() -- puts the grid it was painted from back, so a later visit is clean
+  end
+  if not refresh then save_cursor() end
+  local query = meta and meta.query
+  local key = slots.key(meta and meta.conn, query)
+  local label = slots.label(query or '')
   if r.kind == 'affected' then
     state.result = nil
-    local entry = { kind = 'affected', rows = r.rows, took_ms = took, conn = meta and meta.conn, query = meta and meta.query, closed = true }
+    local entry = { kind = 'affected', rows = r.rows, took_ms = took, conn = meta and meta.conn, query = query, closed = true, key = key, label = label }
     log_result(entry)
+    release_result()
+    local buf = message_buffer()
     set_lines(buf, { affected_text(entry) })
     return show(buf, 4)
   end
-  state.result = {
+  local entry = {
     id = r.cursor, total = r.total, shown = #r.rows, kind = r.kind,
     columns = r.columns, rows = r.rows, truncated = r.truncated, fetching = false,
     -- One entry per row in `rows`, parallel to it (see `M.more`, which
@@ -285,62 +390,115 @@ local function show_result(r, meta)
     -- Row editing: `edit` = { table, keys } once `resolve_edit`
     -- has found the source table; until then (or if it never does) the grid
     -- is read-only, with `edit_reason` saying why.
-    edit = state.edit_cache and state.edit_cache.conn == (meta and meta.conn) and state.edit_cache.query == (meta and meta.query)
+    edit = state.edit_cache and state.edit_cache.conn == (meta and meta.conn) and state.edit_cache.query == query
       and state.edit_cache.edit or nil,
     edit_reason = 'still checking whether these rows can be edited…',
-    conn = meta and meta.conn, query = meta and meta.query,
+    conn = meta and meta.conn, query = query,
     took_ms = took,
+    key = key, label = label,
   }
-  log_result(state.result, meta and meta.refresh and meta.refresh.replacing)
+  state.result = entry
+  log_result(entry)
+  release_result(r.cursor)
+  local buf = slot_buffer(entry)
+  state.results_buf = buf
+  ctx.attach_results(buf)
   paint_results()
   local win = show(buf)
   -- A refresh keeps you where you were; a new result starts at the top.
-  local keep = meta and meta.refresh and meta.refresh.cursor
+  local keep = refresh and refresh.cursor
   pcall(vim.api.nvim_win_set_cursor, win, keep and { math.min(keep[1], vim.api.nvim_buf_line_count(buf)), keep[2] } or { 1, 0 })
   if not state.result.edit then ctx.resolve_edit(state.result) end
 end
 
---- Shows logged result `i` (read-only: its cursor is closed, see
---- `release_result`; the newest one is whatever `show_result` left).
+--- Shows logged result `i` (read-only unless its cursor is still open, see
+--- `release_result`).
 local function show_entry(i)
   local e = state.result_log[i]
-  local buf = scratch('tradar://results', state.results_buf)
-  state.results_buf = buf
-  ctx.attach_results(buf)
+  save_cursor()
+  touch(e)
   state.result_pos = i
   if e.kind == 'affected' then
     state.result = nil
+    local buf = message_buffer()
     set_lines(buf, { affected_text(e) })
     return show(buf, 4)
   end
   state.result = e
+  local buf = slot_buffer(e)
+  state.results_buf = buf
+  ctx.attach_results(buf)
   paint_results()
   local win = show(buf)
-  pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+  local c = e.cursor or { 1, 0 }
+  pcall(vim.api.nvim_win_set_cursor, win, { math.min(c[1], vim.api.nvim_buf_line_count(buf)), c[2] })
 end
 
---- `[r` / `]r`: the previous / next result kept from this and earlier runs.
-function M.step_result(delta)
+local function results_blocked()
   local log = state.result_log or {}
-  if #log == 0 then return notify('no results kept yet', vim.log.levels.WARN) end
+  if #log == 0 then
+    notify('no results kept yet', vim.log.levels.WARN)
+    return true
+  end
+  if ctx.dirty() then
+    notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
+    return true
+  end
+end
+
+--- `]r` / `[r`: the next / previous result tab (wrapping around).
+function M.step_result(delta)
+  if results_blocked() then return end
+  local log = state.result_log
+  if #log == 1 and state.result_pos == 1 then return notify('this is the only kept result', vim.log.levels.INFO) end
+  local from = state.result_pos or (delta > 0 and 0 or #log + 1)
+  show_entry((from - 1 + delta) % #log + 1)
+end
+
+--- `<leader>r1`..`9`: result tab `n`.
+function M.goto_result(n)
+  if results_blocked() then return end
+  local log = state.result_log
+  if n < 1 or n > #log then return notify(('no result tab %d (%d kept)'):format(n, #log), vim.log.levels.WARN) end
+  show_entry(n)
+end
+
+--- Clicking a tab on the results window.
+_G.__tradar_result_click = function(n, _, button)
+  if button == 'l' or button == nil then M.goto_result(n) end
+end
+
+--- `<leader>rx`: close the tab on screen (its rows are released on the server).
+function M.close_result()
+  local log = state.result_log or {}
+  local i = state.result_pos
+  if not i or not log[i] then return notify('no result tab to close', vim.log.levels.WARN) end
   if ctx.dirty() then
     return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
   end
-  local target = (state.result_pos or #log + 1) + delta
-  if target < 1 then return notify('this is the oldest kept result', vim.log.levels.INFO) end
-  if target > #log then return notify('this is the newest result', vim.log.levels.INFO) end
-  show_entry(target)
+  if state.watch and state.result == log[i] and ctx.stop_watch then ctx.stop_watch() end
+  local gone = table.remove(log, i)
+  close_cursor(gone)
+  if #log == 0 then
+    state.result, state.result_pos = nil, nil
+    local win = results_win()
+    drop_buffer(gone)
+    if win and #vim.api.nvim_tabpage_list_wins(0) > 1 then vim.api.nvim_win_close(win, true) end
+    return
+  end
+  local nxt = math.min(i, #log)
+  state.result_pos = nxt
+  show_entry(nxt)
+  drop_buffer(gone)
 end
 
 --- `:TradarResults`: pick one of the kept results.
 function M.pick_result()
-  local log = state.result_log or {}
-  if #log == 0 then return notify('no results kept yet', vim.log.levels.WARN) end
-  if ctx.dirty() then
-    return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
-  end
+  if results_blocked() then return end
+  local log = state.result_log
   local items = {}
   for i = #log, 1, -1 do items[#items + 1] = i end
+  table.sort(items, function(x, y) return (log[x].used or 0) > (log[y].used or 0) end)
   vim.ui.select(items, {
     prompt = 'tradar results',
     format_item = function(i)
@@ -348,7 +506,7 @@ function M.pick_result()
       local q = (e.query or ''):gsub('%s+', ' ')
       if #q > 60 then q = q:sub(1, 59) .. '…' end
       local what = e.kind == 'affected' and ('%d row(s) affected'):format(e.rows) or ('%d rows'):format(e.total)
-      return ('%d  %s  (%s)%s'):format(i, q, what, i == state.result_pos and '  ◀' or '')
+      return ('%d  %s  (%s)  %s%s'):format(i, e.label or '', what, q, i == state.result_pos and '  ◀' or '')
     end,
   }, function(i)
     if i then show_entry(i) end

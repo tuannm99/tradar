@@ -58,6 +58,7 @@ Nhóm theo chủ đề, trong mỗi nhóm theo thứ tự thời gian. Mục m�
 - [`nvim-ux-batch-2026-10-22.md`](nvim-ux-batch-2026-10-22.md) — `zw`/`zW` hiện trọn cột, statusline `(idle)`, Tab-complete connection, thông báo một ngôn ngữ, `:Tradar <lệnh-con>`
 - [`nvim-crud-generator-2026-10-22.md`](nvim-crud-generator-2026-10-22.md) — `:TradarCrud` / `<leader>rg`: sinh create/read/update/delete cho một bảng, chọn cột, chèn vào buffer
 - [`small-fixes-socket-telescope-2026-10-22.md`](small-fixes-socket-telescope-2026-10-22.md) — lỗi rõ + đường dẫn mặc định ngắn khi socket quá dài; spec cho picker telescope (`deps.sh`)
+- [`nvim-result-tabs-2026-10-23.md`](nvim-result-tabs-2026-10-23.md) — tab kết quả theo bảng/collection/index/key, thanh tab click được, `<leader>r1..9`/`rx`
 - [`nvim-ux-results-log-flash-2026-10-22.md`](nvim-ux-results-log-flash-2026-10-22.md) — giữ 10 kết quả gần nhất (`[r`/`]r`, `:TradarResults`), nháy câu vừa chạy
 - [`nvim-params-refresh-addconn-2026-10-22.md`](nvim-params-refresh-addconn-2026-10-22.md) — tham số `${tên}`, làm mới/watch kết quả (`<leader>rR`, `:TradarWatch`), `:TradarAddConnection`
 

@@ -103,7 +103,10 @@ function H.run(sql)
   H.t.run()
 end
 
-function H.rbuf() return vim.fn.bufnr('tradar://results') end
+function H.rbuf()
+  local b = require('tradar.ctx').state.results_buf
+  return b and vim.api.nvim_buf_is_valid(b) and b or -1
+end
 
 function H.lines()
   local b = H.rbuf()

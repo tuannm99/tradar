@@ -51,6 +51,7 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] Buffer kết quả: JSON view cho SQL, row view `gK`, sửa staged + commit — `docs/backlog/result-buffer-views-staged-edit-2026-10-20.md`
 - [x] `:TradarConnections` + sửa Socket tail/tail buffer — `docs/backlog/nvim-connections-tail-fixes-2026-10-20.md`
 - [x] Sửa trực tiếp trên lưới kết quả + INSERT, commit một lượt bằng `:w` — `docs/backlog/grid-edit-in-place-2026-10-22.md`
+- [x] Tab kết quả theo bảng/collection/index/key (thanh tab, click, `r1..9`/`rx`) — `docs/backlog/nvim-result-tabs-2026-10-23.md`
 - [x] HTTP: buffer request sửa được — `docs/backlog/http-request-buffer-2026-10-21.md`
 - [x] RabbitMQ publish buffer + refresh — `docs/backlog/rabbitmq-publish-buffer-2026-10-21.md`
 - [x] Kafka tail: tạm dừng/lọc/xoá/nối lại — `docs/backlog/kafka-tail-controls-2026-10-21.md`

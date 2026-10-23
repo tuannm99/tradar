@@ -173,7 +173,7 @@ local function set_progress_bar()
   local buf = state.results_buf
   local win = buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) or -1
   if win == -1 then return end
-  vim.wo[win].winbar = state.running and progress_text():gsub('%%', '%%%%') or ''
+  vim.wo[win].winbar = state.running and progress_text():gsub('%%', '%%%%') or (ctx.slots_bar and ctx.slots_bar() or '')
 end
 
 local function start_spinner()
@@ -200,7 +200,7 @@ local function stop_spinner()
     state.spinner:close()
     state.spinner = nil
   end
-  set_progress_bar() -- state.running is nil by now: clears the bar
+  set_progress_bar() -- state.running is nil by now: the slot tabs come back
   vim.cmd.redrawstatus()
 end
 
