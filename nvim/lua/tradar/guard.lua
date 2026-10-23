@@ -211,4 +211,64 @@ function M.assess(text, protected, driver)
   return nil
 end
 
+-- ── read-only? ───────────────────────────────────────────────────────────
+
+local SQL_READ_FIRST = {
+  select = true, show = true, describe = true, desc = true, values = true,
+  table = true, explain = true, with = true,
+}
+
+local MONGO_READ_BLOCK = { runcommand = true, eval = true, mapreduce = true }
+
+local REDIS_READ = {}
+for w in ([[get mget getrange strlen exists type ttl pttl hget hmget hgetall hkeys hvals hlen hexists
+  lrange llen lindex smembers scard sismember srandmember zrange zrevrange zrangebyscore zcard zscore zrank
+  scan sscan hscan zscan keys dbsize info xrange xrevrange xlen randomkey memory object]]):gmatch('%a+') do
+  REDIS_READ[w] = true
+end
+
+--- Whether re-running `text` over and over is harmless: it can only read.
+--- Deliberately conservative (a "no" costs the user one key; a wrong "yes"
+--- repeats a write), which the auto-refresh (`<leader>rR`, `:TradarWatch`)
+--- relies on. `driver` is the connector id (`mongo`, `redis`, ...).
+function M.is_read_only(text, driver)
+  if driver == 'mongo' then
+    local clean = scrub(text)
+    local calls = {}
+    for m in clean:gmatch('%.%s*([%a_]+)%s*%(') do calls[#calls + 1] = m end
+    if text:lower():find('$out', 1, true) or text:lower():find('$merge', 1, true) then return false end
+    for _, m in ipairs(calls) do
+      if MONGO_WRITES[m] or MONGO_READ_BLOCK[m] then return false end
+    end
+    local first = words(clean)[1]
+    return #calls > 0 or first == 'show'
+  end
+  if driver == 'redis' then
+    local first = words(scrub(text))[1]
+    return first ~= nil and REDIS_READ[first] == true
+  end
+  if driver == 'elasticsearch' then
+    local line = M.first_code_line(text)
+    local method, path = line:match('^(%a+)%s+(%S+)')
+    if not method then return false end
+    method = method:upper()
+    if method == 'GET' then return true end
+    path = path:lower():gsub('%?.*$', '')
+    return (method == 'POST' or method == 'PUT') and
+      (path:find('/_search$') ~= nil or path:find('/_count$') ~= nil or path:find('/_msearch$') ~= nil
+        or path:find('/_mget$') ~= nil or path == '_search' or path == '_count')
+  end
+  local ws = words(scrub(text))
+  local first = ws[1]
+  if not first or not SQL_READ_FIRST[first] then return false end
+  for _, w in ipairs(ws) do
+    -- `into` catches SELECT ... INTO (it creates a table), `analyze` an
+    -- EXPLAIN ANALYZE (which runs the statement it explains).
+    if WRITES[w] or w == 'into' or w == 'analyze' or w == 'call' or w == 'nextval' or w == 'setval' then
+      return false
+    end
+  end
+  return true
+end
+
 return M

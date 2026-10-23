@@ -52,6 +52,8 @@ ctx.attach_results = function(buf)
   map('n', (opts.prefix or '<leader>r') .. 'w', function() M.write() end, 'commit grid edits (same as :w)')
   map('n', (opts.prefix or '<leader>r') .. 'u', function() M.revert() end, 'revert grid edits')
   map('n', 'gK', function() M.row_view() end, 'show this row, one field per line')
+  map('n', (opts.prefix or '<leader>r') .. 'R', function() M.refresh() end, 'run this result again (read-only statements)')
+  map('n', (opts.prefix or '<leader>r') .. 'W', function() M.toggle_watch() end, 'watch: re-run this result every few seconds / stop')
   map('n', '[r', function() M.step_result(-1) end, 'previous kept result')
   map('n', ']r', function() M.step_result(1) end, 'next kept result')
   map('n', 'zw', function() M.toggle_column_width() end, 'show this column in full / cut it back')
@@ -127,6 +129,7 @@ ctx.attach_results = function(buf)
       ('- `%sm` load the next page of rows'):format(opts.prefix or '<leader>r'),
       ('- `%sz` zoom this window to the full screen / restore (also from the SQL buffer)'):format(opts.prefix or '<leader>r'),
       '- `gK` show the current row, one field per line',
+      ('- `%sR` run this result again in place (only statements that cannot change data); `%sW` / `:TradarWatch [secs|off]` repeat it every few seconds'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
       '- `[r` / `]r` previous / next result kept from this and earlier runs (`:TradarResults` picks one; `setup{ results_kept }`, default 10)',
       '- `zw` show the column under the cursor in full (not cut at 40) / cut it back; `zW` every column',
       '- `gd` follow foreign key under cursor',

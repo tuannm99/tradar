@@ -5,6 +5,7 @@ local function t() return require('tradar') end
 local function names(driver) return require('tradar.commands').connection_names(driver) end
 
 vim.api.nvim_create_user_command('TradarConnect', function(a) t().connect(a.args) end, { nargs = '?', complete = names('query') })
+vim.api.nvim_create_user_command('TradarAddConnection', function() t().add_connection() end, { desc = 'add a connection by answering a few questions' })
 vim.api.nvim_create_user_command('TradarConnections', function() t().edit_connections() end, {})
 vim.api.nvim_create_user_command('TradarRun', function(a)
   if a.range > 0 then t().run(a.line1, a.line2) else t().run() end
@@ -19,6 +20,11 @@ vim.api.nvim_create_user_command('TradarSaveHere', function(a) t().save_here(a.a
 vim.api.nvim_create_user_command('TradarOpen', function() t().open() end, { desc = 'open a query from the library' })
 vim.api.nvim_create_user_command('TradarCancel', function() t().cancel() end, {})
 vim.api.nvim_create_user_command('TradarResultsZoom', function() t().zoom() end, {})
+vim.api.nvim_create_user_command('TradarRefresh', function() t().refresh() end, { desc = 'run the result on screen again, in place' })
+vim.api.nvim_create_user_command('TradarWatch', function(a) t().watch(a.args) end, {
+  nargs = '?', complete = function() return { 'off' } end,
+  desc = 'run the result on screen again every few seconds (default 5) until `off`',
+})
 vim.api.nvim_create_user_command('TradarResults', function() t().pick_result() end, { desc = 'pick one of the kept results' })
 vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})
 vim.api.nvim_create_user_command('TradarSchema', function() t().schema() end, {})

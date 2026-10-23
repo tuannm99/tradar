@@ -1,4 +1,5 @@
 local ctx = require('tradar.ctx')
+local params = require('tradar.params')
 local M = ctx.M
 local rpc = ctx.rpc
 local guard = ctx.guard
@@ -75,11 +76,13 @@ local function run_text(buf, text, base_row, base_col, flags)
   end
   -- `base_row` is 0-based (it is a buffer line offset, used below for
   -- diagnostics positions); `block_connection`/`blocks.at` want 1-based.
-  local conn = M.block_connection(buf, base_row + 1)
+  -- `flags.refresh`: re-running a shown result (`<leader>rR`, `:TradarWatch`)
+  -- -- on that result's own connection, with no place in any buffer.
+  local conn = flags.conn or M.block_connection(buf, base_row + 1)
   if not conn then
     return M.connect(nil, function() run_text(buf, text, base_row, base_col) end)
   end
-  state.sql_buf = buf
+  if not flags.refresh then state.sql_buf = buf end
 
   if not flags.confirmed and opts.confirm ~= false then
     local confirmed_flags = vim.tbl_extend('force', flags, { confirmed = true })
@@ -106,7 +109,7 @@ local function run_text(buf, text, base_row, base_col, flags)
     state.running = { id = id, conn = conn, started = uv.hrtime() }
     ctx.start_spinner()
     local started = uv.hrtime()
-    ctx.remember(conn, text)
+    if not flags.refresh then ctx.remember(conn, text) end
     local function finish()
       state.running = nil
       ctx.stop_spinner()
@@ -122,7 +125,7 @@ local function run_text(buf, text, base_row, base_col, flags)
         or ('%d/%d rows · %s'):format(#r.rows, r.total, took)
       if vim.api.nvim_buf_is_valid(buf) then vim.diagnostic.reset(ns, buf) end
       if guard.changes_schema(text) then state.schema_cache[conn] = nil end
-      ctx.show_result(r, { conn = conn, query = text })
+      ctx.show_result(r, { conn = conn, query = text, refresh = flags.refresh })
       -- BEGIN/COMMIT/ROLLBACK flip the `tx` badge now, not at the next 15s poll.
       local verb = text:match('^%s*(%a+)')
       if verb and TX_VERBS[verb:lower()] then
@@ -146,6 +149,11 @@ local function run_text(buf, text, base_row, base_col, flags)
         return run_text(buf, text, base_row, base_col, vim.tbl_extend('force', flags, { retried = true }))
       end
       state.last = 'error'
+      if flags.refresh then
+        -- Keep the grid on screen: a refresh that fails says so, nothing more.
+        if flags.on_error then flags.on_error(err) end
+        return notify('refresh failed: ' .. err, vim.log.levels.ERROR)
+      end
       ctx.show_message(err)
       if flags.on_error then flags.on_error(err) end
       if vim.api.nvim_buf_is_valid(buf) then set_diagnostic(buf, base_row, base_col, err, data) end
@@ -211,42 +219,47 @@ function M.run(range_start, range_end, all, transform)
         return row + base_row, col
       end
       if all then
-        local function go()
-          -- Sequentially: each run starts when the previous one finished,
-          -- and the batch stops at the first error or cancel.
-          local i = 0
-          local function next_statement()
-            i = i + 1
-            local st = statements[i]
-            if not st then return end
-            local row, col = position(st)
-            run_text(buf, st.text, row, col, { confirmed = true, flash = st.text })
-            local timer = uv.new_timer()
-            timer:start(50, 50, vim.schedule_wrap(function()
-              if not state.running then
-                timer:stop()
-                timer:close()
-                if state.last ~= 'error' and state.last ~= 'cancelled' then next_statement() end
-              end
-            end))
+        -- `${name}` parameters are asked once for the whole batch.
+        local texts = vim.tbl_map(function(st) return st.text end, statements)
+        params.expand(conn, texts, function(expanded)
+          local function go()
+            -- Sequentially: each run starts when the previous one finished,
+            -- and the batch stops at the first error or cancel.
+            local i = 0
+            local function next_statement()
+              i = i + 1
+              local st = statements[i]
+              if not st then return end
+              local row, col = position(st)
+              run_text(buf, expanded[i], row, col, { confirmed = true, flash = st.text })
+              local timer = uv.new_timer()
+              timer:start(50, 50, vim.schedule_wrap(function()
+                if not state.running then
+                  timer:stop()
+                  timer:close()
+                  if state.last ~= 'error' and state.last ~= 'cancelled' then next_statement() end
+                end
+              end))
+            end
+            next_statement()
           end
-          next_statement()
-        end
 
-        -- One question for the whole batch, not one per statement. The
-        -- driver is needed first: Mongo/Redis/Elasticsearch have their own
-        -- notion of "risky", and the lookup is async the first time.
-        ctx.driver_of(conn, function(driver)
-          local risky = {}
-          for _, st in ipairs(statements) do
-            local why = opts.confirm ~= false and guard.assess(st.text, M.is_protected(conn), driver)
-            if why then risky[#risky + 1] = why end
-          end
-          if #risky == 0 then return go() end
-          vim.ui.select({ 'Cancel', 'Run all' }, {
-            prompt = ('tradar [%s]: %d of %d statements need a second look\n  %s'):format(
-              conn, #risky, #statements, table.concat(risky, '; '):sub(1, 90)),
-          }, function(choice) if choice == 'Run all' then go() end end)
+          -- One question for the whole batch, not one per statement. The
+          -- driver is needed first: Mongo/Redis/Elasticsearch have their own
+          -- notion of "risky", and the lookup is async the first time. What
+          -- is judged is the text that will actually be sent.
+          ctx.driver_of(conn, function(driver)
+            local risky = {}
+            for _, text in ipairs(expanded) do
+              local why = opts.confirm ~= false and guard.assess(text, M.is_protected(conn), driver)
+              if why then risky[#risky + 1] = why end
+            end
+            if #risky == 0 then return go() end
+            vim.ui.select({ 'Cancel', 'Run all' }, {
+              prompt = ('tradar [%s]: %d of %d statements need a second look\n  %s'):format(
+                conn, #risky, #statements, table.concat(risky, '; '):sub(1, 90)),
+            }, function(choice) if choice == 'Run all' then go() end end)
+          end)
         end)
         return
       end
@@ -261,7 +274,9 @@ function M.run(range_start, range_end, all, transform)
       end
       chosen = chosen or statements[1]
       local srow, scol = position(chosen)
-      run_text(buf, transform and transform(chosen.text) or chosen.text, srow, scol, { flash = chosen.text })
+      params.expand(conn, { transform and transform(chosen.text) or chosen.text }, function(expanded)
+        run_text(buf, expanded[1], srow, scol, { flash = chosen.text })
+      end)
     end)
   end, function(err) notify(err, vim.log.levels.ERROR) end)
 end
@@ -298,18 +313,25 @@ function M.connect(name, after)
   if name and name ~= '' then return go(name) end
   call('connections.list', nil, function(list)
     local usable = vim.tbl_filter(function(c) return c.supported end, list)
-    if #usable == 0 then
-      return notify('no saved connection this server can serve — add one with :TradarConnections', vim.log.levels.WARN)
+    if #list == 0 then
+      -- First run: nothing to pick from, so start on adding one.
+      notify('no connections yet — let\'s add one (or edit the file yourself: :TradarConnections)')
+      return M.add_connection()
     end
-    local items = vim.list_extend(vim.deepcopy(usable), { { edit = true } })
+    if #usable == 0 then
+      return notify('no saved connection this server can serve — add one with :TradarAddConnection (or edit the file: :TradarConnections)', vim.log.levels.WARN)
+    end
+    local items = vim.list_extend(vim.deepcopy(usable), { { add = true }, { edit = true } })
     vim.ui.select(items, {
       prompt = 'tradar connection',
       format_item = function(c)
+        if c.add then return '+ add a connection…' end
         if c.edit then return '+ edit connections file…' end
         return ('%s  (%s)%s'):format(c.name, c.driver, c.connected and '  ●' or '')
       end,
     }, function(c)
       if not c then return end
+      if c.add then return M.add_connection() end
       if c.edit then return M.edit_connections() end
       go(c.name)
     end)

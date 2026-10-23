@@ -9,6 +9,8 @@ driver = "postgres"              # id của connector (bảng dưới)
 target = "postgres://user:password@localhost:5432/mydb"
 ```
 
+**Trong Neovim, cách dễ nhất:** `:TradarAddConnection` (hoặc chọn `+ add a connection…` trong `:TradarConnect`; chạy `:TradarConnect` lần đầu khi chưa có connection nào thì tự vào đây). Plugin hỏi lần lượt loại database → tên → target (điền sẵn mẫu đúng dạng của loại đó, kèm lưu ý như mã hoá phần trăm mật khẩu), ghi thêm một bảng `[[connections]]` vào cuối file (không đụng vào comment hay connection khác) rồi **thử kết nối ngay**. Không kết nối được thì hỏi: *Edit the target* (sửa lại, điền sẵn target vừa nhập), *Keep it anyway* hoặc *Remove it* (trả file về đúng như cũ). Socket không được thử (nó chỉ nối khi bạn tail).
+
 Thêm/sửa/xoá được ngay trong connection picker của TUI (`a`/`e`/`d`), hoặc sửa tay file này — trong Neovim gõ `:TradarConnections` (hoặc chọn dòng `+ edit connections file…` cuối picker của `:TradarConnect`) để mở đúng file mà server đang đọc; file mới thì có sẵn template comment. Server đọc lại file mỗi lần dùng nên chỉ cần `:w`, và mỗi lần lưu plugin kiểm tra ngay: đếm số connection, hoặc báo lỗi TOML kèm dòng/cột. Lưu ý: khi lưu từ TUI, file bị ghi lại theo định dạng TOML chuẩn, nên comment và thứ tự key bạn viết tay sẽ mất.
 
 ## `driver` và `target`

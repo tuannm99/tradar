@@ -83,6 +83,8 @@ end
 local function results_title(r)
   local text = position_text(r) .. ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and (' (stopped at %d rows; setup{ max_rows } reads more)'):format(r.total) or '')
   if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
+  local w = state.watch
+  if w and w.query == r.query and w.conn == r.conn then text = text .. (' · watching every %gs'):format(w.secs) end
   if r.shown < r.total then
     if r.closed then
       text = text .. ('  — %d not loaded: this result was closed when a newer one arrived; re-run it'):format(r.total - r.shown)
@@ -212,11 +214,19 @@ local function release_result(keep)
 end
 
 --- Keeps `entry` as the newest of the last `setup{ results_kept }` (10).
-local function log_result(entry)
+local function log_result(entry, replacing)
   local log = state.result_log
   if not log then
     log = {}
     state.result_log = log
+  end
+  -- A refresh takes the slot of the result it refreshes.
+  for i, e in ipairs(replacing and log or {}) do
+    if e == replacing then
+      log[i] = entry
+      state.result_pos = i
+      return
+    end
   end
   log[#log + 1] = entry
   while #log > (opts.results_kept or 10) do table.remove(log, 1) end
@@ -243,6 +253,10 @@ end
 
 --- The last successful `resolve_edit`, so re-running the same query (after a
 --- commit, say) is editable at once instead of read-only until the server answers.
+
+ctx.repaint_results = function()
+  if state.result and state.results_buf and vim.api.nvim_buf_is_valid(state.results_buf) and not ctx.dirty() then paint_results() end
+end
 
 local function show_result(r, meta)
   local took = r.took_ms
@@ -277,10 +291,12 @@ local function show_result(r, meta)
     conn = meta and meta.conn, query = meta and meta.query,
     took_ms = took,
   }
-  log_result(state.result)
+  log_result(state.result, meta and meta.refresh and meta.refresh.replacing)
   paint_results()
   local win = show(buf)
-  pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+  -- A refresh keeps you where you were; a new result starts at the top.
+  local keep = meta and meta.refresh and meta.refresh.cursor
+  pcall(vim.api.nvim_win_set_cursor, win, keep and { math.min(keep[1], vim.api.nvim_buf_line_count(buf)), keep[2] } or { 1, 0 })
   if not state.result.edit then ctx.resolve_edit(state.result) end
 end
 
