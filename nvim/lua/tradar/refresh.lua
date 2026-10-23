@@ -60,6 +60,8 @@ local function stop(reason)
   return true
 end
 
+ctx.stop_watch = stop
+
 local function tick()
   local w = state.watch
   if not w then return end

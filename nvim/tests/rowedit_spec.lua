@@ -51,6 +51,8 @@ H.check('a join result is read-only', not vim.bo[H.rbuf()].modifiable)
 
 -- INSERT columns follow the grid order, whatever order the table has
 H.check('wide select', H.run_until('select * from p', 'rows'))
+-- each target has its own buffer: wait for p's, not the join's footer still on screen
+H.wait(3000, function() local r = require('tradar.ctx').state.result; return r and r.label == 'p' and r.query == 'select * from p' end)
 b = H.rbuf()
 H.wait(3000, function() return vim.bo[b].modifiable end)
 vim.api.nvim_set_current_win(vim.fn.bufwinid(b))

@@ -130,19 +130,15 @@ Nhiều câu dùng chung một tham số (`<leader>ra`) thì chỉ hỏi một l
 
 Đây là **thay chữ**, không phải tham số ràng buộc: `${id}` trong `where id = ${id}` là đúng những gì bạn gõ (số vào thẳng câu lệnh). Giá trị nằm giữa hai dấu nháy thì dấu nháy trong giá trị được escape (`O'Brien` an toàn trong `'${name}'` — SQL nhân đôi `''`, Mongo/ES/Redis dùng `\`). Câu lệnh sau khi thay mới được kiểm tra bởi cơ chế bảo vệ (`${where}` rỗng thành `DELETE` không có `WHERE` vẫn bị hỏi lại), và lưu vào history là bản đã thay; `:TradarSave` lưu bản có `${...}`.
 
-## Nhiều kết quả
+## Nhiều kết quả (tab theo bảng / collection)
 
-Chạy cả file (`<leader>ra`) hay vài lần liên tiếp không còn ghi đè mất kết quả cũ: plugin giữ lại **10 kết quả gần nhất** (`setup{ results_kept = 20 }` để đổi). Trong buffer kết quả, `[r` / `]r` đi lùi / tiến, `:TradarResults` mở danh sách chọn (mới nhất trên cùng, `◀` đánh dấu cái đang xem). Footer cho biết đang xem cái nào và câu nào sinh ra nó: `[2/3] select name from p · 3/3 rows · 1ms`.
+Mỗi **đích** của câu lệnh có một tab kết quả riêng: bảng của `SELECT … FROM users` (câu có JOIN lấy bảng đầu tiên), collection của `db.orders.find(…)` / `db.getCollection("x")`, index của `GET /logs/_search`, key của `HGETALL user:1`. Chạy lại một câu cùng đích (đổi `WHERE`, thêm `LIMIT`…) thì **thay đúng tab đó**, các tab khác nằm yên. Câu không có đích rõ ràng (`EXPLAIN`, `SHOW`, `UPDATE`…) có tab riêng theo từng câu.
 
-Chỉ kết quả **mới nhất** còn giữ cursor trên server (để phân trang và sửa); các kết quả cũ xem được phần đã tải nhưng ở chế độ chỉ đọc, và nếu còn dòng chưa tải thì footer nói rõ "đã đóng khi có kết quả mới hơn, chạy lại để xem" (export từ kết quả như vậy cảnh báo file không đủ dòng). Không đổi sang kết quả khác khi lưới có sửa chưa commit.
-
-### Làm mới và theo dõi
-
-`<leader>rR` (`:TradarRefresh`) chạy lại kết quả đang xem **tại chỗ**: cùng ô trong danh sách kết quả, con trỏ giữ nguyên chỗ, không thêm vào history, và nếu lỗi thì lưới cũ vẫn ở đó kèm một dòng báo lỗi. `<leader>rW` / `:TradarWatch [giây|off]` làm điều đó mỗi vài giây (mặc định 5) — theo dõi bảng log, hàng đợi, `show processlist`. Footer ghi `· watching every 5s`; watch tự dừng khi lỗi, khi kết quả khác chiếm màn hình, hoặc khi lưới có sửa chưa commit thì tick đó bị bỏ qua.
-
-Chỉ **câu không thể thay đổi dữ liệu** mới được lặp lại (`SELECT`/`WITH`/`SHOW`/`EXPLAIN` không `ANALYZE`; Mongo `find`/`aggregate` không `$out`; Redis lệnh đọc; Elasticsearch `GET`/`_search`) — `<leader>rR` là phím bấm nhầm được và watch tự lặp, nên `INSERT … RETURNING` bị từ chối ("chạy lại từ buffer SQL nếu bạn thật sự muốn"). Nghi ngờ thì từ chối.
-
-Câu lệnh vừa gửi đi được **nháy sáng** ngắn (`TradarRunning`, mặc định như `IncSearch`; `setup{ flash_ms = 0 }` để tắt, mặc định 200) — hữu ích khi file có nhiều câu và bạn muốn chắc câu nào đã chạy.
+- Cửa sổ kết quả có **thanh tab** ở trên (khi có từ 2 tab): ` 1 users (120)  2 orders (8)  3 events `, tab đang xem được tô sáng, **click chuột** để chuyển.
+- `]r` / `[r` sang tab sau / trước (đi vòng), `<leader>r1`…`<leader>r9` nhảy thẳng tới tab, `<leader>rx` đóng tab đang xem, `:TradarResults` mở danh sách chọn (dùng gần nhất trên cùng, `◀` đánh dấu tab đang xem).
+- Mỗi tab là một buffer riêng (`tradar://results/users`), nhớ vị trí con trỏ; quay lại tab thì con trỏ ở chỗ cũ. Footer cho biết đang xem tab nào và câu nào sinh ra nó: `[2/3] select name from p · 3/3 rows · 1ms`.
+- Giữ tối đa **10 tab** (`setup{ results_kept = 20 }` để đổi); đầy thì tab ít dùng nhất bị bỏ.
+- Server chỉ giữ cursor mở cho **4 tab dùng gần nhất** (`setup{ results_cursors = 8 }` để đổi): các tab này vẫn tải thêm trang (`<leader>rm`) và sửa được. Tab cũ hơn vẫn xem được từ những gì đã tải, nhưng chỉ đọc — chạy lại câu lệnh để sửa/tải tiếp.
 
 ## Ô dài bị cắt
 
