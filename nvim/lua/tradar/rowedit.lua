@@ -295,6 +295,7 @@ function M.write()
   local buf = state.results_buf
   local cols, rows, widths, aligns = ctx.grid_of(r)
   if not cols then return notify('nothing to write here', vim.log.levels.WARN) end
+  if r.filter or r.sort then return notify('read-only while a filter / sort is on', vim.log.levels.WARN) end
   if not r.edit then return notify(r.edit_reason or 'this result cannot be edited', vim.log.levels.WARN) end
   local key_idx = key_indices(cols, r.edit.keys)
   if not key_idx then

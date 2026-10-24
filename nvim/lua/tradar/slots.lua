@@ -42,24 +42,49 @@ function M.target_of(query)
   coll = q:match('^db%.([%a_$][%w_$]*)%.[%a_]+%s*%(')
   if coll then return coll end
 
-  -- Elasticsearch: GET /logs/_search
-  local verb, path = q:match('^(%u+)%s+/?([^%s?]+)')
+  -- Elasticsearch: GET /logs/_search, POST logs/_doc. A plain `GET key` is
+  -- Redis: only a GET with a leading slash or an `_endpoint` is Elasticsearch.
+  local verb, rest_of = q:match('^(%u+)%s+(%S+)')
+  local slash = rest_of and rest_of:sub(1, 1) == '/' and '/' or ''
+  local path = rest_of and rest_of:sub(#slash + 1):match('^[^?]*') or ''
   if verb and (verb == 'GET' or verb == 'POST' or verb == 'PUT' or verb == 'DELETE' or verb == 'HEAD') then
-    local index = path:match('^([^/]+)')
-    if index and index:match('^[%w][%w_.,*%-]*$') then return index end
-    return nil
+    local es = verb ~= 'GET' or slash == '/' or path:find('/_', 1, true) or path:sub(1, 1) == '_'
+    if es then
+      local index = path:match('^([^/]+)')
+      if index and index:match('^[%w][%w_.,*%-]*$') then return index end
+      return nil
+    end
   end
 
   -- Redis: GET key / HGETALL key / LRANGE key 0 -1
-  local cmd, key = q:match('^(%a+)%s+(%S+)')
-  if cmd and REDIS_KEYED[cmd:upper()] then return unquote(key) end
+  local cmd, rest = q:match('^(%a+)%s+(.+)$')
+  if cmd and REDIS_KEYED[cmd:upper()] then
+    if rest:sub(1, 1) == '"' then
+      -- A key with spaces or quotes, as the Redis connector writes it: "a \"b\"".
+      local out, i = {}, 2
+      while i <= #rest do
+        local c = rest:sub(i, i)
+        if c == '\\' then
+          out[#out + 1] = rest:sub(i + 1, i + 1)
+          i = i + 2
+        elseif c == '"' then
+          return table.concat(out)
+        else
+          out[#out + 1] = c
+          i = i + 1
+        end
+      end
+      return table.concat(out)
+    end
+    return unquote(rest:match('^(%S+)'))
+  end
 
   -- SQL: the first table of a SELECT (a join is shown under its first table).
   local lower = q:lower()
   if lower:match('^%(?%s*select%f[%W]') then
     local s, e = lower:find('%f[%w_]from%s+[%w_."`%[%]]+')
     if s then
-      local name = unquote(q:sub(s, e):match('^%a+%s+(.+)$'))
+      local name = q:sub(s, e):match('^%a+%s+(.+)$'):gsub('["`%[%]]', '')
       if name ~= '' then return name end
     end
   end
@@ -85,7 +110,7 @@ function M.label(query)
 end
 
 local function tab_text(i, e, current)
-  local text = (' %d %s'):format(i, squash(e.label or e.query, 18))
+  local text = (' %d %s%s'):format(i, e.pinned and '📌' or '', squash(e.label or e.query, 18))
   if e.kind == 'affected' then
     text = text .. (' ✓%d'):format(e.rows or 0)
   elseif e.total then

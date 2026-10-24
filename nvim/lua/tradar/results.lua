@@ -8,6 +8,8 @@ local state = ctx.state
 local notify = ctx.notify
 local call = ctx.call
 local slots = require('tradar.slots')
+local gridview = require('tradar.gridview')
+local rdiff = require('tradar.rdiff')
 
 -- ── results buffer ───────────────────────────────────────────────────────
 
@@ -106,9 +108,20 @@ local function affected_text(e)
   return position_text(e) .. ('%d row(s) affected%s'):format(e.rows, e.took_ms and (' · ' .. took_text(e.took_ms)) or '')
 end
 
+local function view_active(r) return r.filter ~= nil or r.sort ~= nil end
+
 local function results_title(r)
-  local text = position_text(r) .. ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and (' (stopped at %d rows; setup{ max_rows } reads more)'):format(r.total) or '')
+  local text = position_text(r)
+  if r.hist then text = text .. ('run %d back of %d (%s) · '):format(r.hist, r.hist_total or r.hist, r.at and os.date('%H:%M:%S', r.at) or '?') end
+  text = text .. ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and (' (stopped at %d rows; setup{ max_rows } reads more)'):format(r.total) or '')
   if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
+  if view_active(r) then
+    local cols = r.kind == 'documents' and r.tcols or r.columns
+    local note = {}
+    if r.filter then note[#note + 1] = ('filter «%s»: %d of %d loaded'):format(r.filter, #(r.kind == 'documents' and r.tvrows or r.vrows or {}), #(r.kind == 'documents' and r.trows or r.rows or {})) end
+    if r.sort and cols and cols[r.sort.col] then note[#note + 1] = ('sorted by %s %s'):format(cols[r.sort.col], r.sort.desc and '↓' or '↑') end
+    if #note > 0 then text = text .. ' · ' .. table.concat(note, ' · ') end
+  end
   local w = state.watch
   if w and w.query == r.query and w.conn == r.conn then text = text .. (' · watching every %gs'):format(w.secs) end
   if r.shown < r.total then
@@ -121,20 +134,28 @@ local function results_title(r)
   return text
 end
 
+--- The rows of `rows` that `r.filter` / `r.sort` let through, or nil when no
+--- view is on (the grid then shows `rows` as they are).
+local function view_rows(r, columns, rows)
+  if not view_active(r) then return nil end
+  if r.sort and not columns[r.sort.col] then r.sort = nil end
+  return gridview.apply(columns, rows, r)
+end
+
 --- The grid behind a result as `columns, rows` of strings -- a SQL table, or
 --- documents shown as a table -- or nil when it is raw JSON (or not rows).
 local function tabular(r)
   if not r then return nil end
-  if r.kind == 'table' and r.view ~= 'json' then return r.columns, r.rows end
-  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.trows end
+  if r.kind == 'table' and r.view ~= 'json' then return r.columns, r.vrows or r.rows end
+  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.tvrows or r.trows end
 end
 
 --- What the editable grid is made of: `columns, rows, widths` for a SQL
 --- table or documents shown as a table; nil in the JSON view / other kinds.
 local function grid_of(r)
   if not r then return nil end
-  if r.kind == 'table' and r.view ~= 'json' then return r.columns, r.rows, r.widths, r.aligns end
-  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.trows, r.twidths, r.taligns end
+  if r.kind == 'table' and r.view ~= 'json' then return r.columns, r.vrows or r.rows, r.widths, r.aligns end
+  if r.kind == 'documents' and r.view == 'table' then return r.tcols, r.tvrows or r.trows, r.twidths, r.taligns end
 end
 
 
@@ -145,7 +166,7 @@ end
 local function sync_editable(r)
   local buf = state.results_buf
   if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
-  vim.bo[buf].modifiable = (grid_of(r) ~= nil and r.edit ~= nil) or false
+  vim.bo[buf].modifiable = (grid_of(r) ~= nil and r.edit ~= nil and not view_active(r)) or false
   vim.bo[buf].modified = false
 end
 
@@ -166,7 +187,7 @@ local function paint_results(new_from)
   local r = state.result
   local buf = state.results_buf
 
-  if r.kind == 'table' and r.view ~= 'json' and new_from and r.widths and r.aligns then
+  if r.kind == 'table' and r.view ~= 'json' and new_from and r.widths and r.aligns and not view_active(r) then
     local new_rows = { unpack(r.rows, new_from) }
     local widths = render.column_widths(r.columns, new_rows, r.widths, r.wide)
     local grew = false
@@ -203,10 +224,12 @@ local function paint_results(new_from)
     lines = vim.split(render.json(r.columns, r.rows), '\n', { plain = true })
     lines[#lines] = nil -- the trailing newline
   elseif r.kind == 'table' then
-    lines, r.spans, r.widths, r.aligns = render.table(r.columns, r.rows, nil, r.wide)
+    r.vrows = view_rows(r, r.columns, r.rows)
+    lines, r.spans, r.widths, r.aligns = render.table(r.columns, r.vrows or r.rows, nil, r.wide)
   elseif r.view == 'table' then
     r.tcols, r.trows = render.flatten(r.rows, r.field_order)
-    lines, r.spans, r.twidths, r.taligns = render.table(r.tcols, r.trows, nil, r.twide)
+    r.tvrows = view_rows(r, r.tcols, r.trows)
+    lines, r.spans, r.twidths, r.taligns = render.table(r.tcols, r.tvrows or r.trows, nil, r.twide)
   else
     lines = render.documents(r.rows, r.field_order)
   end
@@ -267,36 +290,64 @@ local function touch(entry)
 end
 
 --- Files `entry` under its slot: a new result for a target that already has
---- one takes that slot (and its buffer, and its place among the tabs); a new
---- target gets a new slot, and the least recently used one goes when more
---- than `setup{ results_kept }` (10) exist.
-local function log_result(entry)
+--- one takes that slot (and its buffer, and its place among the tabs) -- the
+--- slot's earlier run moves to its history (`[R`/`]R`); a new target gets a
+--- new slot, and the least recently used one goes when more than `setup{
+--- results_kept }` (10) exist. A pinned slot is never taken over (the new
+--- result gets a slot of its own) nor dropped for room. `refresh_of` (the
+--- result a refresh repeats) takes that very slot and adds no history.
+local function log_result(entry, refresh_of)
   local log = state.result_log
   if not log then
     log = {}
     state.result_log = log
   end
   touch(entry)
+  local at
   for i, e in ipairs(log) do
-    if e.key == entry.key then
-      entry.buf = e.buf
-      if e.id and e.id ~= entry.id then close_cursor(e) end
-      log[i] = entry
-      state.result_pos = i
-      return
+    if refresh_of and e == refresh_of then at = i break end
+  end
+  if not at then
+    for i, e in ipairs(log) do
+      if e.key == entry.key and not e.pinned then at = i break end
     end
+  end
+  if at then
+    local e = log[at]
+    entry.buf = e.buf
+    entry.pinned = e.pinned
+    if e.id and e.id ~= entry.id then close_cursor(e) end
+    local tabular_run = e.kind ~= 'affected' and entry.kind ~= 'affected'
+    local history = {}
+    if tabular_run and not refresh_of then history[1] = e end
+    for _, old in ipairs(e.history or {}) do history[#history + 1] = old end
+    while #history > (opts.results_history or 5) do history[#history] = nil end
+    entry.history = #history > 0 and history or nil
+    e.history, e.hidx, e.hist = nil, nil, nil
+    e.buf = nil
+    log[at] = entry
+    state.result_pos = at
+    return
   end
   log[#log + 1] = entry
   while #log > (opts.results_kept or 10) do
-    local lru = 1
-    for i = 2, #log - 1 do
-      if (log[i].used or 0) < (log[lru].used or 0) then lru = i end
+    local lru
+    for i = 1, #log - 1 do
+      if not log[i].pinned and (not lru or (log[i].used or 0) < (log[lru].used or 0)) then lru = i end
+    end
+    if not lru then
+      lru = 1
+      for i = 2, #log - 1 do
+        if (log[i].used or 0) < (log[lru].used or 0) then lru = i end
+      end
     end
     local gone = table.remove(log, lru)
     close_cursor(gone)
     drop_buffer(gone)
   end
-  state.result_pos = #log
+  for i, e in ipairs(log) do
+    if e == entry then state.result_pos = i end
+  end
 end
 
 --- Messages ("running…", an error, "3 row(s) affected") share one buffer
@@ -371,7 +422,7 @@ local function show_result(r, meta)
   local label = slots.label(query or '')
   if r.kind == 'affected' then
     state.result = nil
-    local entry = { kind = 'affected', rows = r.rows, took_ms = took, conn = meta and meta.conn, query = query, closed = true, key = key, label = label }
+    local entry = { kind = 'affected', rows = r.rows, took_ms = took, conn = meta and meta.conn, query = query, closed = true, key = key, label = label, at = os.time() }
     log_result(entry)
     release_result()
     local buf = message_buffer()
@@ -394,11 +445,13 @@ local function show_result(r, meta)
       and state.edit_cache.edit or nil,
     edit_reason = 'still checking whether these rows can be edited…',
     conn = meta and meta.conn, query = query,
-    took_ms = took,
+    took_ms = took, at = os.time(),
     key = key, label = label,
   }
+  local prev = refresh and refresh.replacing
+  if prev then entry.filter, entry.sort = prev.filter, prev.sort end
   state.result = entry
-  log_result(entry)
+  log_result(entry, prev or nil)
   release_result(r.cursor)
   local buf = slot_buffer(entry)
   state.results_buf = buf
@@ -417,6 +470,7 @@ local function show_entry(i)
   local e = state.result_log[i]
   save_cursor()
   touch(e)
+  e.hidx, e.hist = nil, nil
   state.result_pos = i
   if e.kind == 'affected' then
     state.result = nil
@@ -453,6 +507,114 @@ function M.step_result(delta)
   if #log == 1 and state.result_pos == 1 then return notify('this is the only kept result', vim.log.levels.INFO) end
   local from = state.result_pos or (delta > 0 and 0 or #log + 1)
   show_entry((from - 1 + delta) % #log + 1)
+end
+
+--- `]R` / `[R`: an earlier / later run of the result on screen (the tab keeps
+--- the last `setup{ results_history }` (5) runs of its target). Earlier runs
+--- are read-only: their cursors were closed when the newer run replaced them.
+function M.step_history(delta)
+  if results_blocked() then return end
+  local e = state.result_log[state.result_pos or 0]
+  if not e or e.kind == 'affected' or not e.history or #e.history == 0 then
+    return notify('no earlier run of this result', vim.log.levels.INFO)
+  end
+  local idx = (e.hidx or 0) + delta
+  if idx < 0 then return notify('this is the newest run', vim.log.levels.INFO) end
+  if idx > #e.history then return notify('this is the oldest kept run', vim.log.levels.INFO) end
+  save_cursor()
+  e.hidx = idx ~= 0 and idx or nil
+  local target = idx == 0 and e or e.history[idx]
+  e.hist, target.hist, target.hist_total = nil, idx ~= 0 and idx or nil, #e.history
+  target.buf = e.buf
+  state.result = target
+  paint_results()
+  local win = results_win()
+  if win then pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 }) end
+end
+
+--- `<leader>rp`: pin / unpin the tab on screen. A pinned tab is not replaced
+--- by a later run of the same target (that gets a tab of its own) and is the
+--- last to go when there is no room -- keep a result to compare with.
+function M.pin_result()
+  local e = (state.result_log or {})[state.result_pos or 0]
+  if not e then return notify('no result tab to pin', vim.log.levels.WARN) end
+  e.pinned = (not e.pinned) or nil
+  update_bar()
+  notify(e.pinned and ('pinned %s — a new run of it opens its own tab'):format(e.label or 'result') or 'unpinned')
+end
+
+--- A result's whole grid as `columns, rows` -- every loaded row, whatever
+--- filter or sort is on; documents flattened as in the table view.
+local function full_grid(r)
+  if r.kind == 'documents' then return render.flatten(r.rows, r.field_order) end
+  return r.columns, r.rows
+end
+
+local function run_title(r)
+  return ('%s%s'):format(r.label or 'result', r.at and (' @' .. os.date('%H:%M:%S', r.at)) or '')
+end
+
+local function show_diff(a, b)
+  local ca, ra = full_grid(a)
+  local cb, rb = full_grid(b)
+  local keys = (b.edit and b.edit.keys) or (a.edit and a.edit.keys)
+  local d, err = rdiff.compare(ca, ra, cb, rb, keys)
+  if not d then return notify(err, vim.log.levels.WARN) end
+  local note = (a.shown < a.total or b.shown < b.total) and ' (rows not loaded are not compared)' or ''
+  local lines = rdiff.lines(d, run_title(a), run_title(b))
+  if note ~= '' then lines[2] = lines[2] .. note end
+  local buf = scratch('tradar://diff', state.diff_buf)
+  state.diff_buf = buf
+  set_lines(buf, lines)
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd([[syntax match DiffAdd /^+.*/]])
+    vim.cmd([[syntax match DiffDelete /^-.*/]])
+    vim.cmd([[syntax match DiffChange /^\~.*/]])
+    vim.cmd([[syntax match Comment /^tradar diff.*\|^matched by.*\|^only .*/]])
+  end)
+  vim.keymap.set('n', 'q', function()
+    local w = vim.fn.bufwinid(buf)
+    if w ~= -1 then vim.api.nvim_win_close(w, true) end
+  end, { buffer = buf, desc = 'tradar: close the diff' })
+  if vim.fn.bufwinid(buf) == -1 then
+    local origin = vim.api.nvim_get_current_win()
+    vim.cmd(('botright %dsplit'):format(math.min(math.max(#lines + 1, 6), 20)))
+    vim.api.nvim_win_set_buf(0, buf)
+    vim.wo.wrap = false
+    vim.api.nvim_set_current_win(origin)
+  end
+end
+
+--- `<leader>rD` / `:TradarDiff [n]`: what changed between two results of the
+--- same shape -- rows added, removed and cells changed, matched by the key
+--- column(s). With no argument: the tab's previous run against the latest
+--- (or, while looking at an earlier run with `[R`, that run against the
+--- latest); with none to compare, pick another tab. `n`: tab `n` (before)
+--- against the one on screen (after).
+function M.diff_result(arg)
+  if results_blocked() then return end
+  local log = state.result_log
+  local e = log[state.result_pos or 0]
+  if not e or e.kind == 'affected' then return notify('no table result on screen to compare', vim.log.levels.WARN) end
+  local n = tonumber(arg)
+  if n then
+    local a = log[n]
+    if not a or a.kind == 'affected' or a == e then return notify(('tab %s is not another table result'):format(arg), vim.log.levels.WARN) end
+    return show_diff(a, e)
+  end
+  if state.result ~= e and state.result and state.result.hist then return show_diff(state.result, e) end
+  if e.history and #e.history > 0 then return show_diff(e.history[1], e) end
+  local items = {}
+  for i, other in ipairs(log) do
+    if other ~= e and other.kind ~= 'affected' then items[#items + 1] = i end
+  end
+  if #items == 0 then return notify('nothing to compare with yet — run it again, or open another result', vim.log.levels.WARN) end
+  vim.ui.select(items, {
+    prompt = 'compare with (before)',
+    format_item = function(i) return ('%d  %s  (%d rows)'):format(i, log[i].label or '', log[i].total or 0) end,
+  }, function(i)
+    if i then show_diff(log[i], e) end
+  end)
 end
 
 --- `<leader>r1`..`9`: result tab `n`.
@@ -577,6 +739,49 @@ function M.toggle_column_width(all)
   paint_results()
   -- Stay on the same column: its start moved with the widths around it.
   local span = col and r.spans and r.spans[col]
+  if span then pcall(vim.cmd, ('normal! %d|'):format(span[1])) end
+end
+
+--- `<leader>rF` / `:TradarFilter [expr]`: show only the loaded rows that match
+--- (`status = failed`, `age >= 30`, `city ~ han`, or any text); empty clears.
+--- Rows are not fetched -- the rest of a long result is untouched (see
+--- `M.more`); exports keep every row. The grid is read-only while it is on.
+function M.set_filter(text)
+  local r = state.result
+  if not r or not grid_of(r) then return notify('filter applies to the table view', vim.log.levels.WARN) end
+  if ctx.dirty() then
+    return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
+  end
+  local function apply(value)
+    if value == nil then return end
+    value = vim.trim(value)
+    r.filter = (value ~= '' and value ~= 'off') and value or nil
+    paint_results()
+    local win = results_win()
+    if win then pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 }) end
+  end
+  if text ~= nil then return apply(text) end
+  vim.ui.input({ prompt = 'Filter rows (col = v, col ~ text, col > 3, or any text; empty clears): ', default = r.filter or '' }, apply)
+end
+
+--- `<leader>ro`: sort by the column under the cursor -- ascending, then
+--- descending, then back to the query's own order. Loaded rows only.
+function M.toggle_sort()
+  local r = state.result
+  if not r or not grid_of(r) then return notify('sort applies to the table view', vim.log.levels.WARN) end
+  if ctx.dirty() then
+    return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)
+  end
+  local col = render.column_at(r.spans or {}, vim.fn.virtcol('.'))
+  if not col then return notify('put the cursor on a column to sort by', vim.log.levels.WARN) end
+  local s = r.sort
+  if s and s.col == col then
+    r.sort = (not s.desc) and { col = col, desc = true } or nil
+  else
+    r.sort = { col = col }
+  end
+  paint_results()
+  local span = r.spans and r.spans[col]
   if span then pcall(vim.cmd, ('normal! %d|'):format(span[1])) end
 end
 

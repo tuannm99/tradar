@@ -25,6 +25,8 @@ vim.api.nvim_create_user_command('TradarWatch', function(a) t().watch(a.args) en
   nargs = '?', complete = function() return { 'off' } end,
   desc = 'run the result on screen again every few seconds (default 5) until `off`',
 })
+vim.api.nvim_create_user_command('TradarFilter', function(c) t().set_filter(c.args ~= '' and c.args or nil) end, { nargs = '*', desc = 'show only the loaded rows that match (off clears; no argument asks)' })
+vim.api.nvim_create_user_command('TradarDiff', function(c) t().diff_result(c.args ~= '' and c.args or nil) end, { nargs = '?', desc = 'rows added/removed/changed against the previous run or another tab' })
 vim.api.nvim_create_user_command('TradarResults', function() t().pick_result() end, { desc = 'pick one of the kept results' })
 vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})
 vim.api.nvim_create_user_command('TradarSchema', function() t().schema() end, {})

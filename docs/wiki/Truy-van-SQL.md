@@ -126,7 +126,7 @@ Hai chỗ để lưu một query:
 select * from orders where id = ${id} and status = '${status=open}';
 ```
 
-Nhiều câu dùng chung một tham số (`<leader>ra`) thì chỉ hỏi một lần cho cả lô. Hủy một câu hỏi là không chạy gì. Dòng chỉ có comment (`--`, `//`, `#`) được bỏ qua.
+Nhiều câu dùng chung một tham số (`<leader>ra`) thì chỉ hỏi một lần cho cả lô. Hủy một câu hỏi là không chạy gì. Trong câu hỏi, `<Tab>` gợi ý các giá trị đã dùng cho tham số đó (8 giá trị gần nhất, mới nhất trước). Dòng chỉ có comment (`--`, `//`, `#`) được bỏ qua.
 
 Đây là **thay chữ**, không phải tham số ràng buộc: `${id}` trong `where id = ${id}` là đúng những gì bạn gõ (số vào thẳng câu lệnh). Giá trị nằm giữa hai dấu nháy thì dấu nháy trong giá trị được escape (`O'Brien` an toàn trong `'${name}'` — SQL nhân đôi `''`, Mongo/ES/Redis dùng `\`). Câu lệnh sau khi thay mới được kiểm tra bởi cơ chế bảo vệ (`${where}` rỗng thành `DELETE` không có `WHERE` vẫn bị hỏi lại), và lưu vào history là bản đã thay; `:TradarSave` lưu bản có `${...}`.
 
@@ -145,6 +145,25 @@ Mỗi **đích** của câu lệnh có một tab kết quả riêng: bảng củ
 - Mỗi tab là một buffer riêng (`tradar://results/users`), nhớ vị trí con trỏ; quay lại tab thì con trỏ ở chỗ cũ. Footer cho biết đang xem tab nào và câu nào sinh ra nó: `[2/3] select name from p · 3/3 rows · 1ms`.
 - Giữ tối đa **10 tab** (`setup{ results_kept = 20 }` để đổi); đầy thì tab ít dùng nhất bị bỏ.
 - Server chỉ giữ cursor mở cho **4 tab dùng gần nhất** (`setup{ results_cursors = 8 }` để đổi): các tab này vẫn tải thêm trang (`<leader>rm`) và sửa được. Tab cũ hơn vẫn xem được từ những gì đã tải, nhưng chỉ đọc — chạy lại câu lệnh để sửa/tải tiếp.
+- **Lịch sử các lần chạy:** mỗi tab giữ thêm **5 lần chạy trước** của đích đó (`setup{ results_history = 10 }` để đổi). Trong tab, `[R` xem lần chạy trước, `]R` quay lại lần mới hơn; footer ghi `run 1 back of 2 (11:02:23)`. Lần chạy cũ chỉ đọc. Làm mới (`<leader>rR`, watch) thay tại chỗ và không thêm lịch sử.
+- **Ghim tab:** `<leader>rp` ghim / bỏ ghim tab đang xem (thanh tab có 📌). Tab đã ghim không bị chạy lại cùng đích thay thế — lần chạy mới mở **tab riêng** — và là tab cuối cùng bị bỏ khi hết chỗ. Dùng để giữ lại một kết quả làm mốc so sánh.
+
+## Lọc và sắp xếp kết quả
+
+Làm trên các dòng **đã tải**, không chạy lại query và không tải thêm dòng:
+
+- `<leader>rF` (hoặc `:TradarFilter {biểu thức}`; để trống trong câu hỏi, hoặc `:TradarFilter off`, để bỏ): `status = failed`, `age >= 30`, `name != bob`, `city ~ han` (chứa), hoặc chỉ gõ chữ để lấy dòng có ô nào chứa chữ đó. Không phân biệt hoa thường; số so sánh như số (9 < 25); ô `NULL` không khớp `<`, `>`.
+- `<leader>ro`: sắp xếp theo cột dưới con trỏ — tăng, giảm, rồi về thứ tự của query. Sắp xếp ổn định, `NULL` luôn ở cuối.
+- Footer ghi `filter «city = Hue»: 2 of 5 loaded · sorted by age ↑`. Trang tải thêm (`<leader>rm`) cũng được lọc/sắp xếp; làm mới giữ nguyên bộ lọc.
+- Khi đang lọc hay sắp xếp, lưới **chỉ đọc** (dòng hiển thị không còn khớp dòng trong query); bỏ lọc để sửa. Copy ô/dòng (`gyc`, `gyr`…) lấy đúng các dòng đang hiện; export và `gyj`/`gyv`/`gym` vẫn lấy toàn bộ dòng.
+
+## So sánh hai kết quả
+
+`<leader>rD` (hoặc `:TradarDiff [n]`) mở một cửa sổ nhỏ liệt kê khác biệt theo **khoá** (khoá chính nếu sửa được, không thì cột đầu tiên): `~` ô đổi (`age: 30 → 31`), `+` dòng mới, `-` dòng mất, kèm số dòng giống nhau.
+
+- Không tham số: lần chạy trước của tab so với lần mới nhất (đang xem lần cũ bằng `[R` thì so lần đó với lần mới nhất). Chưa có lần chạy trước thì chọn một tab khác.
+- `:TradarDiff 2`: tab 2 (trước) so với tab đang xem (sau). Hai kết quả khác cột thì so các cột chung và ghi cột chỉ có ở một bên.
+- Chỉ so các dòng đã tải; `q` đóng cửa sổ.
 
 ## Ô dài bị cắt
 
