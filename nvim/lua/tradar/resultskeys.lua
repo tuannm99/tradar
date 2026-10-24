@@ -60,6 +60,12 @@ ctx.attach_results = function(buf)
     map('n', (opts.prefix or '<leader>r') .. n, function() M.goto_result(n) end, ('result tab %d'):format(n))
   end
   map('n', (opts.prefix or '<leader>r') .. 'x', function() M.close_result() end, 'close this result tab')
+  map('n', (opts.prefix or '<leader>r') .. 'p', function() M.pin_result() end, 'pin / unpin this result tab')
+  map('n', (opts.prefix or '<leader>r') .. 'F', function() M.set_filter() end, 'filter the loaded rows')
+  map('n', (opts.prefix or '<leader>r') .. 'o', function() M.toggle_sort() end, 'sort by this column (asc / desc / off)')
+  map('n', (opts.prefix or '<leader>r') .. 'D', function() M.diff_result() end, 'what changed since the previous run / against another tab')
+  map('n', ']R', function() M.step_history(-1) end, 'later run of this result')
+  map('n', '[R', function() M.step_history(1) end, 'earlier run of this result')
   map('n', 'zw', function() M.toggle_column_width() end, 'show this column in full / cut it back')
   map('n', 'zW', function() M.toggle_column_width(true) end, 'show every column in full / cut them all back')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
@@ -69,7 +75,8 @@ ctx.attach_results = function(buf)
     vim.keymap.set('n', key, function()
       if vim.bo[buf].modifiable then return key end
       local r = state.result
-      local reason = (r and r.view == 'json') and 'read-only in the JSON view — ' .. (opts.prefix or '<leader>r') .. 'v for the table'
+      local reason = (r and (r.filter or r.sort)) and ('read-only while a filter / sort is on — ' .. (opts.prefix or '<leader>r') .. 'F and ' .. (opts.prefix or '<leader>r') .. 'o clear them')
+        or (r and r.view == 'json') and 'read-only in the JSON view — ' .. (opts.prefix or '<leader>r') .. 'v for the table'
         or (r and r.edit_reason) or 'this result cannot be edited'
       notify(reason, vim.log.levels.WARN)
       return ''
@@ -135,6 +142,9 @@ ctx.attach_results = function(buf)
       '- `gK` show the current row, one field per line',
       ('- `%sR` run this result again in place (only statements that cannot change data); `%sW` / `:TradarWatch [secs|off]` repeat it every few seconds'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
       ('- one result tab per table / collection / index (tabs on top, click works): `[r` / `]r` previous / next, `%s1`..`%s9` jump, `%sx` close, `:TradarResults` picks one (`setup{ results_kept }`, default 10; `results_cursors`, default 4, keep paging/editing)'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
+      ('- `[R` / `]R` earlier / later run of this tab (`setup{ results_history }`, default 5); `%sp` pin the tab so a new run of it opens another'):format(opts.prefix or '<leader>r'),
+      ('- `%sF` / `:TradarFilter` show only loaded rows matching `col = v`, `col ~ text`, `col > 3` or any text; `%so` sort by this column (asc, desc, off). Nothing is fetched; exports keep every row'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
+      ('- `%sD` / `:TradarDiff [n]` rows added / removed / changed against the previous run (or tab n), matched by the key column'):format(opts.prefix or '<leader>r'),
       '- `zw` show the column under the cursor in full (not cut at 40) / cut it back; `zW` every column',
       '- `gd` follow foreign key under cursor',
       '- edit the grid like any buffer (`cw`, `dd`, `o` + a new row, `:s`, `:g`, `u`…); nothing runs until `:w`',

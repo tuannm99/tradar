@@ -75,6 +75,30 @@ function M.apply(text, values, driver)
   return table.concat(lines, '\n')
 end
 
+local HISTORY = 8
+
+--- Earlier values of the parameter being asked, most recent first, for
+--- `<Tab>` in the question (`vim.ui.input`'s command-line completion).
+_G.__tradar_param_complete = function(lead)
+  local st = ctx.state
+  local out = {}
+  for _, v in ipairs((st.param_history or {})[st.param_asking or ''] or {}) do
+    if v:sub(1, #lead) == lead then out[#out + 1] = v end
+  end
+  return out
+end
+
+local function remember_value(name, value)
+  local hist = ctx.state.param_history or {}
+  ctx.state.param_history = hist
+  local list = { value }
+  for _, v in ipairs(hist[name] or {}) do
+    if v ~= value and #list < HISTORY then list[#list + 1] = v end
+  end
+  if value == '' then list = vim.list_slice(list, 2) end
+  hist[name] = list
+end
+
 --- Asks for each parameter used by `texts` (once, even across several
 --- statements), then calls `cb(expanded_texts)`. Nothing to ask: `cb(texts)`
 --- at once. Cancelling any question abandons the run (`cb` is not called).
@@ -91,13 +115,16 @@ function M.expand(conn, texts, cb)
       for k, text in ipairs(texts) do out[k] = M.apply(text, values, driver) end
       return cb(out)
     end
+    ctx.state.param_asking = p.name
     vim.ui.input({
       prompt = ('%s (%d/%d): '):format(p.name, i, #names),
       default = remembered[p.name] or p.default or '',
+      completion = 'customlist,v:lua.__tradar_param_complete',
     }, function(value)
       if value == nil then return end
       values[p.name] = value
       remembered[p.name] = value
+      remember_value(p.name, value)
       ask(i + 1)
     end)
   end

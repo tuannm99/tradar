@@ -64,6 +64,24 @@ t.run(nil, nil, true)
 H.check('run all asks once for a parameter used twice', H.wait(5000, function() return H.text():find('two', 1, true) ~= nil end) and calls == 1, calls)
 H.check('...and both statements got the value', H.lines()[3]:find('20', 1, true) ~= nil, H.text())
 
+-- earlier values complete with <Tab>
+local st = require('tradar.ctx').state
+local answers_for_w = { 'one', 'two', 'one' }
+local seen_completion
+vim.ui.input = function(o, cb) seen_completion = o.completion; cb(table.remove(answers_for_w, 1)) end
+for _ = 1, 3 do
+  vim.api.nvim_buf_set_lines(H.sqlbuf, 0, -1, false, { "select '${w}' as w_col" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  t.run()
+  H.wait(3000, function() return not st.running end)
+  H.sleep(150)
+end
+st.param_asking = 'w'
+H.check('the question offers completion', seen_completion == 'customlist,v:lua.__tradar_param_complete', tostring(seen_completion))
+local all = _G.__tradar_param_complete('')
+H.check('earlier values, most recent first, no repeats', #all == 2 and all[1] == 'one' and all[2] == 'two', vim.inspect(all))
+H.check('completion filters by what is typed', vim.deep_equal(_G.__tradar_param_complete('t'), { 'two' }))
+
 -- the guard looks at what will be sent
 local guarded
 vim.ui.select = function(items, o, cb) guarded = o.prompt; cb('Cancel') end
