@@ -113,6 +113,9 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
 | `rs` / `rc` / `rm` | panel schema / chọn connection / tải thêm dòng |
 | `rz` | phóng cửa sổ kết quả ra toàn màn hình / trả lại (`:TradarResultsZoom`; cũng có trong buffer kết quả) |
+| `[R` / `]R`, `rp` | (buffer kết quả) lần chạy trước / sau của tab (`setup{ results_history }` = 5); ghim tab để lần chạy mới mở tab riêng |
+| `rF` / `ro` | (buffer kết quả) lọc / sắp xếp các dòng đã tải (`:TradarFilter {biểu thức\|off}`); lưới chỉ đọc khi đang bật |
+| `rD` | (buffer kết quả) khác biệt với lần chạy trước hoặc tab n (`:TradarDiff [n]`), theo khoá |
 | `rR` / `rW` | (buffer kết quả) chạy lại kết quả tại chỗ / theo dõi mỗi vài giây; chỉ câu không ghi dữ liệu |
 | `[r` / `]r`, `r1`…`r9`, `rx` | (buffer kết quả) mỗi bảng/collection/index/key một tab kết quả (thanh tab trên cửa sổ, click được): tab trước / sau, nhảy tới tab n, đóng tab; `:TradarResults` chọn (`setup{ results_kept }` = 10 tab, `results_cursors` = 4 tab giữ cursor mở để tải thêm/sửa). Câu vừa chạy nháy sáng (`setup{ flash_ms }`, nhóm `TradarRunning`) |
 | `K` | thông tin bảng/cột dưới con trỏ (kiểu, PK, FK, index; hiểu alias `o.user_id`); không biết thì rơi về hover của LSP |
