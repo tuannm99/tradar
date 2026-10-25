@@ -39,12 +39,13 @@ Dòng cuối cho biết số dòng và **thời gian database chạy câu lệnh
 | `gyc` / `gyr` / `gyC` | copy ô / dòng (visual: nhiều dòng) / cột |
 | `gyj` / `gyv` / `gym` | copy cả kết quả dạng JSON / CSV / Markdown |
 | `K` | xem trọn giá trị một ô |
+| `[r` `]r` `r1`…`r9` `rx` `rp` `[R` `]R` `rF` `ro` `rD` `rR` `rW` | tab kết quả, lịch sử lần chạy, lọc/sắp xếp, so sánh, làm mới — xem các mục bên dưới và `Phim-tat` |
 | `gd` | trên ô của cột khoá ngoại: chạy `SELECT` dòng được tham chiếu |
 | `q` | đóng |
 
 Xuất file: `:TradarExport csv|json|md|tsv [file]`.
 
-Cột rộng hơn 40 ký tự bị cắt và thêm `…`; dùng `K` hoặc `gyc` để lấy giá trị đầy đủ. Buffer kết quả không có sort/filter theo cột — sửa `ORDER BY`/`WHERE` rồi `rr` lại.
+Cột rộng hơn 40 ký tự bị cắt và thêm `…`; dùng `K` hoặc `gyc` để lấy giá trị đầy đủ. Lọc và sắp xếp (`rF`, `ro`) chỉ tác động lên các dòng **đã tải** — xem "Lọc và sắp xếp kết quả" bên dưới; với kết quả lớn, sửa `ORDER BY`/`WHERE` rồi `rr` lại để áp dụng trên cả bảng.
 
 ### Sửa trực tiếp
 

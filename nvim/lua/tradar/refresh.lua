@@ -24,8 +24,8 @@ local function target()
   return r
 end
 
---- Re-runs the result on screen in place (same slot in the kept results,
---- same cursor position). `on_error(err)` is told when it fails; the grid
+--- Re-runs the result on screen in place (same result tab, no history
+--- entry, same cursor position and filter / sort). `on_error(err)` is told when it fails; the grid
 --- stays on screen either way.
 function M.refresh(on_error)
   local r, why = target()
