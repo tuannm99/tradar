@@ -109,7 +109,7 @@ function M.label(query)
   return M.target_of(query) or squash(query, 24)
 end
 
-local function tab_text(i, e, current)
+local function tab_text(i, e)
   local text = (' %d %s%s'):format(i, e.pinned and '📌' or '', squash(e.label or e.query, 18))
   if e.kind == 'affected' then
     text = text .. (' ✓%d'):format(e.rows or 0)

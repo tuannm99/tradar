@@ -113,6 +113,7 @@ Mọi lệnh dưới đây cũng gọi được qua một lệnh chung `:Tradar 
 | Điều hướng | `:TradarSchema`, `:TradarTables`, `:TradarHistory` |
 | Sinh câu lệnh | `:TradarCrud [create\|read\|update\|delete]` (`rg`) — chèn câu lệnh mẫu của bảng vào buffer, không chạy |
 | Lưu / mở query | `:TradarSave[!] [tên]` (vào thư viện, `<leader>rS`), `:TradarSaveHere[!] [đường dẫn]` (cạnh file hiện tại), `:TradarOpen` (duyệt thư viện, `<leader>rf`) |
+| Kết quả | `:TradarResults` (chọn tab), `:TradarRefresh`, `:TradarWatch [giây\|off]`, `:TradarFilter [biểu thức\|off]`, `:TradarDiff [n]`, `:TradarResultsZoom` |
 | Xuất | `:TradarExport csv\|json\|md\|tsv [file]` |
 | Kafka | `:TradarKafkaConnect [tên]`, `:TradarKafkaTail [tên] [topic]` |
 | Socket | `:TradarSocketTail [tên]` |

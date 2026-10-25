@@ -1,3 +1,5 @@
+> **Đã thay thế** bởi `nvim-result-tabs-2026-10-23.md` (log tuyến tính → tab theo đích) và `nvim-result-history-filter-diff-2026-10-24.md`. Hai điểm dưới đây không còn đúng: chỉ cursor của các tab dùng gần nhất bị đóng (`results_cursors`, 4), và lọc/sắp xếp phía client đã có (trên các dòng đã tải, `rF`/`ro`). Phần nháy câu đang chạy vẫn nguyên.
+
 # Giữ nhiều kết quả + nháy câu đang chạy (2026-10-22)
 
 User: "cứ tiếp tục cải thiện UX". Rà plugin như người mới dùng, hai chỗ vướng thật:
