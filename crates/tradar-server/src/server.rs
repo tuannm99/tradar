@@ -263,6 +263,7 @@ impl Server {
             "split" => self.split(params),
             "keywords" => self.keywords(params),
             "snippet" => self.snippet(params).await,
+            "snippet.options" => self.snippet_options(params).await,
             "complete" => self.complete(params),
             "edit.source" => self.edit_source(params),
             "edit.sql" => self.edit_sql(params),

@@ -370,6 +370,15 @@ impl QueryDriver for MongoDriver {
         })
     }
 
+    fn snippet_options(&self) -> Vec<tradar_query::SnippetOption> {
+        mongo_snippet_options()
+    }
+
+    fn option_snippet(&self, entry: &SchemaInfo, id: &str, columns: &[String]) -> Option<String> {
+        mongo_extra_snippet(entry, id)
+            .or_else(|| self.crud_snippet(entry, tradar_query::CrudOp::from_id(id)?, columns))
+    }
+
     fn crud_snippet(
         &self,
         entry: &SchemaInfo,

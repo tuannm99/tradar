@@ -1,0 +1,5 @@
+# Menu sinh câu lệnh theo driver + picker connection bằng telescope (2026-10-26)
+
+- **Protocol 1.14:** `QueryDriver::snippet_options()` (mặc định 4 thao tác CRUD) và `option_snippet(entry, id, columns)`; server thêm `snippet.options` và `snippet` nhận `op` là một id trong menu (id lạ → `unknown op`). Mongo liệt kê thêm `find_latest`, `find_by_id`, `find_one`, `count`, `distinct`, `aggregate` (`mongo_snippet_options` / `mongo_extra_snippet`, test rằng các câu không có placeholder parse được bằng shell của chính driver). Plugin (`crud.lua`) lấy menu từ server, server cũ thì rơi về 4 thao tác; chỉ 4 thao tác cơ bản mới hỏi chọn cột.
+- **Picker connection:** `:TradarConnect` (không tên) mở telescope với khung xem trước (loại, target đã che mật khẩu, trạng thái) và `<C-a>`/`<C-e>` thêm / mở file; không có telescope hoặc `connection_picker = 'ui'` thì `vim.ui.select` như cũ. `connections.list` trả target thô nên che ở client (`telescope.mask_target`: `user:pass@` và `password=`).
+- Chưa làm: ngắt kết nối từ picker (`disconnect` đã có trong protocol), sắp xếp connection theo mức dùng gần đây.

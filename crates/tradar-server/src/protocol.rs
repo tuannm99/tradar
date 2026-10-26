@@ -34,7 +34,7 @@ pub const APP_ERROR: i64 = -32000;
 /// minor bump had this scheme existed from the start -- this is the first
 /// breaking-change-shaped line in the wire surface's history, which is
 /// exactly why it's `(1, 0)` and not `(0, 1)`.
-pub const PROTOCOL_VERSION: (u32, u32) = (1, 13);
+pub const PROTOCOL_VERSION: (u32, u32) = (1, 14);
 
 pub struct RpcError {
     pub code: i64,

@@ -14,7 +14,7 @@ Tất cả phím có tiền tố `<leader>r` (đổi được bằng `setup{ pre
 | `ra` | chạy cả file theo thứ tự, dừng ở lỗi đầu tiên |
 | `rx` | huỷ query đang chạy |
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
-| `rt` | picker bảng (telescope): `<CR>` chèn tên, `<C-o>` sinh câu xem dòng vào buffer (không chạy), `<C-g>` sinh create/read/update/delete |
+| `rt` | picker bảng (telescope): `<CR>` chèn tên, `<C-o>` sinh câu xem dòng vào buffer (không chạy), `<C-g>` mở menu sinh câu lệnh (create/read/update/delete; Mongo có thêm find latest / by _id / one, count, distinct, aggregate) |
 | `rg` | sinh câu create/read/update/delete cho bảng dưới con trỏ (hoặc chọn bảng) |
 | `rh` | history: `<CR>` dán, `<C-r>` chạy |
 | `rs` | panel schema (cây schema → bảng → cột) |

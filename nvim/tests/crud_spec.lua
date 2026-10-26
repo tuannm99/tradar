@@ -99,4 +99,17 @@ vim.api.nvim_win_set_cursor(0, { row, 0 })
 answers({ 'Delete' })
 vim.api.nvim_feedkeys('c', 'x', false)
 H.check('`c` in the schema panel generates for that table', wait_text('DELETE FROM "people"'), buf_text())
+-- the menu comes from the server
+local opts_result
+require('tradar.rpc').request('snippet.options', { connection = 'local' }, function(e, r) opts_result = r or e end)
+H.wait(3000, function() return opts_result ~= nil end)
+local ids = {}
+for _, o in ipairs(type(opts_result) == 'table' and opts_result.options or {}) do ids[#ids + 1] = o.id end
+H.check('snippet.options lists the four basic statements for SQL', vim.deep_equal(ids, { 'create', 'read', 'update', 'delete' }), vim.inspect(opts_result))
+H.notes = {}
+local bad
+require('tradar.rpc').request('snippet', { connection = 'local', name = 'people', op = 'count' }, function(e) bad = e end)
+H.wait(3000, function() return bad ~= nil end)
+H.check('an op the driver does not offer is refused', type(bad) == 'string' and bad:find('unknown op', 1, true) ~= nil, tostring(bad))
+
 H.done()

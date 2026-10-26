@@ -44,6 +44,6 @@ Có ba cách, theo thứ tự bạn sẽ dùng:
    # tradar: tên-connection      (Redis / Elasticsearch)
    ```
 2. **File `.tradar`** (một dòng, chỉ chứa tên connection) ở thư mục cha — áp dụng cho mọi file bên dưới.
-3. **`:TradarConnect [tên]`** — gắn riêng buffer hiện tại.
+3. **`:TradarConnect [tên]`** — gắn riêng buffer hiện tại. Bỏ trống tên thì mở **picker telescope** (có telescope): mỗi connection một dòng (`●` đang kết nối, `○` chưa, `✗` server không phục vụ loại này) kèm khung xem trước — loại, target (mật khẩu thay bằng `***`), trạng thái (đang kết nối, idle, đang trong transaction…). `<CR>` chọn, `<C-a>` thêm connection, `<C-e>` mở file. Không có telescope, hoặc `setup{ connection_picker = 'ui' }`, thì dùng danh sách `vim.ui.select`.
 
 Mở file là plugin tự connect nền, không cần gõ lệnh.
