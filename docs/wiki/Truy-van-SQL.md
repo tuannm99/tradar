@@ -119,6 +119,14 @@ Hai chỗ để lưu một query:
 
 `:TradarOpen` (hoặc `<leader>rf`) duyệt thư viện bằng telescope (mới sửa nhất lên đầu, có preview; `<CR>` mở, `<C-s>` mở trong split, `<C-x>` xoá); không có telescope thì dùng `vim.ui.select`.
 
+## Cheatsheet: query mẫu có sẵn
+
+`<leader>rk` (hoặc `:TradarCheatsheet`) mở danh sách **query mẫu của đúng loại database** đang dùng — khỏi nhớ và khỏi đi tìm: liệt kê bảng kèm dung lượng, câu đang chạy, ai đang khoá ai, index không dùng, `system.parts`/`query_log` của ClickHouse, `SCAN`/`INFO` của Redis, `_cat/indices` của Elasticsearch, `$group` của Mongo… Có nhóm (Explore, Activity, Size, Health, Query…), mỗi mục một câu.
+
+- Có telescope: danh sách có **khung xem trước** là cả câu lệnh, gõ để lọc theo nhóm, tên **hoặc nội dung câu**. `<CR>` chèn câu vào buffer (dưới dòng con trỏ, chưa chạy); `<C-r>` chèn rồi chạy luôn. Không có telescope (hoặc `setup{ cheatsheet_picker = 'ui' }`) thì dùng danh sách `vim.ui.select`, chỉ chèn.
+- Chỗ cần điền là `${table}`, `${column}`, `${pattern}`… — đúng cú pháp tham số ở trên: lúc chạy plugin hỏi giá trị (nhớ giá trị lần trước, `<Tab>` gợi ý), buffer vẫn giữ `${...}` để dùng lại.
+- Query nằm trong server (mỗi driver một bộ, đúng ngôn ngữ native của nó), nên mọi phiên Neovim dùng chung. Bộ nào cũng được test: SQLite chạy thật từng câu, Mongo/Redis/Elasticsearch/SQL kiểm tra cú pháp đọc được.
+
 ## Tham số trong câu lệnh
 
 `${tên}` hoặc `${tên=mặc-định}` trong câu lệnh sẽ được **hỏi lúc chạy**, giá trị được nhớ cho lần sau (làm giá trị điền sẵn):

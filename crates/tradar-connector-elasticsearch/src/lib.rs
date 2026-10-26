@@ -31,6 +31,8 @@ impl ElasticsearchDriver {
     }
 }
 
+mod cheatsheet;
+
 #[async_trait]
 impl QueryDriver for ElasticsearchDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -46,6 +48,10 @@ impl QueryDriver for ElasticsearchDriver {
 
     /// The Dev-Tools-console vocabulary: HTTP verbs, the endpoints you
     /// reach for, and the Query-DSL keys that go in the body.
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
+    }
+
     fn keywords(&self) -> &'static [&'static str] {
         &[
             "GET",

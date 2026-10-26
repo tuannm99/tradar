@@ -118,6 +118,19 @@ impl Server {
         Ok(json!({"text": driver.option_snippet(entry, id, &columns)}))
     }
 
+    /// The driver's cheat sheet (`QueryDriver::cheatsheet`), in order:
+    /// `{entries: [{category, title, text}]}`. Static -- nothing is sent to
+    /// the database.
+    pub(super) async fn cheatsheet(&self, params: &Value) -> Result<Value, RpcError> {
+        let driver = self.driver(params)?;
+        let entries: Vec<Value> = driver
+            .cheatsheet()
+            .iter()
+            .map(|e| json!({"category": e.category, "title": e.title, "text": e.text}))
+            .collect();
+        Ok(json!({"entries": entries}))
+    }
+
     /// The statements `snippet` can generate on this connection, in menu
     /// order: `{options: [{id, label, hint}]}`. Create / Read / Update /
     /// Delete for most drivers; more where a driver has more basic shapes.

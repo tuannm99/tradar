@@ -14,6 +14,7 @@ use async_trait::async_trait;
 
 use tradar_query::QueryDriver;
 
+mod cheatsheet;
 mod convert;
 mod db_helpers;
 mod driver;

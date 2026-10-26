@@ -63,3 +63,34 @@ mod docker_session;
 mod parse;
 mod run;
 mod snippets;
+
+#[test]
+fn cheatsheet_is_well_formed() {
+    let problems = tradar_query::cheatsheet_problems(crate::cheatsheet::ENTRIES);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// An entry's text with every `${name}` filled with `x`.
+fn filled(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        out.push_str(&rest[..at]);
+        match rest[at..].find('}') {
+            Some(end) => rest = &rest[at + end + 1..],
+            None => break,
+        }
+        out.push('x');
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn every_cheatsheet_entry_parses() {
+    for entry in crate::cheatsheet::ENTRIES {
+        let text = filled(entry.text);
+        crate::shell::parse_shell_command(&text)
+            .unwrap_or_else(|e| panic!("`{}` does not parse: {e}\n{text}", entry.title));
+    }
+}

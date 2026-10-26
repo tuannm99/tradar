@@ -555,3 +555,22 @@ mod docker {
         );
     }
 }
+
+#[test]
+fn cheatsheet_is_well_formed() {
+    let problems = tradar_query::cheatsheet_problems(crate::cheatsheet::ENTRIES);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn every_cheatsheet_entry_is_one_statement() {
+    let driver = CassandraDriver::new("127.0.0.1:9042");
+    for entry in crate::cheatsheet::ENTRIES {
+        assert_eq!(
+            driver.split_statements(entry.text).len(),
+            1,
+            "`{}` is not one statement",
+            entry.title
+        );
+    }
+}

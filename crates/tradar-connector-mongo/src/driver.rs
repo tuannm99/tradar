@@ -83,6 +83,10 @@ impl QueryDriver for MongoDriver {
     /// keys *inside* a method's filter/update/pipeline argument, so every
     /// one MongoDB itself recognizes is fair to suggest regardless of which
     /// method it ends up nested in.
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
+    }
+
     fn keywords(&self) -> &'static [&'static str] {
         KEYWORDS
     }

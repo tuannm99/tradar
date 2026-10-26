@@ -13,6 +13,7 @@
 --   rowedit   editing rows in the results grid, commit preview, EXPLAIN
 --   complete  completion
 --   crud      CRUD statements for a table (:TradarCrud, schema panel `c`)
+--   cheatsheet  ready-made queries per driver (:TradarCheatsheet)
 --   refresh   re-running the result on screen (<leader>rR, :TradarWatch)
 --   addconn   :TradarAddConnection, the add-a-connection questions
 --   files     saving queries to the library / next to the buffer, :TradarOpen
@@ -35,6 +36,7 @@ require('tradar.rowedit')
 require('tradar.complete')
 require('tradar.files')
 require('tradar.crud')
+require('tradar.cheatsheet')
 require('tradar.refresh')
 require('tradar.addconn')
 
@@ -63,6 +65,7 @@ function M.attach(buf)
     map('n', 'c', function() M.connect() end, 'choose connection')
     map('n', 's', M.schema, 'schema panel')
     map('n', 't', function() require('tradar.telescope').tables() end, 'tables (telescope)')
+    map('n', 'k', function() M.cheatsheet() end, 'cheat sheet: ready-made queries for this connection')
     map('n', 'g', function() M.crud_command() end, 'generate create/read/update/delete for a table')
     map('n', 'h', function() require('tradar.telescope').history() end, 'history (telescope)')
     map('n', 'S', function() M.save() end, 'save to the query library')
@@ -77,6 +80,7 @@ function M.attach(buf)
         ('- `%sa` / `%sx` run all / cancel'):format(p, p),
         ('- `%sc` / `%ss` choose connection / schema panel'):format(p, p),
         ('- `%st` / `%sh` tables / history (telescope)'):format(p, p),
+        ('- `%sk` cheat sheet: ready-made queries for this connection (`<CR>` insert, `<C-r>` insert and run)'):format(p),
         ('- `%sg` generate create/read/update/delete for the table under the cursor (or pick one)'):format(p),
         ('- `%sS` / `%sf` save to / open from the query library (`:TradarSave`, `:TradarOpen`)'):format(p, p),
         ('- `%sm` load the next page of rows (scrolling does not)'):format(p),

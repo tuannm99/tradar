@@ -236,6 +236,8 @@ async fn with_empty_columns(
     }
 }
 
+mod cheatsheet;
+
 #[async_trait]
 impl QueryDriver for SqliteDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -257,6 +259,10 @@ impl QueryDriver for SqliteDriver {
         }
         self.pool = Some(pool);
         Ok(())
+    }
+
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
     }
 
     fn keywords(&self) -> &'static [&'static str] {

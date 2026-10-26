@@ -56,6 +56,8 @@ fn kind_rank(kind: &str) -> u8 {
     }
 }
 
+mod cheatsheet;
+
 #[async_trait]
 impl QueryDriver for CassandraDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -65,6 +67,10 @@ impl QueryDriver for CassandraDriver {
             .await?;
         self.session = Some(session);
         Ok(())
+    }
+
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
     }
 
     fn keywords(&self) -> &'static [&'static str] {

@@ -41,6 +41,8 @@ impl RedisDriver {
     }
 }
 
+mod cheatsheet;
+
 #[async_trait]
 impl QueryDriver for RedisDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -51,6 +53,10 @@ impl QueryDriver for RedisDriver {
 
     /// Commands worth completing. Redis has hundreds; these are the ones
     /// you type by hand, plus the two this driver formats specially.
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
+    }
+
     fn keywords(&self) -> &'static [&'static str] {
         &[
             "GET",
