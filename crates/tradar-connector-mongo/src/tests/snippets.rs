@@ -395,3 +395,66 @@ fn edit_source_refuses_a_chained_count() {
 
     assert_eq!(driver.edit_source(r#"db.users.find({}).count()"#), None);
 }
+
+#[test]
+fn snippet_menu_offers_the_basic_shapes_and_each_one_builds() {
+    let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+    let entry = users_with_fields();
+    let ids: Vec<&str> = driver.snippet_options().iter().map(|o| o.id).collect();
+    assert_eq!(
+        ids,
+        [
+            "read",
+            "find_latest",
+            "find_by_id",
+            "find_one",
+            "count",
+            "distinct",
+            "aggregate",
+            "create",
+            "update",
+            "delete"
+        ]
+    );
+    for id in ids {
+        assert!(
+            driver.option_snippet(&entry, id, &[]).is_some(),
+            "{id} builds nothing"
+        );
+    }
+    assert_eq!(driver.option_snippet(&entry, "nope", &[]), None);
+}
+
+#[test]
+fn snippet_menu_statements_are_what_the_shell_runs() {
+    let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+    let entry = users_with_fields();
+    let text = |id| driver.option_snippet(&entry, id, &[]).unwrap();
+
+    assert_eq!(
+        text("find_latest"),
+        "db.users.find({}).sort({_id: -1}).limit(20)"
+    );
+    assert_eq!(
+        text("find_by_id"),
+        "db.users.find({_id: ObjectId(\"<id>\")})"
+    );
+    assert_eq!(text("find_one"), "db.users.findOne({})");
+    assert_eq!(text("count"), "db.users.countDocuments({})");
+    // the first field after `_id` stands in for the one to pick
+    assert_eq!(text("distinct"), "db.users.distinct(\"name\")");
+    assert!(text("aggregate").contains("{$group: {_id: \"$name\", n: {$sum: 1}}}"));
+    // and the four basics still come from `crud_snippet`
+    assert_eq!(text("read"), "db.users.find({})");
+}
+
+#[test]
+fn snippet_menu_statements_without_placeholders_parse() {
+    let driver = MongoDriver::new("mongodb://127.0.0.1:1/db");
+    let entry = users_with_fields();
+    for id in ["find_latest", "find_one", "count", "distinct", "aggregate"] {
+        let text = driver.option_snippet(&entry, id, &[]).unwrap();
+        crate::shell::parse_shell_command(&text)
+            .unwrap_or_else(|e| panic!("{id}: `{text}` does not parse: {e}"));
+    }
+}

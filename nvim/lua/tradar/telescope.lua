@@ -17,8 +17,94 @@ local function deps()
   }
 end
 
+--- Whether telescope is installed (no complaint when it is not).
+function M.available()
+  return pcall(require, 'telescope.pickers')
+end
+
+--- A connection's target with the password hidden: `scheme://user:***@host`,
+--- `password=***`. The preview is for reading on screen.
+function M.mask_target(target)
+  target = tostring(target or '')
+  target = target:gsub('(://[^:/@%s]*):[^@/%s]*@', '%1:***@')
+  target = target:gsub('([Pp]assword=)[^&;%s]+', '%1***')
+  return target
+end
+
+local function connection_lines(c, state, current)
+  local lines = {
+    c.name,
+    string.rep('─', math.max(#c.name, 12)),
+    'driver:  ' .. c.driver,
+    'target:  ' .. M.mask_target(c.target),
+    '',
+  }
+  if not c.supported then
+    lines[#lines + 1] = 'this server build cannot serve a `' .. c.driver .. '` connection'
+  elseif not c.connected then
+    lines[#lines + 1] = 'not connected yet -- <CR> connects'
+  else
+    lines[#lines + 1] = 'connected'
+    if state.alive[c.name] == false then lines[#lines + 1] = 'last check: not answering' end
+    if state.idle[c.name] then lines[#lines + 1] = 'closed by the idle timeout -- the next call reconnects' end
+    if state.in_tx[c.name] then lines[#lines + 1] = 'a transaction is open' end
+  end
+  if current == c.name then lines[#lines + 1] = 'bound to this buffer' end
+  return lines
+end
+
+--- `:TradarConnect`: the saved connections in a picker with a preview of
+--- each (driver, target without the password, state). `<CR>` picks (calls
+--- `on_pick(name)`), `<C-a>` adds one, `<C-e>` opens the file. `list` is
+--- `connections.list`'s answer.
+function M.connections(list, on_pick, opts)
+  local t = deps()
+  if not t then return end
+  local tradar = require('tradar')
+  local state = require('tradar.ctx').state
+  opts = opts or {}
+  local current = vim.b.tradar_connection
+  t.pickers.new(opts, {
+    prompt_title = 'tradar connections  (<CR> connect · <C-a> add · <C-e> edit file)',
+    finder = t.finders.new_table({
+      results = list,
+      entry_maker = function(c)
+        local mark = c.connected and '●' or (c.supported and '○' or '✗')
+        return {
+          value = c,
+          ordinal = c.name .. ' ' .. c.driver,
+          display = ('%s %-20s %s'):format(mark, c.name, c.driver),
+        }
+      end,
+    }),
+    sorter = t.conf.generic_sorter(opts),
+    previewer = t.previewers.new_buffer_previewer({
+      title = 'connection',
+      define_preview = function(self, entry)
+        vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, connection_lines(entry.value, state, current))
+      end,
+    }),
+    attach_mappings = function(prompt_bufnr, map)
+      t.actions.select_default:replace(function()
+        local entry = t.state.get_selected_entry()
+        t.actions.close(prompt_bufnr)
+        if entry then on_pick(entry.value.name) end
+      end)
+      map({ 'i', 'n' }, '<C-a>', function()
+        t.actions.close(prompt_bufnr)
+        tradar.add_connection()
+      end)
+      map({ 'i', 'n' }, '<C-e>', function()
+        t.actions.close(prompt_bufnr)
+        tradar.edit_connections()
+      end)
+      return true
+    end,
+  }):find()
+end
+
 --- `<CR>` inserts the name where you were typing; `<C-o>` opens the table
---- (the driver's own "show me this" statement, run immediately).
+--- (the driver's own "show me this" statement, put in the buffer, not run).
 function M.tables(opts)
   local t = deps()
   if not t then return end

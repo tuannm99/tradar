@@ -3,7 +3,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tradar_query::CompletionSource;
-use tradar_query::CrudOp;
 use tradar_query::QueryDriver;
 
 use super::*;
@@ -97,13 +96,10 @@ impl Server {
     pub(super) async fn snippet(&self, params: &Value) -> Result<Value, RpcError> {
         let driver = self.driver(params)?;
         let name = str_param(params, "name")?;
-        let op = match params.get("op").and_then(Value::as_str).unwrap_or("read") {
-            "create" => CrudOp::Create,
-            "read" => CrudOp::Read,
-            "update" => CrudOp::Update,
-            "delete" => CrudOp::Delete,
-            other => return Err(RpcError::invalid(format!("unknown op `{other}`"))),
-        };
+        let id = params.get("op").and_then(Value::as_str).unwrap_or("read");
+        if !driver.snippet_options().iter().any(|o| o.id == id) {
+            return Err(RpcError::invalid(format!("unknown op `{id}`")));
+        }
         let schema = params.get("schema").and_then(Value::as_str);
         let columns: Vec<String> = params
             .get("columns")
@@ -119,7 +115,20 @@ impl Server {
             .iter()
             .find(|e| e.name == name && (schema.is_none() || e.schema.as_deref() == schema))
             .ok_or_else(|| RpcError::app(format!("no table `{name}` in the schema")))?;
-        Ok(json!({"text": driver.crud_snippet(entry, op, &columns)}))
+        Ok(json!({"text": driver.option_snippet(entry, id, &columns)}))
+    }
+
+    /// The statements `snippet` can generate on this connection, in menu
+    /// order: `{options: [{id, label, hint}]}`. Create / Read / Update /
+    /// Delete for most drivers; more where a driver has more basic shapes.
+    pub(super) async fn snippet_options(&self, params: &Value) -> Result<Value, RpcError> {
+        let driver = self.driver(params)?;
+        let options: Vec<Value> = driver
+            .snippet_options()
+            .iter()
+            .map(|o| json!({"id": o.id, "label": o.label, "hint": o.hint}))
+            .collect();
+        Ok(json!({"options": options}))
     }
 
     pub(super) async fn cancel(&self, params: &Value) -> Result<Value, RpcError> {

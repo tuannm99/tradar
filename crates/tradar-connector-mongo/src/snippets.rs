@@ -173,3 +173,85 @@ pub(crate) fn mongo_value_literal(value: &str) -> String {
     }
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
+
+/// The "generate" menu for a collection: the four basic statements plus the
+/// shapes people reach for first -- see `mongo_extra_snippet`.
+pub(crate) fn mongo_snippet_options() -> Vec<tradar_query::SnippetOption> {
+    use tradar_query::SnippetOption as O;
+    vec![
+        O {
+            id: "read",
+            label: "Find",
+            hint: "find({}) -- all documents",
+        },
+        O {
+            id: "find_latest",
+            label: "Find latest",
+            hint: "newest 20 by _id",
+        },
+        O {
+            id: "find_by_id",
+            label: "Find by _id",
+            hint: "one document by its _id",
+        },
+        O {
+            id: "find_one",
+            label: "Find one",
+            hint: "findOne({})",
+        },
+        O {
+            id: "count",
+            label: "Count",
+            hint: "countDocuments({})",
+        },
+        O {
+            id: "distinct",
+            label: "Distinct",
+            hint: "the distinct values of a field",
+        },
+        O {
+            id: "aggregate",
+            label: "Aggregate",
+            hint: "$match / $group / $sort skeleton",
+        },
+        O {
+            id: "create",
+            label: "Insert",
+            hint: "insertOne",
+        },
+        O {
+            id: "update",
+            label: "Update",
+            hint: "updateOne with $set",
+        },
+        O {
+            id: "delete",
+            label: "Delete",
+            hint: "deleteOne",
+        },
+    ]
+}
+
+/// The statements of `mongo_snippet_options` beyond the four `crud_snippet`
+/// builds. A field name comes from the collection's first field after
+/// `_id` when the schema knows one, else a `<field>` placeholder.
+pub(crate) fn mongo_extra_snippet(entry: &tradar_query::SchemaInfo, id: &str) -> Option<String> {
+    let collection = &entry.name;
+    let field = entry
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .find(|name| *name != "_id")
+        .unwrap_or("<field>");
+    Some(match id {
+        "find_latest" => format!("db.{collection}.find({{}}).sort({{_id: -1}}).limit(20)"),
+        "find_by_id" => format!("db.{collection}.find({{_id: ObjectId(\"<id>\")}})"),
+        "find_one" => format!("db.{collection}.findOne({{}})"),
+        "count" => format!("db.{collection}.countDocuments({{}})"),
+        "distinct" => format!("db.{collection}.distinct(\"{field}\")"),
+        "aggregate" => format!(
+            "db.{collection}.aggregate([\n  {{$match: {{}}}},\n  {{$group: {{_id: \"${field}\", n: {{$sum: 1}}}}}},\n  {{$sort: {{n: -1}}}}\n])"
+        ),
+        _ => return None,
+    })
+}

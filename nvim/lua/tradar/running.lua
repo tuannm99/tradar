@@ -321,6 +321,10 @@ function M.connect(name, after)
     if #usable == 0 then
       return notify('no saved connection this server can serve — add one with :TradarAddConnection (or edit the file: :TradarConnections)', vim.log.levels.WARN)
     end
+    -- Telescope, when installed: a preview of each connection beside the list.
+    if ctx.opts.connection_picker ~= 'ui' and require('tradar.telescope').available() then
+      return require('tradar.telescope').connections(list, go)
+    end
     local items = vim.list_extend(vim.deepcopy(usable), { { add = true }, { edit = true } })
     vim.ui.select(items, {
       prompt = 'tradar connection',

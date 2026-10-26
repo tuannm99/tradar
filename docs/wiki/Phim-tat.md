@@ -76,7 +76,7 @@ Lệnh: `:TradarExport csv|json|md|tsv [file]` ghi cả kết quả ra file; `:T
 
 | Picker | `<CR>` | Phím khác |
 |---|---|---|
-| bảng (`rt`) | chèn tên vào buffer | `<C-o>` sinh câu xem dòng vào buffer (không chạy), `<C-g>` sinh create/read/update/delete |
+| bảng (`rt`) | chèn tên vào buffer | `<C-o>` sinh câu xem dòng vào buffer (không chạy), `<C-g>` menu sinh câu lệnh (CRUD; Mongo thêm find by _id, count, distinct, aggregate…) |
 | lịch sử (`rh`) | dán câu xuống dưới con trỏ | `<C-r>` dán rồi chạy ngay |
 
 Cả hai theo connection của block/buffer đang đứng; preview tô màu theo dialect của câu.

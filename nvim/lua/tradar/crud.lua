@@ -15,11 +15,24 @@ local OPS = {
   { op = 'delete', label = 'Delete', hint = 'remove rows / documents' },
 }
 
+local BASIC = { create = true, read = true, update = true, delete = true }
+
 local function op_title(op)
   for _, o in ipairs(OPS) do
     if o.op == op then return o.label end
   end
   return op
+end
+
+--- The statements the connection's driver offers (`snippet.options`):
+--- `{ op, label, hint }` in menu order. A server without that method gets
+--- the four basic ones.
+local function menu_for(conn, cb)
+  ctx.call('snippet.options', { connection = conn }, function(r)
+    local items = {}
+    for _, o in ipairs(r.options or {}) do items[#items + 1] = { op = o.id, label = o.label, hint = o.hint } end
+    cb(#items > 0 and items or OPS)
+  end, function() cb(OPS) end)
 end
 
 --- Asks for columns until "Done": `cb(list)`; an empty list means "all /
@@ -96,15 +109,18 @@ function M.crud(buf, entry, op, columns)
     end)
   end
   local function with_op(chosen_op)
-    if columns then return go(chosen_op, columns) end
+    -- Only the four basic statements take a column choice.
+    if columns or not BASIC[chosen_op] then return go(chosen_op, columns or {}) end
     pick_columns(entry, chosen_op, function(cols) go(chosen_op, cols) end)
   end
   if op then return with_op(op) end
-  vim.ui.select(OPS, {
-    prompt = 'Generate for ' .. entry.name,
-    format_item = function(o) return ('%-7s %s'):format(o.label, o.hint) end,
-  }, function(o)
-    if o then with_op(o.op) end
+  menu_for(conn, function(items)
+    vim.ui.select(items, {
+      prompt = 'Generate for ' .. entry.name,
+      format_item = function(o) return ('%-12s %s'):format(o.label, o.hint) end,
+    }, function(o)
+      if o then with_op(o.op) end
+    end)
   end)
 end
 

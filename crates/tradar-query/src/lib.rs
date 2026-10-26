@@ -41,6 +41,53 @@ pub enum CrudOp {
     Delete,
 }
 
+impl CrudOp {
+    /// `create` / `read` / `update` / `delete` -- the ids `SnippetOption`
+    /// uses for the four basic statements.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "create" => Some(Self::Create),
+            "read" => Some(Self::Read),
+            "update" => Some(Self::Update),
+            "delete" => Some(Self::Delete),
+            _ => None,
+        }
+    }
+}
+
+/// One entry of the "generate a statement" menu for a table / collection --
+/// see `QueryDriver::snippet_options`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnippetOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub hint: &'static str,
+}
+
+/// The four statements every driver with a `crud_snippet` offers.
+pub const CRUD_OPTIONS: [SnippetOption; 4] = [
+    SnippetOption {
+        id: "create",
+        label: "Create",
+        hint: "insert a new row / document",
+    },
+    SnippetOption {
+        id: "read",
+        label: "Read",
+        hint: "select / find",
+    },
+    SnippetOption {
+        id: "update",
+        label: "Update",
+        hint: "change existing rows / documents",
+    },
+    SnippetOption {
+        id: "delete",
+        label: "Delete",
+        hint: "remove rows / documents",
+    },
+];
+
 #[async_trait]
 pub trait QueryDriver: Send + Sync {
     async fn connect(&mut self) -> anyhow::Result<()>;
@@ -230,6 +277,20 @@ pub trait QueryDriver: Send + Sync {
         _columns: &[String],
     ) -> Option<String> {
         None
+    }
+
+    /// The statements the "generate" menu offers for a table / collection.
+    /// Create / Read / Update / Delete by default; a driver with more
+    /// basic shapes worth a shortcut (Mongo: count, find by `_id`,
+    /// aggregate...) lists them here and builds them in `option_snippet`.
+    fn snippet_options(&self) -> Vec<SnippetOption> {
+        CRUD_OPTIONS.to_vec()
+    }
+
+    /// The statement for one of `snippet_options`' ids. By default the four
+    /// basic ids go to `crud_snippet`.
+    fn option_snippet(&self, entry: &SchemaInfo, id: &str, columns: &[String]) -> Option<String> {
+        self.crud_snippet(entry, CrudOp::from_id(id)?, columns)
     }
 }
 

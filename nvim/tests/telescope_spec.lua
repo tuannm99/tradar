@@ -134,4 +134,27 @@ keys('<C-x>')
 H.check('<C-x> deletes the file after confirming', H.wait(3000, function() return vim.fn.filereadable(lib .. '/daily.sql') == 0 end))
 H.check('... and leaves the others', vim.fn.filereadable(lib .. '/reports/weekly.sql') == 1)
 
+-- ── connections ─────────────────────────────────────────────────────────
+local tele = require('tradar.telescope')
+H.check('a password in a URL is hidden', tele.mask_target('postgres://ann:s3cret@db:5432/app') == 'postgres://ann:***@db:5432/app', tele.mask_target('postgres://ann:s3cret@db:5432/app'))
+H.check('...and password= in a DSN', tele.mask_target('host=db user=ann password=s3cret dbname=app') == 'host=db user=ann password=*** dbname=app')
+H.check('a target without one is untouched', tele.mask_target('/tmp/x.db') == '/tmp/x.db' and tele.mask_target('http://h:80/p') == 'http://h:80/p')
+
+H.sql_buffer('conn.sql', { '' })
+vim.cmd('TradarConnect')
+p = picker(1)
+H.check(':TradarConnect opens a telescope picker', p ~= nil and (p.prompt_title or ''):find('connections', 1, true) ~= nil, p and p.prompt_title)
+H.check('...listing the saved connection', p and #results(p) == 1 and results(p)[1].value.name == 'local')
+H.check('...marking it connected', p and results(p)[1].display:find('●', 1, true) ~= nil, p and results(p)[1].display)
+keys('<CR>')
+H.check('<CR> binds the buffer to it', H.wait(3000, function() return vim.b[H.sqlbuf].tradar_connection == 'local' end), tostring(vim.b[H.sqlbuf].tradar_connection))
+
+local ctx = require('tradar.ctx')
+ctx.opts.connection_picker = 'ui'
+local via_ui
+vim.ui.select = function(items, o, cb) via_ui = o.prompt; cb(nil) end
+t.connect()
+H.check("setup{ connection_picker = 'ui' } keeps the plain list", H.wait(3000, function() return via_ui == 'tradar connection' end), tostring(via_ui))
+ctx.opts.connection_picker = nil
+
 H.done()
