@@ -243,3 +243,58 @@ async fn ping_succeeds_against_a_running_server() {
 
     assert!(driver.ping().await.is_ok());
 }
+
+#[tokio::test]
+async fn requests_carry_a_user_agent_and_basic_auth() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // A tiny stand-in server that remembers the request head it was sent
+    // (`reqwest` adds its default headers at send time, not in `build()`).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let head = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = socket.read(&mut buf).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n")
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    });
+
+    let mut driver = ClickHouseDriver::new(&format!("http://ann:p%40ss@127.0.0.1:{port}/app"));
+    let parsed = parse_target(&driver.target).unwrap();
+    driver.base_url = parsed.base_url;
+    driver.database = parsed.database;
+    driver.user = parsed.user;
+    driver.password = parsed.password;
+    driver.run_sql("SELECT 1").await.unwrap();
+
+    let head = head.await.unwrap();
+    let lower = head.to_lowercase();
+    assert!(lower.contains("user-agent: tradar/"), "{head}");
+    // "ann:p@ss", decoded before it is encoded for the header
+    assert!(head.contains("YW5uOnBAc3M="), "{head}");
+    assert!(lower.starts_with("post /?database=app"), "{head}");
+}
+
+#[test]
+fn an_empty_403_says_a_proxy_may_be_refusing_it() {
+    let message = format_clickhouse_error(reqwest::StatusCode::FORBIDDEN, "", "SELECT 1");
+    assert!(
+        message.starts_with("clickhouse returned 403 Forbidden"),
+        "{message}"
+    );
+    assert!(message.contains("proxy or firewall"), "{message}");
+    // ClickHouse's own text wins when there is one
+    let own = format_clickhouse_error(
+        reqwest::StatusCode::FORBIDDEN,
+        "Code: 516. DB::Exception: ann: Authentication failed",
+        "SELECT 1",
+    );
+    assert!(
+        own.contains("Authentication failed") && !own.contains("proxy"),
+        "{own}"
+    );
+}
