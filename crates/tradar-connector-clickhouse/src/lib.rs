@@ -272,6 +272,8 @@ fn table_from_json(json: &serde_json::Value) -> QueryResult {
     }
 }
 
+mod cheatsheet;
+
 #[async_trait]
 impl QueryDriver for ClickHouseDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -287,6 +289,10 @@ impl QueryDriver for ClickHouseDriver {
         // rather than just "something answered".
         self.run_sql("SELECT 1").await?;
         Ok(())
+    }
+
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
     }
 
     fn keywords(&self) -> &'static [&'static str] {

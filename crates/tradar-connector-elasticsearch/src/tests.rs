@@ -20,3 +20,40 @@ mod edit;
 mod misc;
 mod request;
 mod response;
+
+#[test]
+fn cheatsheet_is_well_formed() {
+    let problems = tradar_query::cheatsheet_problems(crate::cheatsheet::ENTRIES);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// An entry's text with every `${name}` filled with `x`.
+fn filled(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        out.push_str(&rest[..at]);
+        match rest[at..].find('}') {
+            Some(end) => rest = &rest[at + end + 1..],
+            None => break,
+        }
+        out.push('x');
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn every_cheatsheet_entry_is_one_request_with_valid_json() {
+    let driver = ElasticsearchDriver::new("http://127.0.0.1:1");
+    for entry in crate::cheatsheet::ENTRIES {
+        let text = filled(entry.text);
+        assert_eq!(driver.split_statements(&text).len(), 1, "`{}`", entry.title);
+        let (_, _, body) = crate::request::parse_query(&text)
+            .unwrap_or_else(|| panic!("`{}` is not a request:\n{text}", entry.title));
+        if let Some(body) = body {
+            crate::request::validate_json_body(&body)
+                .unwrap_or_else(|e| panic!("`{}` has a bad body: {e}\n{text}", entry.title));
+        }
+    }
+}

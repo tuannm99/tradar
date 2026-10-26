@@ -88,6 +88,64 @@ pub const CRUD_OPTIONS: [SnippetOption; 4] = [
     },
 ];
 
+/// One ready-made query of a driver's cheat sheet -- see
+/// `QueryDriver::cheatsheet`. `text` is in the driver's own language and
+/// may hold `${name}` placeholders (a table, a field, a pattern...) that the
+/// editor asks for when the query is run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheatEntry {
+    pub category: &'static str,
+    pub title: &'static str,
+    pub text: &'static str,
+}
+
+impl CheatEntry {
+    pub const fn new(category: &'static str, title: &'static str, text: &'static str) -> Self {
+        Self {
+            category,
+            title,
+            text,
+        }
+    }
+}
+
+/// What is wrong with a cheat sheet, one line per problem: an empty field,
+/// a repeated title, a `${` without its `}`. For each driver's own test.
+pub fn cheatsheet_problems(entries: &[CheatEntry]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if entries.is_empty() {
+        problems.push("the cheat sheet is empty".to_string());
+    }
+    for entry in entries {
+        let who = format!("`{}`", entry.title);
+        if entry.category.trim().is_empty() || entry.title.trim().is_empty() {
+            problems.push(format!("{who}: empty category or title"));
+        }
+        if entry.text.trim().is_empty() {
+            problems.push(format!("{who}: empty text"));
+        }
+        if entry.text != entry.text.trim() {
+            problems.push(format!("{who}: text has leading or trailing whitespace"));
+        }
+        if !seen.insert(entry.title) {
+            problems.push(format!("{who}: title is used twice"));
+        }
+        let mut rest = entry.text;
+        while let Some(at) = rest.find("${") {
+            let after = &rest[at + 2..];
+            match after.find('}') {
+                Some(end) if !after[..end].contains("${") => rest = &after[end + 1..],
+                _ => {
+                    problems.push(format!("{who}: a `${{` has no closing `}}`"));
+                    break;
+                }
+            }
+        }
+    }
+    problems
+}
+
 #[async_trait]
 pub trait QueryDriver: Send + Sync {
     async fn connect(&mut self) -> anyhow::Result<()>;
@@ -277,6 +335,14 @@ pub trait QueryDriver: Send + Sync {
         _columns: &[String],
     ) -> Option<String> {
         None
+    }
+
+    /// Ready-made queries for this driver -- the "cheat sheet" a user would
+    /// otherwise search for: what is in the database, what is running, how
+    /// big things are, the usual shapes of a query. Static text in the
+    /// driver's own language (see `CheatEntry`); empty by default.
+    fn cheatsheet(&self) -> &'static [CheatEntry] {
+        &[]
     }
 
     /// The statements the "generate" menu offers for a table / collection.

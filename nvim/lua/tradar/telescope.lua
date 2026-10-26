@@ -103,6 +103,54 @@ function M.connections(list, on_pick, opts)
   }):find()
 end
 
+--- The cheat sheet picker: `entries` is the server's `cheatsheet` answer.
+--- `<CR>` calls `on_pick(entry, false)`, `<C-r>` calls `on_pick(entry, true)`.
+--- Typing matches the category, the title and the query text itself.
+function M.cheatsheet(entries, driver, on_pick, opts)
+  local t = deps()
+  if not t then return end
+  opts = opts or {}
+  local ft = ({ mongo = 'mongo', elasticsearch = 'esq', redis = 'redis' })[driver or ''] or 'sql'
+  t.pickers.new(opts, {
+    prompt_title = 'tradar cheat sheet  (<CR> insert · <C-r> insert and run · <C-e> your own)',
+    finder = t.finders.new_table({
+      results = entries,
+      entry_maker = function(e)
+        return {
+          value = e,
+          ordinal = e.category .. ' ' .. e.title .. ' ' .. e.text,
+          display = ('%-12s %s'):format((e.user and '★ ' or '') .. e.category, e.title),
+        }
+      end,
+    }),
+    sorter = t.conf.generic_sorter(opts),
+    previewer = t.previewers.new_buffer_previewer({
+      title = 'query',
+      define_preview = function(self, entry)
+        vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, vim.split(entry.value.text, '\n', { plain = true }))
+        vim.bo[self.state.bufnr].filetype = ft
+      end,
+    }),
+    attach_mappings = function(prompt_bufnr, map)
+      t.actions.select_default:replace(function()
+        local entry = t.state.get_selected_entry()
+        t.actions.close(prompt_bufnr)
+        if entry then on_pick(entry.value, false) end
+      end)
+      map({ 'i', 'n' }, '<C-r>', function()
+        local entry = t.state.get_selected_entry()
+        t.actions.close(prompt_bufnr)
+        if entry then on_pick(entry.value, true) end
+      end)
+      map({ 'i', 'n' }, '<C-e>', function()
+        t.actions.close(prompt_bufnr)
+        if opts.on_edit then opts.on_edit() end
+      end)
+      return true
+    end,
+  }):find()
+end
+
 --- `<CR>` inserts the name where you were typing; `<C-o>` opens the table
 --- (the driver's own "show me this" statement, put in the buffer, not run).
 function M.tables(opts)

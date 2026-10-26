@@ -941,3 +941,70 @@ async fn a_socket_path_too_long_for_the_os_is_a_clear_error() {
     assert_eq!(fits.as_os_str().len(), tradar_server::MAX_SOCKET_PATH);
     bind(&fits).await.unwrap();
 }
+
+#[tokio::test]
+async fn cheatsheet_is_the_drivers_queries_after_the_users_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = connected(dir.path()).await;
+
+    // Nothing of the user's yet: the built-in queries, none marked as theirs.
+    let plain = call(&server, "cheatsheet", json!({"connection": "local"})).await;
+    let built_in = ok(&plain)["entries"].as_array().unwrap().len();
+    assert!(built_in >= 10, "{plain}");
+    assert!(ok(&plain)["entries"][0]["user"] == false);
+    assert!(ok(&plain)["warnings"].as_array().unwrap().is_empty());
+    assert!(
+        ok(&plain)["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("cheatsheet.toml")
+    );
+
+    // Read again on every call: no restart after an edit.
+    std::fs::write(
+        dir.path().join("cheatsheet.toml"),
+        r#"
+[[entry]]
+title = "Mine for everyone"
+text = "select 1"
+
+[[entry]]
+driver = "sqlite"
+connection = "local"
+category = "Orders"
+title = "Mine for sqlite local"
+text = "select 2"
+
+[[entry]]
+driver = "postgres"
+title = "Not for sqlite"
+text = "select 3"
+
+[[entry]]
+title = "No text"
+"#,
+    )
+    .unwrap();
+    let merged = call(&server, "cheatsheet", json!({"connection": "local"})).await;
+    let entries = ok(&merged)["entries"].as_array().unwrap();
+    let titles: Vec<&str> = entries
+        .iter()
+        .map(|e| e["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles[0], "Mine for everyone", "{titles:?}");
+    assert_eq!(titles[1], "Mine for sqlite local");
+    assert!(!titles.contains(&"Not for sqlite"));
+    assert_eq!(entries.len(), built_in + 2);
+    assert_eq!(entries[0]["user"], true);
+    assert_eq!(entries[0]["category"], "Mine");
+    assert_eq!(entries[1]["category"], "Orders");
+    assert_eq!(entries[2]["user"], false);
+    let warnings = ok(&merged)["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+
+    // A file that is not TOML costs a warning, not the cheat sheet.
+    std::fs::write(dir.path().join("cheatsheet.toml"), "[[entry]\n").unwrap();
+    let broken = call(&server, "cheatsheet", json!({"connection": "local"})).await;
+    assert_eq!(ok(&broken)["entries"].as_array().unwrap().len(), built_in);
+    assert_eq!(ok(&broken)["warnings"].as_array().unwrap().len(), 1);
+}

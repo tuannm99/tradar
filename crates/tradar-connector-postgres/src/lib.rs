@@ -222,6 +222,8 @@ fn format_pg_error(error: sqlx::Error, query: &str) -> anyhow::Error {
     anyhow::anyhow!(message)
 }
 
+mod cheatsheet;
+
 #[async_trait]
 impl QueryDriver for PostgresDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -237,6 +239,10 @@ impl QueryDriver for PostgresDriver {
                 .await?,
         );
         Ok(())
+    }
+
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
     }
 
     fn keywords(&self) -> &'static [&'static str] {

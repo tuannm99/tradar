@@ -35,6 +35,7 @@ tradar-connector-kafka = { path = "../tradar-connector-kafka", optional = true, 
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
 serde_json = "1"
+toml = "0.8"
 anyhow = "1"
 async-trait = "0.1"
 

@@ -484,3 +484,40 @@ async fn browse_entry_on_an_unsupported_type_fails_clearly() {
         "error should name the unsupported type: {error}"
     );
 }
+
+#[test]
+fn cheatsheet_is_well_formed() {
+    let problems = tradar_query::cheatsheet_problems(crate::cheatsheet::ENTRIES);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// An entry's text with every `${name}` filled with `x`.
+fn filled(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        out.push_str(&rest[..at]);
+        match rest[at..].find('}') {
+            Some(end) => rest = &rest[at + end + 1..],
+            None => break,
+        }
+        out.push('x');
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn every_cheatsheet_entry_is_one_command() {
+    let driver = RedisDriver::new("redis://127.0.0.1:1");
+    for entry in crate::cheatsheet::ENTRIES {
+        let text = filled(entry.text);
+        assert_eq!(driver.split_statements(&text).len(), 1, "`{}`", entry.title);
+        let words = crate::command::split_command(&text).unwrap();
+        assert!(
+            !words.is_empty() && words[0] == words[0].to_uppercase(),
+            "`{}`",
+            entry.title
+        );
+    }
+}

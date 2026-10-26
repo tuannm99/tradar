@@ -108,6 +108,7 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 |---|---|
 | `rr` | chạy statement dưới con trỏ (visual: phần chọn) |
 | `ra` / `rx` | chạy cả file / huỷ query đang chạy |
+| `rk` | cheatsheet — query mẫu có sẵn của driver (`:TradarCheatsheet`): telescope có preview, `<CR>` chèn vào buffer, `<C-r>` chèn và chạy; `${table}`… được hỏi lúc chạy; `<C-e>` / `:TradarCheatsheetEdit` mở `cheatsheet.toml` để thêm query của riêng bạn (theo driver / connection, hiện trước, có `★`); `setup{ cheatsheet_picker = 'ui' }` bỏ telescope |
 | `rt` / `rh` | telescope: bảng (`<CR>` chèn tên, `<C-o>` sinh câu xem dòng vào buffer — không chạy, `<C-g>` mở menu sinh câu lệnh: create/read/update/delete, Mongo thêm find latest / by _id / one, count, distinct, aggregate) / history (`<CR>` dán, `<C-r>` chạy) |
 | `rg` | `:TradarCrud [create\|read\|update\|delete]`: sinh câu lệnh mẫu của bảng dưới con trỏ vào buffer (không chạy); `c` trong panel schema |
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |

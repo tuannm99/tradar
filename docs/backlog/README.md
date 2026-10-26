@@ -58,6 +58,7 @@ Nhóm theo chủ đề, trong mỗi nhóm theo thứ tự thời gian. Mục m�
 - [`nvim-ux-batch-2026-10-22.md`](nvim-ux-batch-2026-10-22.md) — `zw`/`zW` hiện trọn cột, statusline `(idle)`, Tab-complete connection, thông báo một ngôn ngữ, `:Tradar <lệnh-con>`
 - [`nvim-crud-generator-2026-10-22.md`](nvim-crud-generator-2026-10-22.md) — `:TradarCrud` / `<leader>rg`: sinh create/read/update/delete cho một bảng, chọn cột, chèn vào buffer
 - [`small-fixes-socket-telescope-2026-10-22.md`](small-fixes-socket-telescope-2026-10-22.md) — lỗi rõ + đường dẫn mặc định ngắn khi socket quá dài; spec cho picker telescope (`deps.sh`)
+- [`nvim-cheatsheet-2026-10-26.md`](nvim-cheatsheet-2026-10-26.md) — cheatsheet query mẫu theo driver (protocol 1.15), `<leader>rk`, telescope có preview
 - [`nvim-snippet-menu-connection-picker-2026-10-26.md`](nvim-snippet-menu-connection-picker-2026-10-26.md) — menu sinh câu lệnh theo driver (Mongo: find by _id, count, aggregate…; protocol 1.14), picker connection bằng telescope
 - [`nvim-result-history-filter-diff-2026-10-24.md`](nvim-result-history-filter-diff-2026-10-24.md) — lịch sử lần chạy (`[R`/`]R`), ghim tab, lọc/sắp xếp (`rF`/`ro`), `:TradarDiff`, gợi ý giá trị `${}`
 - [`nvim-result-tabs-2026-10-23.md`](nvim-result-tabs-2026-10-23.md) — tab kết quả theo bảng/collection/index/key, thanh tab click được, `<leader>r1..9`/`rx`

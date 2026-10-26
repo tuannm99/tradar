@@ -19,6 +19,7 @@ use tradar_query::QueryDriver;
 use crate::extension::{Ctx, Extension};
 use crate::protocol::{METHOD_NOT_FOUND, RpcError, StoredResult};
 
+mod cheatsheet;
 mod connections;
 mod editing;
 pub mod idle;
@@ -264,6 +265,7 @@ impl Server {
             "keywords" => self.keywords(params),
             "snippet" => self.snippet(params).await,
             "snippet.options" => self.snippet_options(params).await,
+            "cheatsheet" => self.cheatsheet(params).await,
             "complete" => self.complete(params),
             "edit.source" => self.edit_source(params),
             "edit.sql" => self.edit_sql(params),

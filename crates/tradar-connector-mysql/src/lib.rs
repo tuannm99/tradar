@@ -220,6 +220,8 @@ async fn with_empty_columns(
     }
 }
 
+mod cheatsheet;
+
 #[async_trait]
 impl QueryDriver for MySqlDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -233,6 +235,10 @@ impl QueryDriver for MySqlDriver {
                 .await?,
         );
         Ok(())
+    }
+
+    fn cheatsheet(&self) -> &'static [tradar_query::CheatEntry] {
+        crate::cheatsheet::ENTRIES
     }
 
     fn keywords(&self) -> &'static [&'static str] {
