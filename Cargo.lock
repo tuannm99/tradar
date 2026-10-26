@@ -5708,6 +5708,7 @@ dependencies = [
  "testcontainers",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tonic-build",
  "tonic-reflection",

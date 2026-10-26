@@ -19,6 +19,7 @@ use tradar_query::QueryDriver;
 use crate::extension::{Ctx, Extension};
 use crate::protocol::{METHOD_NOT_FOUND, RpcError, StoredResult};
 
+mod cheatsheet;
 mod connections;
 mod editing;
 pub mod idle;

@@ -112,7 +112,7 @@ Mọi lệnh dưới đây cũng gọi được qua một lệnh chung `:Tradar 
 | Connection | `:TradarConnect [tên]`, `:TradarAddConnection` (thêm bằng hỏi đáp, thử kết nối ngay), `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền), `:TradarLog` (xem log của server) |
 | Chạy | `:TradarRun` (nhận range), `:TradarRunAll`, `:TradarCancel`, `:TradarMore` |
 | Điều hướng | `:TradarSchema`, `:TradarTables`, `:TradarHistory` |
-| Cheatsheet | `:TradarCheatsheet` (`rk`) |
+| Cheatsheet | `:TradarCheatsheet` (`rk`), `:TradarCheatsheetEdit` (query của riêng bạn, `cheatsheet.toml`) |
 | Sinh câu lệnh | `:TradarCrud [create\|read\|update\|delete]` (`rg`) — chèn câu lệnh mẫu của bảng vào buffer, không chạy |
 | Lưu / mở query | `:TradarSave[!] [tên]` (vào thư viện, `<leader>rS`), `:TradarSaveHere[!] [đường dẫn]` (cạnh file hiện tại), `:TradarOpen` (duyệt thư viện, `<leader>rf`) |
 | Kết quả | `:TradarResults` (chọn tab), `:TradarRefresh`, `:TradarWatch [giây\|off]`, `:TradarFilter [biểu thức\|off]`, `:TradarDiff [n]`, `:TradarResultsZoom` |

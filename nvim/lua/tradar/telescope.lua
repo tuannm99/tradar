@@ -112,14 +112,14 @@ function M.cheatsheet(entries, driver, on_pick, opts)
   opts = opts or {}
   local ft = ({ mongo = 'mongo', elasticsearch = 'esq', redis = 'redis' })[driver or ''] or 'sql'
   t.pickers.new(opts, {
-    prompt_title = 'tradar cheat sheet  (<CR> insert · <C-r> insert and run)',
+    prompt_title = 'tradar cheat sheet  (<CR> insert · <C-r> insert and run · <C-e> your own)',
     finder = t.finders.new_table({
       results = entries,
       entry_maker = function(e)
         return {
           value = e,
           ordinal = e.category .. ' ' .. e.title .. ' ' .. e.text,
-          display = ('%-12s %s'):format(e.category, e.title),
+          display = ('%-12s %s'):format((e.user and '★ ' or '') .. e.category, e.title),
         }
       end,
     }),
@@ -141,6 +141,10 @@ function M.cheatsheet(entries, driver, on_pick, opts)
         local entry = t.state.get_selected_entry()
         t.actions.close(prompt_bufnr)
         if entry then on_pick(entry.value, true) end
+      end)
+      map({ 'i', 'n' }, '<C-e>', function()
+        t.actions.close(prompt_bufnr)
+        if opts.on_edit then opts.on_edit() end
       end)
       return true
     end,

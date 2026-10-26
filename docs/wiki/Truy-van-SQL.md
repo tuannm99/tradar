@@ -121,11 +121,33 @@ Hai chỗ để lưu một query:
 
 ## Cheatsheet: query mẫu có sẵn
 
-`<leader>rk` (hoặc `:TradarCheatsheet`) mở danh sách **query mẫu của đúng loại database** đang dùng — khỏi nhớ và khỏi đi tìm: liệt kê bảng kèm dung lượng, câu đang chạy, ai đang khoá ai, index không dùng, `system.parts`/`query_log` của ClickHouse, `SCAN`/`INFO` của Redis, `_cat/indices` của Elasticsearch, `$group` của Mongo… Có nhóm (Explore, Activity, Size, Health, Query…), mỗi mục một câu.
+`<leader>rk` (hoặc `:TradarCheatsheet`) mở danh sách **query mẫu của đúng loại database** đang dùng — khỏi nhớ và khỏi đi tìm. Mỗi driver có 50–100 câu (Postgres 89, MySQL 87, ClickHouse 82, Mongo 82, Elasticsearch 79, Redis 95, SQLite 70, Cassandra 53) chia nhóm, mỗi mục một câu, bằng đúng ngôn ngữ của driver:
+
+- **Explore / Activity / Size / Health** — bảng kèm dung lượng, câu đang chạy, ai đang khoá ai, index không dùng, `system.parts`/`query_log` (ClickHouse), `INFO`/`SLOWLOG` (Redis), `_cat/*` (Elasticsearch), `currentOp` (Mongo).
+- **Query / SQL syntax** — cú pháp hay phải tra: CTE, window function, top-N mỗi nhóm, JOIN không khớp, `EXISTS`, `CASE`, phân trang keyset, ngày tháng, JSON; `argMax`/`LIMIT BY`/`FINAL` (ClickHouse); `bool`/`range`/aggregation (Elasticsearch); `$lookup`/`$group`/`$unwind` (Mongo); `ALLOW FILTERING`/`token()` (Cassandra).
+- **Write** — `INSERT`, upsert (`ON CONFLICT` / `ON DUPLICATE KEY` / `$set`…), `UPDATE`, `DELETE`, `SET`/`EXPIRE`/`ZADD` (Redis), `_update_by_query` (Elasticsearch). Chạy qua guard như mọi câu lệnh ghi (hỏi lại khi `DELETE`/`UPDATE` không có `WHERE`).
+- **Schema / Admin / Transaction** — `CREATE TABLE`, thêm/đổi cột, tạo index (Postgres `CONCURRENTLY`), `VACUUM`, `KILL`, tạo user và `GRANT`, `BEGIN`/`SAVEPOINT`.
 
 - Có telescope: danh sách có **khung xem trước** là cả câu lệnh, gõ để lọc theo nhóm, tên **hoặc nội dung câu**. `<CR>` chèn câu vào buffer (dưới dòng con trỏ, chưa chạy); `<C-r>` chèn rồi chạy luôn. Không có telescope (hoặc `setup{ cheatsheet_picker = 'ui' }`) thì dùng danh sách `vim.ui.select`, chỉ chèn.
 - Chỗ cần điền là `${table}`, `${column}`, `${pattern}`… — đúng cú pháp tham số ở trên: lúc chạy plugin hỏi giá trị (nhớ giá trị lần trước, `<Tab>` gợi ý), buffer vẫn giữ `${...}` để dùng lại.
-- Query nằm trong server (mỗi driver một bộ, đúng ngôn ngữ native của nó), nên mọi phiên Neovim dùng chung. Bộ nào cũng được test: SQLite chạy thật từng câu, Mongo/Redis/Elasticsearch/SQL kiểm tra cú pháp đọc được.
+- Query nằm trong server (mỗi driver một bộ, đúng ngôn ngữ native của nó), nên mọi phiên Neovim dùng chung.
+
+**Thêm query của riêng bạn:** `:TradarCheatsheetEdit` (hoặc `<C-e>` trong picker) mở `cheatsheet.toml` cạnh `connections.toml` (có template). Mỗi query là một bảng `[[entry]]`:
+
+```toml
+[[entry]]
+driver = "postgres"       # tuỳ chọn: chỉ cho loại này; bỏ trống = mọi loại
+connection = "prod"       # tuỳ chọn: chỉ cho connection này
+category = "Đơn hàng"     # tuỳ chọn, mặc định "Mine"
+title = "Đơn trong 1 giờ qua"
+text = """
+select * from orders where created_at > now() - interval '1 hour'
+"""
+```
+
+Query của bạn hiện **trước** bộ có sẵn, đánh dấu `★`. File được đọc lại mỗi lần mở cheatsheet nên lưu là có hiệu lực, không cần restart; mục thiếu `title`/`text` hoặc file sai cú pháp chỉ báo cảnh báo, bộ có sẵn vẫn hiện. `${tên}` trong `text` cũng được hỏi lúc chạy.
+
+Bộ nào cũng được test: SQLite chạy thật từng câu (kể cả ghi và DDL) trên database tạm; Mongo parse từng câu bằng shell của chính driver; Elasticsearch kiểm JSON body; các driver còn lại kiểm mỗi mục đúng một câu lệnh. Câu mẫu của Postgres, MySQL, ClickHouse, Cassandra chưa được chạy thử trên server thật — nếu câu nào lỗi trên phiên bản của bạn, báo để sửa.
 
 ## Tham số trong câu lệnh
 

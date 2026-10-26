@@ -78,6 +78,30 @@ H.check('<C-r> runs it and asks for the ${table}', H.wait(5000, function() retur
 H.check('...the rows of that table are shown', H.wait(5000, function() return H.text():find('ann', 1, true) ~= nil end), H.text())
 H.check('the buffer keeps ${table} for the next time', buf_text():find('${table}', 1, true) ~= nil, buf_text())
 
+-- your own queries (cheatsheet.toml beside connections.toml)
+local cfg = os.getenv('XDG_CONFIG_HOME') .. '/tradar/cheatsheet.toml'
+H.check(':TradarCheatsheetEdit starts from a commented template', (function()
+  vim.cmd('TradarCheatsheetEdit')
+  H.wait(3000, function() return vim.api.nvim_buf_get_name(0):find('cheatsheet.toml', 1, true) ~= nil end)
+  local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
+  return text:find('[[entry]]', 1, true) ~= nil and vim.bo.filetype == 'toml'
+end)())
+local f = io.open(cfg, 'w')
+f:write('[[entry]]\ncategory = "Orders"\ntitle = "My people query"\ntext = "select name from people order by id"\n\n[[entry]]\ntitle = "broken"\n')
+f:close()
+vim.api.nvim_set_current_buf(H.sqlbuf)
+vim.api.nvim_buf_set_lines(H.sqlbuf, 0, -1, false, { '' })
+vim.api.nvim_win_set_cursor(0, { 1, 0 })
+H.notes = {}
+vim.cmd('TradarCheatsheet')
+p = picker(10)
+H.check('your entry is listed first, marked', p and results(p)[1].value.title == 'My people query' and results(p)[1].display:find('★', 1, true) ~= nil, p and results(p)[1].display)
+H.check('a broken entry is reported, not fatal', #H.notes_with('entry 2 needs a `title` and a `text`') == 1, vim.inspect(H.notes))
+keys('<CR>')
+H.check('picking it puts your query in the buffer', H.wait(3000, function() return buf_text():find('select name from people order by id', 1, true) ~= nil end), buf_text())
+os.remove(cfg)
+vim.api.nvim_set_current_buf(H.sqlbuf)
+
 -- no telescope: a plain list
 ctx.opts.cheatsheet_picker = 'ui'
 local listed
