@@ -21,7 +21,7 @@ Quy ước: `<leader>r` là **tiền tố** mặc định, đổi bằng `setup{
 | `rz` | n | phóng cửa sổ kết quả ra toàn màn hình (và nhảy vào đó); bấm lại để trả về cỡ cũ và quay lại editor |
 | `re` | n | `EXPLAIN` câu dưới con trỏ (chỉ SQL; không bao giờ `ANALYZE`) |
 | `K` | n | thông tin bảng/cột dưới con trỏ (không có thì rơi về LSP hover) |
-| `gd` | n | mở bảng dưới con trỏ (không có thì rơi về LSP go-to-definition) |
+| `gd` | n | sinh câu xem dòng của bảng dưới con trỏ vào buffer, chưa chạy (không có bảng thì rơi về LSP go-to-definition) |
 | `<C-x><C-o>` | i | completion qua `omnifunc` (hoặc nguồn `tradar.blink` của `blink.cmp`, tự động sau `.`) |
 
 ## 2. Buffer kết quả (`tradar://results`)
@@ -67,7 +67,7 @@ Lệnh: `:TradarExport csv|json|md|tsv [file]` ghi cả kết quả ra file; `:T
 |---|---|
 | `<CR>` | chèn tên bảng/cột vào buffer query; trên thư mục schema thì gập/mở |
 | `<Tab>` | gập/mở schema hoặc bảng dưới con trỏ |
-| `o` | mở bảng dưới con trỏ (chạy câu "xem dòng" của driver) |
+| `o` | sinh câu "xem dòng" của driver cho bảng dưới con trỏ vào buffer (không chạy; `rr` để chạy) |
 | `r` | làm mới schema (sau khi DDL/migration ở nơi khác) |
 | `/` | tìm trong cây như mọi buffer |
 | `q` | đóng |
@@ -76,7 +76,7 @@ Lệnh: `:TradarExport csv|json|md|tsv [file]` ghi cả kết quả ra file; `:T
 
 | Picker | `<CR>` | Phím khác |
 |---|---|---|
-| bảng (`rt`) | chèn tên vào buffer | `<C-o>` mở bảng (chạy ngay), `<C-g>` sinh create/read/update/delete |
+| bảng (`rt`) | chèn tên vào buffer | `<C-o>` sinh câu xem dòng vào buffer (không chạy), `<C-g>` sinh create/read/update/delete |
 | lịch sử (`rh`) | dán câu xuống dưới con trỏ | `<C-r>` dán rồi chạy ngay |
 
 Cả hai theo connection của block/buffer đang đứng; preview tô màu theo dialect của câu.
