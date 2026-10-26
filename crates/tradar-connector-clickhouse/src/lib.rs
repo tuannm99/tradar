@@ -44,6 +44,17 @@ struct ClickHouseDriver {
     client: reqwest::Client,
 }
 
+/// The HTTP client, with a `User-Agent` of its own. `reqwest` sends none by
+/// default, and a proxy or WAF in front of ClickHouse (nginx rules, Cloudflare,
+/// an API gateway) commonly answers a request without one -- while `curl`, which
+/// has one, gets through -- with a bare `403 Forbidden`.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("tradar/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 impl ClickHouseDriver {
     fn new(target: &str) -> Self {
         Self {
@@ -52,7 +63,7 @@ impl ClickHouseDriver {
             database: None,
             user: None,
             password: None,
-            client: reqwest::Client::new(),
+            client: http_client(),
         }
     }
 
@@ -140,7 +151,14 @@ fn parse_target(target: &str) -> anyhow::Result<ParsedTarget> {
 fn format_clickhouse_error(status: reqwest::StatusCode, body: &str, sql: &str) -> String {
     let first_line = body.lines().next().unwrap_or("").trim();
     let message = if first_line.is_empty() {
-        format!("clickhouse returned {status}")
+        let hint = if status == reqwest::StatusCode::FORBIDDEN
+            || status == reqwest::StatusCode::UNAUTHORIZED
+        {
+            " (no message from ClickHouse -- a proxy or firewall in front of it may be refusing the request)"
+        } else {
+            ""
+        };
+        format!("clickhouse returned {status}{hint}")
     } else {
         format!("clickhouse returned {status}: {first_line}")
     };
