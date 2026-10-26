@@ -29,14 +29,17 @@ function M.insert_text(buf, text)
   vim.api.nvim_put({ text }, 'c', false, true)
 end
 
---- Generates the driver's own "show me this table" statement and runs it.
+--- Generates the driver's own "show me this table" statement and puts it in
+--- the buffer; `<leader>rr` runs it (picking a table should not execute
+--- anything). `setup{ open_runs = true }` runs it at once, as before.
 function M.open_table(buf, entry)
   local win = vim.fn.bufwinid(buf)
   local conn = M.block_connection(buf, win ~= -1 and vim.api.nvim_win_get_cursor(win)[1] or 1)
   if not conn then return end
   call('snippet', { connection = conn, name = entry.name, schema = entry.schema, op = 'read' }, function(r)
     if not r.text then return notify('this connector has no snippet for that', vim.log.levels.WARN) end
-    ctx.run_text(buf, r.text, 0, 0)
+    if ctx.opts.open_runs then return ctx.run_text(buf, r.text, 0, 0) end
+    ctx.insert_statement(buf, r.text)
   end)
 end
 
@@ -95,7 +98,7 @@ function M.schema()
       local node = node_at_cursor()
       if not (node and node.entry) then return notify('put the cursor on a table', vim.log.levels.WARN) end
       if state.sql_buf and vim.api.nvim_buf_is_valid(state.sql_buf) then M.open_table(state.sql_buf, node.entry) end
-    end, { buffer = buf, desc = 'tradar: open the table under the cursor (show its rows)' })
+    end, { buffer = buf, desc = 'tradar: put the "show rows" statement of the table under the cursor in the buffer' })
     vim.keymap.set('n', 'c', function()
       local node = node_at_cursor()
       if not (node and node.entry) then return notify('put the cursor on a table', vim.log.levels.WARN) end
@@ -118,7 +121,7 @@ function M.schema()
         '# tradar: schema panel',
         '- `<CR>` insert name into the SQL buffer, or toggle a folder/table',
         '- `<Tab>` expand/collapse the schema or table under the cursor',
-        '- `o` open the table under the cursor (runs its "show rows" statement)',
+        '- `o` put the "show rows" statement of the table under the cursor in the SQL buffer (not run: `<leader>rr`)',
         '- `c` generate create/read/update/delete for the table under the cursor (inserted, not run)',
         '- `r` refresh the schema (after a migration / DDL elsewhere)',
         '- `/` searches the tree like any buffer',

@@ -42,4 +42,14 @@ H.check('a blank line is ignored', changes(r) == 0, vim.inspect(r))
 d = copy(data); d[1] = d[1]:gsub('^(%s*)1', '%110', 1); r = diff(d)
 H.check('editing the key is delete + insert', #r.deletes == 1 and #r.inserts == 1, vim.inspect(r))
 
+-- Mongo shell literals in the JSON view
+local render = require('tradar.render')
+local doc = { _id = 'ObjectId("507f1f77bcf86cd799439011")', at = 'ISODate("2024-05-01T10:00:00Z")', name = 'ObjectId("not hex")', tags = { 'ObjectId("507f1f77bcf86cd799439012")' } }
+local shown = table.concat(render.documents({ doc }, { { '_id', 'at', 'name', 'tags' } }), '\n')
+H.check('an ObjectId prints as a shell literal, not an escaped string', shown:find('"_id": ObjectId("507f1f77bcf86cd799439011")', 1, true) ~= nil, shown)
+H.check('...and an ISODate', shown:find('"at": ISODate("2024-05-01T10:00:00Z")', 1, true) ~= nil, shown)
+H.check('...inside arrays too', shown:find('  ObjectId("507f1f77bcf86cd799439012")', 1, true) ~= nil, shown)
+H.check('a string that only looks like one stays a string', shown:find('"name": "ObjectId(\\"not hex\\")"', 1, true) ~= nil, shown)
+H.check('exports stay valid JSON', render.pretty(doc, { '_id' }):find('"_id": "ObjectId(\\"507f1f77bcf86cd799439011\\")"', 1, true) ~= nil)
+
 H.done()

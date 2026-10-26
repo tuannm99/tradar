@@ -1,8 +1,8 @@
 -- Generate CRUD statements for a table / collection / index: the driver's own
 -- language (SQL, Mongo shell, Elasticsearch request, Redis command, CQL),
 -- with `<placeholders>` to fill in. The statement is inserted into the SQL
--- buffer, not run -- unlike `open_table`, which runs a SELECT -- because
--- three of the four change data.
+-- buffer, not run, because three of the four change data (`open_table` does
+-- the same for Read: you run it yourself with `<leader>rr`).
 local ctx = require('tradar.ctx')
 local M = ctx.M
 local notify = ctx.notify
@@ -78,6 +78,8 @@ local function insert_statement(buf, text)
   vim.api.nvim_buf_set_lines(buf, row, row, false, block)
   vim.api.nvim_win_set_cursor(win, { row + 2, 0 })
 end
+
+ctx.insert_statement = insert_statement
 
 --- Generates `op` for `entry` into `buf` (the SQL buffer). `op` and the
 --- column choice are asked for when not given.

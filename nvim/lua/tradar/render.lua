@@ -334,14 +334,24 @@ end
 --- for it: Lua tables remember no insertion order, so without that hint
 --- `_id` would land wherever the sort puts it). Nested objects have no such
 --- hint and stay alphabetical.
-function M.pretty(value, order, indent)
+--- `ObjectId("507f…")` / `ISODate("2024-…")` -- how the Mongo connector spells
+--- those two types (see `simplify_extjson`): shell literals, not strings.
+local function shell_literal(text)
+  return text:match('^ObjectId%("%x+"%)$') ~= nil or text:match('^ISODate%("[^"\\]*"%)$') ~= nil
+end
+
+--- `shell`: print those literals as they are (`"_id": ObjectId("507f…")`)
+--- instead of as JSON strings (`"ObjectId(\"507f…\")"`). For looking at;
+--- the text is no longer JSON, so exports leave it off.
+function M.pretty(value, order, indent, shell)
   indent = indent or ''
+  if type(value) == 'string' and shell and shell_literal(value) then return value end
   if type(value) ~= 'table' then return vim.json.encode(value) end
   local inner = indent .. '  '
   if is_array(value) then
     if #value == 0 then return '[]' end
     local parts = {}
-    for i, item in ipairs(value) do parts[i] = inner .. M.pretty(item, nil, inner) end
+    for i, item in ipairs(value) do parts[i] = inner .. M.pretty(item, nil, inner, shell) end
     return '[\n' .. table.concat(parts, ',\n') .. '\n' .. indent .. ']'
   end
   local keys, seen = {}, {}
@@ -357,7 +367,7 @@ function M.pretty(value, order, indent)
   if #keys == 0 then return '{}' end
   local parts = {}
   for i, k in ipairs(keys) do
-    parts[i] = inner .. vim.json.encode(tostring(k)) .. ': ' .. M.pretty(value[k], nil, inner)
+    parts[i] = inner .. vim.json.encode(tostring(k)) .. ': ' .. M.pretty(value[k], nil, inner, shell)
   end
   return '{\n' .. table.concat(parts, ',\n') .. '\n' .. indent .. '}'
 end
@@ -369,7 +379,7 @@ function M.documents(items, orders)
   local out = {}
   for i, item in ipairs(items) do
     if i > 1 then out[#out + 1] = '' end
-    vim.list_extend(out, vim.split(M.pretty(item, orders and orders[i]), '\n', { plain = true }))
+    vim.list_extend(out, vim.split(M.pretty(item, orders and orders[i], nil, true), '\n', { plain = true }))
   end
   return out
 end

@@ -14,7 +14,7 @@ Tất cả phím có tiền tố `<leader>r` (đổi được bằng `setup{ pre
 | `ra` | chạy cả file theo thứ tự, dừng ở lỗi đầu tiên |
 | `rx` | huỷ query đang chạy |
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
-| `rt` | picker bảng (telescope): `<CR>` chèn tên, `<C-o>` mở bảng, `<C-g>` sinh create/read/update/delete |
+| `rt` | picker bảng (telescope): `<CR>` chèn tên, `<C-o>` sinh câu xem dòng vào buffer (không chạy), `<C-g>` sinh create/read/update/delete |
 | `rg` | sinh câu create/read/update/delete cho bảng dưới con trỏ (hoặc chọn bảng) |
 | `rh` | history: `<CR>` dán, `<C-r>` chạy |
 | `rs` | panel schema (cây schema → bảng → cột) |
@@ -72,8 +72,8 @@ Chỉ sửa được khi kết quả đến từ **một bảng có khoá chính
 ## Điều hướng theo schema
 
 - `K` trên tên bảng/cột: kiểu, khoá chính, khoá ngoại, index; hiểu alias (`o.user_id` lấy từ `FROM`/`JOIN`). Không biết thì rơi về hover của LSP.
-- `gd` trên tên bảng: mở bảng (`SELECT ... LIMIT 100`).
-- Panel schema (`rs`): `<Tab>` gấp/mở bảng hoặc nhóm, `<CR>` chèn tên (hoặc gấp/mở nếu đang ở dòng nhóm), `o` mở bảng, `c` sinh câu lệnh CRUD.
+- `gd` trên tên bảng: **sinh** câu xem dòng của driver (`SELECT ... LIMIT 100`, Mongo `db.x.find({})`…) vào buffer; bấm `rr` để chạy. `setup{ open_runs = true }` để chạy ngay như trước.
+- Panel schema (`rs`): `<Tab>` gấp/mở bảng hoặc nhóm, `<CR>` chèn tên (hoặc gấp/mở nếu đang ở dòng nhóm), `o` sinh câu xem dòng vào buffer (không chạy; `rr` để chạy), `c` sinh câu lệnh CRUD (chọn thao tác và cột).
 
 ### Sinh câu lệnh create / read / update / delete
 

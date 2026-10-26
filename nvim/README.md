@@ -56,7 +56,7 @@ Dùng file `.mongo` (filetype `mongo`, tô màu như JavaScript), `.redis`, `.es
 -- tradar: tên-connection     (SQL)
 ```
 
-Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu mặc định hiện **JSON**; `<leader>rv` đổi sang **bảng** (cột phẳng `address.city`, dạng cần để sửa trực tiếp; `setup{ documents_view = "table" }` để mở bằng bảng) Trong bảng có thể sửa (`:w` → xem trước → commit, `UPDATE`/`DELETE`; chưa có `INSERT`), `gyc` và export như SQL. `<leader>re` (EXPLAIN) chỉ có cho SQL.
+Mongo nhận cú pháp mongosh (`{name: 'ann'}`, `ObjectId("…")`), không chỉ JSON chặt. Kết quả dạng tài liệu mặc định hiện **JSON** (`ObjectId("…")`/`ISODate("…")` in đúng như mongosh, chỉ để xem); `<leader>rv` đổi sang **bảng** (cột phẳng `address.city`, dạng cần để sửa trực tiếp; `setup{ documents_view = "table" }` để mở bằng bảng) Trong bảng có thể sửa (`:w` → xem trước → commit, `UPDATE`/`DELETE`; chưa có `INSERT`), `gyc` và export như SQL. `<leader>re` (EXPLAIN) chỉ có cho SQL.
 
 ### gRPC
 
@@ -108,7 +108,7 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 |---|---|
 | `rr` | chạy statement dưới con trỏ (visual: phần chọn) |
 | `ra` / `rx` | chạy cả file / huỷ query đang chạy |
-| `rt` / `rh` | telescope: bảng (`<CR>` chèn tên, `<C-o>` mở bảng, `<C-g>` sinh create/read/update/delete) / history (`<CR>` dán, `<C-r>` chạy) |
+| `rt` / `rh` | telescope: bảng (`<CR>` chèn tên, `<C-o>` sinh câu xem dòng vào buffer — không chạy, `<C-g>` sinh create/read/update/delete) / history (`<CR>` dán, `<C-r>` chạy) |
 | `rg` | `:TradarCrud [create\|read\|update\|delete]`: sinh câu lệnh mẫu của bảng dưới con trỏ vào buffer (không chạy); `c` trong panel schema |
 | `re` | `EXPLAIN` statement dưới con trỏ (không bao giờ `ANALYZE`, vì nó *chạy* câu lệnh) |
 | `rs` / `rc` / `rm` | panel schema / chọn connection / tải thêm dòng |
@@ -119,7 +119,7 @@ Tô màu: `.tdb` dùng chung parser treesitter của Markdown (fenced code block
 | `rR` / `rW` | (buffer kết quả) chạy lại kết quả tại chỗ / theo dõi mỗi vài giây; chỉ câu không ghi dữ liệu |
 | `[r` / `]r`, `r1`…`r9`, `rx` | (buffer kết quả) mỗi bảng/collection/index/key một tab kết quả (thanh tab trên cửa sổ, click được): tab trước / sau, nhảy tới tab n, đóng tab; `:TradarResults` chọn (`setup{ results_kept }` = 10 tab, `results_cursors` = 4 tab giữ cursor mở để tải thêm/sửa). Câu vừa chạy nháy sáng (`setup{ flash_ms }`, nhóm `TradarRunning`) |
 | `K` | thông tin bảng/cột dưới con trỏ (kiểu, PK, FK, index; hiểu alias `o.user_id`); không biết thì rơi về hover của LSP |
-| `gd` | trên tên bảng: mở bảng (`SELECT ... LIMIT 100`); chỗ khác: `definition` của LSP |
+| `gd` | trên tên bảng: sinh câu xem dòng (`SELECT ... LIMIT 100`) vào buffer, `rr` để chạy (`setup{ open_runs = true }` chạy ngay); chỗ khác: `definition` của LSP |
 | `g?` | liệt kê phím của buffer hiện tại (SQL, kết quả, panel schema đều có) |
 
 Trong buffer kết quả: nếu kết quả sửa được (một bảng, có khoá chính, cột khoá có trong kết quả, Postgres/MySQL/SQLite) thì lưới là buffer **sửa được như bình thường** — `cw`, `dd`, `o`/`yyp` + gõ dòng mới, `:s`, `:g`, `u`…; chưa có gì chạy cho tới khi `:w`. `:w` so lưới với các dòng đã vẽ rồi mở buffer xem trước `tradar://commit` liệt kê mọi `UPDATE`/`DELETE`/`INSERT` (update → delete → insert); `:w`/`<CR>` ở đó chạy lần lượt rồi tự làm mới và giữ con trỏ, `q` huỷ, `<leader>ru` bỏ các sửa chưa commit. Dòng được nhận theo giá trị cột khoá hiện trên dòng (không theo số dòng) nên `dd`/`yyp`/`:sort` đều đúng; ô để trống ở dòng mới = dùng `DEFAULT`, gõ `NULL` để đặt NULL; sửa cột khoá hiện thành `DELETE`+`INSERT`. Dòng trùng khoá, không tách được đủ cột, hay sửa header/footer thì `:w` báo lỗi, không đoán. Commit chạy trong **một transaction** (`BEGIN`/`COMMIT`) với Postgres/MySQL/SQLite: một câu lỗi thì `ROLLBACK` hết, lưới vẽ lại từ DB, xem trước mở lại với toàn bộ câu lệnh + lỗi (nếu bạn đã tự `BEGIN` thì chạy bên trong transaction đó và không `COMMIT` hộ); connector khác không có transaction nên các câu đã chạy giữ nguyên và xem trước chỉ còn phần chưa chạy. Khi kết quả không sửa được, `i`/`dd`/`o`… báo lý do (không biết bảng nguồn, không có khoá chính, thiếu cột khoá). `gd` trên ô của cột khoá ngoại chạy `SELECT` dòng được tham chiếu (kết quả của truy vấn một bảng), `gyc` ô, `gyr` dòng, `gyC` cột, `gyj`/`gyv`/`gym` cả kết quả (JSON/CSV/Markdown), `<leader>rv` đổi bảng ↔ JSON (cả kết quả SQL, dạng mảng object; ở view JSON các thao tác theo ô tạm tắt), `gK` xem cả dòng hiện tại mỗi trường một dòng (kiểu `\x`), `K` xem trọn giá trị một ô (hữu ích khi ô bị cắt bớt — xem dưới), `:TradarExport csv|json|md|tsv [file]`, `q` đóng. Mỗi trang 20 dòng (`setup{ page_size }`), trang kế tải bằng `<leader>rm` (không tự tải khi cuộn; `setup{ auto_load_more = true }` để như cũ). Khi query chạy, winbar của cửa sổ kết quả hiện spinner + thời gian + `<leader>rx` huỷ; visual mode `<leader>rr` tách vùng chọn theo `;` rồi chạy lần lượt.

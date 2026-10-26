@@ -244,6 +244,13 @@ local function paint_results(new_from)
   vim.bo[buf].synmaxcol = 200
   local json_view = (r.kind == 'documents' or r.kind == 'table') and r.view == 'json'
   vim.bo[buf].syntax = (json_view and #lines <= 3000) and 'json' or ''
+  if json_view and r.kind == 'documents' and vim.bo[buf].syntax == 'json' then
+    -- `ObjectId(...)` is not JSON: no red \"error\" on it, and colour its name.
+    vim.api.nvim_buf_call(buf, function()
+      vim.cmd([[silent! syntax clear jsonNoQuotesError]])
+      vim.cmd([[syntax match Function /\<\%(ObjectId\|ISODate\)\ze(/]])
+    end)
+  end
   if pos then pcall(vim.api.nvim_win_set_cursor, win, { math.min(pos[1], #lines), pos[2] }) end
   sync_editable(r)
 end

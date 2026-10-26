@@ -27,7 +27,7 @@ function M.tables(opts)
   opts = opts or {}
   tradar.schema_entries(function(entries, buf)
     t.pickers.new(opts, {
-      prompt_title = 'tradar tables  (<CR> insert · <C-o> open · <C-g> create/read/update/delete)',
+      prompt_title = 'tradar tables  (<CR> insert · <C-o> SELECT · <C-g> create/read/update/delete)',
       finder = t.finders.new_table({
         results = entries,
         entry_maker = function(e)
