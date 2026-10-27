@@ -2,6 +2,7 @@ use super::*;
 use testcontainers_modules::mysql::Mysql;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
+mod cheatsheet;
 mod connect;
 mod errors;
 mod execute;

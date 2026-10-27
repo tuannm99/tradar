@@ -146,6 +146,27 @@ pub fn cheatsheet_problems(entries: &[CheatEntry]) -> Vec<String> {
     problems
 }
 
+/// `text` with every `${name}` replaced by `value(name)` -- how a test (or a
+/// caller without an editor to ask) turns a cheat sheet entry into a
+/// runnable query. `Err(name)` names the first placeholder with no value.
+pub fn fill_placeholders(
+    text: &str,
+    value: impl Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 2..];
+        let end = after.find('}').ok_or_else(|| "${".to_string())?;
+        let name = &after[..end];
+        out.push_str(&value(name).ok_or_else(|| name.to_string())?);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 #[async_trait]
 pub trait QueryDriver: Send + Sync {
     async fn connect(&mut self) -> anyhow::Result<()>;

@@ -414,6 +414,127 @@ mod docker {
         assert!(result.is_ok(), "ping failed: {:?}", result.err());
     }
 
+    /// Entries that need something a stock single node does not have:
+    /// authorization (roles), materialized views (off by default).
+    const CHEAT_MAY_FAIL: &[&str] = &[
+        "Roles",
+        "Permissions of a role",
+        "CREATE a role",
+        "GRANT SELECT on a keyspace",
+        "REVOKE all permissions on a keyspace",
+        "CREATE MATERIALIZED VIEW",
+        "Materialized views of a keyspace",
+        "Rows of a time window (timeuuid column)",
+    ];
+
+    fn cheat_value(name: &str, title: &str) -> Option<String> {
+        Some(
+            match name {
+                "keyspace" => "ks",
+                "new_keyspace" => "ks_new",
+                "table" => "t_main",
+                "new_table" => "t_new",
+                "series_table" => "t_series",
+                "datacenter" => "datacenter1",
+                "second_value" => "2",
+                "counter_table" => "t_counter",
+                "counter_column" => "cnt",
+                "new_view" => "v_new",
+                "new_type" => "ty_new",
+                "key" => "id",
+                "value" => match title {
+                    "Add a column" => "1",
+                    _ => "1",
+                },
+                "other_value" => "x",
+                "old_value" => "a",
+                "column" => "c",
+                "set_column" => "tags",
+                "new_column" => "nc",
+                "clustering_column" => "ts",
+                "from" => "0",
+                "to" => "100",
+                "index_name" if title.starts_with("DROP") => "ix_exist",
+                "index_name" => "ix_new",
+                "role" | "password" => "r1",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    }
+
+    /// Every cheat sheet entry, run against a real Cassandra (Docker). The
+    /// keyspace is rebuilt only before the entries that change the schema.
+    #[tokio::test]
+    async fn every_cheatsheet_entry_runs_on_a_real_cluster() {
+        let _turn = PORT_9042.lock().await;
+        let (_container, driver) =
+            tokio::time::timeout(Duration::from_secs(350), connected_driver())
+                .await
+                .expect("container must become ready within 350s");
+
+        let reset = |drop_first: bool| {
+            let mut statements: Vec<&'static str> = Vec::new();
+            if drop_first {
+                statements.push("DROP KEYSPACE IF EXISTS ks");
+                statements.push("DROP KEYSPACE IF EXISTS ks_new");
+            }
+            statements.extend([
+                "CREATE KEYSPACE IF NOT EXISTS ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}",
+                "CREATE TABLE IF NOT EXISTS ks.t_main (id int PRIMARY KEY, c text, d text, tags set<text>)",
+                "CREATE TABLE IF NOT EXISTS ks.t_series (id int, ts int, c text, PRIMARY KEY (id, ts))",
+                "CREATE TABLE IF NOT EXISTS ks.t_counter (id int PRIMARY KEY, cnt counter)",
+                "CREATE INDEX IF NOT EXISTS ix_exist ON ks.t_main (d)",
+                "INSERT INTO ks.t_main (id, c, d, tags) VALUES (1, 'a', 'd1', {'x'})",
+                "INSERT INTO ks.t_main (id, c, d, tags) VALUES (2, 'b', 'd2', {'y'})",
+                "INSERT INTO ks.t_series (id, ts, c) VALUES (1, 10, 'a')",
+                "INSERT INTO ks.t_series (id, ts, c) VALUES (1, 20, 'b')",
+            ]);
+            statements
+        };
+        for sql in reset(true) {
+            driver
+                .execute(sql)
+                .await
+                .unwrap_or_else(|e| panic!("fixture `{sql}`: {e}"));
+        }
+
+        let mut failures = Vec::new();
+        let mut ran = 0;
+        for entry in crate::cheatsheet::ENTRIES {
+            if entry.category == "Schema" {
+                for sql in reset(true) {
+                    driver
+                        .execute(sql)
+                        .await
+                        .unwrap_or_else(|e| panic!("fixture `{sql}`: {e}"));
+                }
+            }
+            let text = match tradar_query::fill_placeholders(entry.text, |n| {
+                cheat_value(n, entry.title)
+            }) {
+                Ok(text) => text,
+                Err(name) => {
+                    failures.push(format!("`{}`: no value for `${{{name}}}`", entry.title));
+                    continue;
+                }
+            };
+            ran += 1;
+            if let Err(e) = driver.execute(&text).await
+                && !CHEAT_MAY_FAIL.contains(&entry.title)
+            {
+                failures.push(format!("`{}`: {e}\n{text}", entry.title));
+            }
+        }
+        assert!(ran > 40, "only {ran} entries ran");
+        assert!(
+            failures.is_empty(),
+            "{} of {ran} cheat sheet entries failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+
     #[tokio::test]
     async fn schema_and_execute_round_trip_through_a_real_cluster() {
         let _turn = PORT_9042.lock().await;

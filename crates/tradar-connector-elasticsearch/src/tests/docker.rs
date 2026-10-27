@@ -241,3 +241,119 @@ async fn list_schema_returns_created_indices() {
         schema.iter().map(|s| &s.name).collect::<Vec<_>>()
     );
 }
+
+/// Entries that need something one stock node does not have: an unassigned
+/// shard to explain, a running task to cancel.
+const CHEAT_MAY_FAIL: &[&str] = &[
+    "Why a shard is not allocated",
+    "Cancel a task",
+    "Version and cluster name",
+];
+
+fn cheat_value(name: &str, title: &str) -> Option<String> {
+    Some(
+        match name {
+            "index" => "idx",
+            "new_index" => "idx_new",
+            "alias" => "al1",
+            "field" => "status",
+            "other_field" => "owner",
+            "number_field" => "n",
+            "new_field" => "extra",
+            "value" => "open",
+            "other_value" => "x",
+            "a" => "open",
+            "b" => "closed",
+            "text" => "hello world",
+            "query" => "status:open",
+            "id" => "1",
+            "task_id" => "none:1",
+            _ => {
+                let _ = title;
+                return None;
+            }
+        }
+        .to_string(),
+    )
+}
+
+/// Every cheat sheet entry, run against a real node (Docker).
+#[tokio::test]
+async fn every_cheatsheet_entry_runs_on_a_real_server() {
+    let _turn = ONE_NODE.lock().await;
+    let container = node().await;
+    let port = container.get_host_port_ipv4(9200).await.unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut driver = ElasticsearchDriver::new(&base_url);
+    driver.connect().await.unwrap();
+    let http = reqwest::Client::new();
+    let send = |method: reqwest::Method, path: &str, body: Option<&str>| {
+        let mut request = http
+            .request(method, format!("{base_url}/{path}"))
+            .header("content-type", "application/json");
+        if let Some(body) = body {
+            request = request.body(body.to_string());
+        }
+        request.send()
+    };
+
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for entry in crate::cheatsheet::ENTRIES {
+        for index in ["idx", "idx_new"] {
+            let _ = send(reqwest::Method::DELETE, index, None).await;
+        }
+        let mapping = r#"{"settings": {"number_of_replicas": 0}, "mappings": {"properties": {
+            "status": {"type": "keyword"}, "owner": {"type": "text"}, "n": {"type": "long"},
+            "@timestamp": {"type": "date"}}}}"#;
+        send(reqwest::Method::PUT, "idx", Some(mapping))
+            .await
+            .unwrap();
+        let docs = concat!(
+            r#"{"index": {"_id": "1"}}"#,
+            "\n",
+            r#"{"status": "open", "owner": "ann", "n": 5, "@timestamp": "2024-01-01T10:00:00Z"}"#,
+            "\n",
+            r#"{"index": {"_id": "2"}}"#,
+            "\n",
+            r#"{"status": "closed", "owner": "bob", "n": 50, "@timestamp": "2024-01-02T10:00:00Z"}"#,
+            "\n",
+        );
+        send(reqwest::Method::POST, "idx/_bulk?refresh=true", Some(docs))
+            .await
+            .unwrap();
+        send(
+            reqwest::Method::POST,
+            "_aliases",
+            Some(r#"{"actions": [{"add": {"index": "idx", "alias": "al1"}}]}"#),
+        )
+        .await
+        .unwrap();
+        // The entry that moves an alias moves it to an index that exists.
+        if entry.title == "Move an alias to another index" {
+            send(reqwest::Method::PUT, "idx_new", None).await.unwrap();
+        }
+
+        let text =
+            match tradar_query::fill_placeholders(entry.text, |n| cheat_value(n, entry.title)) {
+                Ok(text) => text,
+                Err(name) => {
+                    failures.push(format!("`{}`: no value for `${{{name}}}`", entry.title));
+                    continue;
+                }
+            };
+        ran += 1;
+        if let Err(e) = driver.execute(&text).await
+            && !CHEAT_MAY_FAIL.contains(&entry.title)
+        {
+            failures.push(format!("`{}`: {e}\n{text}", entry.title));
+        }
+    }
+    assert!(ran > 60, "only {ran} entries ran");
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} cheat sheet entries failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}

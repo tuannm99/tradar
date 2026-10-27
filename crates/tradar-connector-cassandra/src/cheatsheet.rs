@@ -104,7 +104,7 @@ LIMIT 20;"##,
         "Query",
         "Rows of one partition, newest first (clustering order)",
         r##"SELECT *
-FROM ${keyspace}.${table}
+FROM ${keyspace}.${series_table}
 WHERE ${key} = ${value}
 ORDER BY ${clustering_column} DESC
 LIMIT 20;"##,
@@ -114,13 +114,13 @@ LIMIT 20;"##,
         "Several partitions (IN)",
         r##"SELECT *
 FROM ${keyspace}.${table}
-WHERE ${key} IN (${value}, ${other_value});"##,
+WHERE ${key} IN (${value}, ${second_value});"##,
     ),
     CheatEntry::new(
         "Query",
         "A range of a clustering column",
         r##"SELECT *
-FROM ${keyspace}.${table}
+FROM ${keyspace}.${series_table}
 WHERE ${key} = ${value} AND ${clustering_column} >= ${from} AND ${clustering_column} < ${to};"##,
     ),
     CheatEntry::new(
@@ -128,7 +128,7 @@ WHERE ${key} = ${value} AND ${clustering_column} >= ${from} AND ${clustering_col
         "Filter on a non-key column (ALLOW FILTERING, scans)",
         r##"SELECT *
 FROM ${keyspace}.${table}
-WHERE ${column} = ${value}
+WHERE ${column} = '${other_value}'
 LIMIT 20
 ALLOW FILTERING;"##,
     ),
@@ -177,7 +177,7 @@ FROM system.local;"##,
         "CQL syntax",
         "Rows of a time window (timeuuid column)",
         r##"SELECT *
-FROM ${keyspace}.${table}
+FROM ${keyspace}.${series_table}
 WHERE ${key} = ${value} AND ${clustering_column} > minTimeuuid('2024-01-01 00:00:00+0000')
 LIMIT 20;"##,
     ),
@@ -186,8 +186,9 @@ LIMIT 20;"##,
         "A value in a collection column (CONTAINS)",
         r##"SELECT *
 FROM ${keyspace}.${table}
-WHERE ${column} CONTAINS '${value}'
-LIMIT 20;"##,
+WHERE ${set_column} CONTAINS '${value}'
+LIMIT 20
+ALLOW FILTERING;"##,
     ),
     // ── Write ──
     CheatEntry::new(
@@ -235,14 +236,14 @@ IF ${column} = '${old_value}';"##,
         "Write",
         "Add to a set column",
         r##"UPDATE ${keyspace}.${table}
-SET ${column} = ${column} + {'${other_value}'}
+SET ${set_column} = ${set_column} + {'${other_value}'}
 WHERE ${key} = ${value};"##,
     ),
     CheatEntry::new(
         "Write",
-        "Add to a counter column",
-        r##"UPDATE ${keyspace}.${table}
-SET ${column} = ${column} + 1
+        "Add to a counter column (a counter table)",
+        r##"UPDATE ${keyspace}.${counter_table}
+SET ${counter_column} = ${counter_column} + 1
 WHERE ${key} = ${value};"##,
     ),
     CheatEntry::new(
@@ -273,7 +274,7 @@ WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};"##,
         "Schema",
         "CREATE KEYSPACE (several data centers)",
         r##"CREATE KEYSPACE ${new_keyspace}
-WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': 3};"##,
+WITH replication = {'class': 'NetworkTopologyStrategy', '${datacenter}': 3};"##,
     ),
     CheatEntry::new(
         "Schema",

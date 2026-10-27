@@ -64,6 +64,7 @@ fn quote_arg_round_trips_through_split_command() {
     }
 }
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
+use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 #[test]
@@ -520,4 +521,111 @@ fn every_cheatsheet_entry_is_one_command() {
             entry.title
         );
     }
+}
+
+/// Every cheat sheet entry, run against a real Redis (Docker).
+const CHEAT_MAY_FAIL: &[&str] = &[
+    // No such client / the allocator may not support it.
+    "Close a client by id",
+    "Free unused memory",
+];
+
+fn cheat_value(name: &str, text: &str) -> Option<String> {
+    let command = text.split_whitespace().next().unwrap_or("");
+    let first = command.to_uppercase();
+    let first = first.as_str();
+    Some(
+        match name {
+            "key" => match first {
+                "HGETALL" | "HGET" | "HKEYS" | "HLEN" | "HSET" | "HDEL" | "HINCRBY" => "k_hash",
+                "LRANGE" | "LLEN" | "RPUSH" | "LPUSH" | "LPOP" | "RPOP" => "k_list",
+                "SMEMBERS" | "SCARD" | "SISMEMBER" | "SRANDMEMBER" | "SADD" | "SREM" => "k_set",
+                "ZRANGE" | "ZRANGEBYSCORE" | "ZSCORE" | "ZRANK" | "ZCARD" | "ZADD" | "ZREM"
+                | "ZINCRBY" => "k_zset",
+                "XRANGE" | "XREVRANGE" | "XLEN" | "XINFO" | "XADD" | "XDEL" => "k_stream",
+                "PFCOUNT" => "k_hll",
+                "INCR" | "INCRBY" => "k_num",
+                _ => "k_str",
+            },
+            "other_key" => "k_str2",
+            "new_key" => "k_new",
+            "other_value" => "v2",
+            "value" if first == "CONFIG" => "10",
+            "value" => "v",
+            "parameter" => "hz",
+            "pattern" if first == "CONFIG" => "hz",
+            "pattern" if first == "PUBSUB" => "*",
+            "pattern" => "k_*",
+            "field" if first == "HINCRBY" => "f_num",
+            "field" if first == "XADD" => "f",
+            "field" => "f_str",
+            "member" => "m1",
+            "score" | "amount" => "1",
+            "seconds" => "100",
+            "type" => "string",
+            "entry_id" => "1-1",
+            "channel" => "ch",
+            "message" => "hello",
+            "id" => "999999",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+const CHEAT_SEED: &[&str] = &[
+    "FLUSHALL",
+    "SET k_str v",
+    "SET k_str2 v2",
+    "SET k_num 1",
+    "HSET k_hash f_str v f_num 1",
+    "RPUSH k_list a b c",
+    "SADD k_set m1 m2",
+    "ZADD k_zset 1 m1 2 m2",
+    "XADD k_stream 1-1 f v",
+    "PFADD k_hll a b c",
+];
+
+#[tokio::test]
+async fn every_cheatsheet_entry_runs_on_a_real_server() {
+    // A current server: some entries are for Redis 6 / 6.2+.
+    let container = Redis::default()
+        .with_tag("7.4-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
+    let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
+    driver.connect().await.unwrap();
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for entry in crate::cheatsheet::ENTRIES {
+        for command in CHEAT_SEED {
+            driver
+                .execute(command)
+                .await
+                .unwrap_or_else(|e| panic!("fixture `{command}`: {e}"));
+        }
+        let text = match tradar_query::fill_placeholders(entry.text, |n| cheat_value(n, entry.text))
+        {
+            Ok(text) => text,
+            Err(name) => {
+                failures.push(format!("`{}`: no value for `${{{name}}}`", entry.title));
+                continue;
+            }
+        };
+        ran += 1;
+        if let Err(e) = driver.execute(&text).await
+            && !CHEAT_MAY_FAIL.contains(&entry.title)
+        {
+            failures.push(format!("`{}`: {e}\n{text}", entry.title));
+        }
+    }
+    assert!(ran > 60, "only {ran} entries ran");
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} cheat sheet entries failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }

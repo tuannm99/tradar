@@ -223,7 +223,7 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
         "A number within a range",
         r##"GET ${index}/_search
 {
-  "query": {"range": {"${field}": {"gte": 10, "lte": 100}}},
+  "query": {"range": {"${number_field}": {"gte": 10, "lte": 100}}},
   "size": 20
 }"##,
     ),
@@ -332,7 +332,7 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
         r##"GET ${index}/_search
 {
   "size": 0,
-  "aggs": {"stats": {"stats": {"field": "${field}"}}}
+  "aggs": {"stats": {"stats": {"field": "${number_field}"}}}
 }"##,
     ),
     CheatEntry::new(
@@ -341,7 +341,7 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
         r##"GET ${index}/_search
 {
   "size": 0,
-  "aggs": {"p": {"percentiles": {"field": "${field}", "percents": [50, 90, 99]}}}
+  "aggs": {"p": {"percentiles": {"field": "${number_field}", "percents": [50, 90, 99]}}}
 }"##,
     ),
     CheatEntry::new(
@@ -359,7 +359,7 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
         r##"GET ${index}/_search
 {
   "size": 0,
-  "aggs": {"by_group": {"terms": {"field": "${field}"}, "aggs": {"avg_value": {"avg": {"field": "${other_field}"}}}}}
+  "aggs": {"by_group": {"terms": {"field": "${field}"}, "aggs": {"avg_value": {"avg": {"field": "${number_field}"}}}}}
 }"##,
     ),
     CheatEntry::new(

@@ -317,3 +317,113 @@ fn every_cheatsheet_entry_is_one_statement() {
         );
     }
 }
+
+/// Every cheat sheet entry, run against a real ClickHouse (Docker). A failing
+/// entry is listed with its error; the entries that need something a stock
+/// container does not have are named in `CHEAT_MAY_FAIL`.
+const CHEAT_MAY_FAIL: &[&str] = &[
+    // Lightweight DELETE and user management depend on the server version
+    // and on the default user's rights.
+    "DELETE rows (lightweight)",
+    "CREATE a user",
+    "GRANT SELECT on a database",
+    "Grants of a user",
+    "Users",
+];
+
+fn cheat_value(name: &str, title: &str) -> Option<String> {
+    Some(
+        match name {
+            "database" => "default",
+            "new_database" => "db_new",
+            "table" if title.starts_with("Latest version of each row") => "t_repl",
+            "table" => "t_main",
+            "other_table" => "t_other",
+            "new_table" => "t_new",
+            "new_view" => "v_new",
+            "column" => "c",
+            "date_column" => "created_at",
+            "new_column" => "nc",
+            "key_column" => "id",
+            "group_column" => "g",
+            "value_column" => "n",
+            "array_column" => "arr",
+            "json_column" => "j",
+            "json_key" => "a",
+            "key" => "1",
+            "value" => "a",
+            "a" => "a",
+            "b" => "b",
+            "filter" => "1 = 1",
+            "pattern" => "max_threads",
+            "partition" => "202401",
+            "index_name" if title.starts_with("Add") => "ix_new",
+            "query_id" => "none",
+            "mutation_id" => "none",
+            "user" if title.starts_with("CREATE") => "u_create",
+            "user" => "default",
+            "password" => "secret",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+const CHEAT_RESET_LOOSE: &[&str] = &[
+    "DROP TABLE IF EXISTS v_new",
+    "DROP TABLE IF EXISTS t_new",
+    "DROP TABLE IF EXISTS t_main",
+    "DROP TABLE IF EXISTS t_repl",
+    "DROP TABLE IF EXISTS t_other",
+    "DROP DATABASE IF EXISTS db_new",
+    "DROP USER IF EXISTS u_create",
+];
+const CHEAT_RESET: &[&str] = &[
+    "CREATE TABLE t_other (id UInt64, c String) ENGINE = MergeTree ORDER BY id",
+    "CREATE TABLE t_main (id UInt64, c String, n UInt32, created_at DateTime, j String, g String, arr Array(String)) ENGINE = MergeTree PARTITION BY toYYYYMM(created_at) ORDER BY intHash32(id) SAMPLE BY intHash32(id)",
+    "CREATE TABLE t_repl (id UInt64, c String) ENGINE = ReplacingMergeTree ORDER BY id",
+    "INSERT INTO t_other (id, c) VALUES (1, 'one')",
+    "INSERT INTO t_main (id, c, n, created_at, j, g, arr) VALUES (1, 'a', 5, '2024-01-15 10:00:00', '{\"a\": 1}', 'g1', ['x', 'y']), (2, 'b', 7, '2024-01-15 11:00:00', '{}', 'g1', ['x']), (3, 'c', 9, '2024-01-16 12:00:00', '{}', 'g2', [])",
+];
+
+#[tokio::test]
+async fn every_cheatsheet_entry_runs_on_a_real_server() {
+    let (_container, target) = started().await;
+    let mut driver = ClickHouseDriver::new(&target);
+    driver.connect().await.unwrap();
+    let _ = driver.execute("SYSTEM FLUSH LOGS").await;
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for entry in crate::cheatsheet::ENTRIES {
+        for sql in CHEAT_RESET_LOOSE {
+            let _ = driver.execute(sql).await;
+        }
+        for sql in CHEAT_RESET {
+            driver
+                .execute(sql)
+                .await
+                .unwrap_or_else(|e| panic!("fixture `{sql}`: {e}"));
+        }
+        let sql = match tradar_query::fill_placeholders(entry.text, |n| cheat_value(n, entry.title))
+        {
+            Ok(sql) => sql,
+            Err(name) => {
+                failures.push(format!("`{}`: no value for `${{{name}}}`", entry.title));
+                continue;
+            }
+        };
+        ran += 1;
+        if let Err(e) = driver.execute(&sql).await
+            && !CHEAT_MAY_FAIL.contains(&entry.title)
+        {
+            failures.push(format!("`{}`: {e}\n{sql}", entry.title));
+        }
+    }
+    assert!(ran > 60, "only {ran} entries ran");
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} cheat sheet entries failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}

@@ -590,3 +590,93 @@ async fn execute_rejects_an_unsupported_method() {
 
     assert!(result.is_err());
 }
+
+/// Entries that need something a stock single server does not have.
+const CHEAT_MAY_FAIL: &[&str] = &[
+    // Not a replica set.
+    "Replica set status",
+    // Needs a text index on the field.
+    "Full-text search (needs a text index)",
+];
+
+fn cheat_value(name: &str, title: &str) -> Option<String> {
+    Some(
+        match name {
+            "collection" => "c_main",
+            "other_collection" => "c_other",
+            "new_collection" => "c_new",
+            "database" => "test",
+            "field" if title.starts_with("Create") => "u",
+            "field" => "status",
+            "other_field" if title == "Join another collection ($lookup)" => "status",
+            "other_field" => "owner",
+            "sub_field" => "city",
+            "number_field" => "n",
+            "array_field" => "tags",
+            "new_field" => "renamed",
+            "group" => "status",
+            "value" => "open",
+            "other_value" => "x",
+            "a" => "open",
+            "b" => "closed",
+            "pattern" => "op",
+            "date" => "2024-01-01",
+            "id" => "507f1f77bcf86cd799439011",
+            "index_name" if title.starts_with("Drop") => "ix_status",
+            "index_name" => "ix_new",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+/// Every cheat sheet entry, run against a real MongoDB (Docker).
+#[tokio::test]
+async fn every_cheatsheet_entry_runs_on_a_real_server() {
+    let container = Mongo::new().start().await.unwrap();
+    let port = container.get_host_port_ipv4(27017).await.unwrap();
+    let mut driver = MongoDriver::new(&format!("mongodb://127.0.0.1:{port}/test"));
+    driver.connect().await.unwrap();
+
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for entry in crate::cheatsheet::ENTRIES {
+        for collection in ["c_main", "c_other", "c_new"] {
+            let _ = driver
+                .execute(&format!("db.runCommand({{drop: \"{collection}\"}})"))
+                .await;
+        }
+        for setup in [
+            r#"db.c_main.insertMany([{"status": "open", "owner": "ann", "n": 5, "u": 1, "tags": ["x", "y"], "address": {"city": "c1"}}, {"status": "closed", "owner": "bob", "n": 50, "u": 2, "tags": ["x"], "address": {"city": "c2"}}, {"status": "open", "owner": "cid", "n": 500, "u": 3, "tags": [], "address": {"city": "c1"}}])"#,
+            r#"db.c_other.insertMany([{"status": "open", "label": "L"}])"#,
+            r#"db.runCommand({createIndexes: "c_main", indexes: [{key: {status: 1}, name: "ix_status"}]})"#,
+        ] {
+            driver
+                .execute(setup)
+                .await
+                .unwrap_or_else(|e| panic!("fixture `{setup}`: {e}"));
+        }
+
+        let text =
+            match tradar_query::fill_placeholders(entry.text, |n| cheat_value(n, entry.title)) {
+                Ok(text) => text,
+                Err(name) => {
+                    failures.push(format!("`{}`: no value for `${{{name}}}`", entry.title));
+                    continue;
+                }
+            };
+        ran += 1;
+        if let Err(e) = driver.execute(&text).await
+            && !CHEAT_MAY_FAIL.contains(&entry.title)
+        {
+            failures.push(format!("`{}`: {e}\n{text}", entry.title));
+        }
+    }
+    assert!(ran > 60, "only {ran} entries ran");
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} cheat sheet entries failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
