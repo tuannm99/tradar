@@ -104,7 +104,7 @@ LIMIT 20;"##,
         "Query",
         "Rows of one partition, newest first (clustering order)",
         r##"SELECT *
-FROM ${keyspace}.${table}
+FROM ${keyspace}.${series_table}
 WHERE ${key} = ${value}
 ORDER BY ${clustering_column} DESC
 LIMIT 20;"##,
@@ -114,13 +114,13 @@ LIMIT 20;"##,
         "Several partitions (IN)",
         r##"SELECT *
 FROM ${keyspace}.${table}
-WHERE ${key} IN (${value}, ${other_value});"##,
+WHERE ${key} IN (${value}, ${second_value});"##,
     ),
     CheatEntry::new(
         "Query",
         "A range of a clustering column",
         r##"SELECT *
-FROM ${keyspace}.${table}
+FROM ${keyspace}.${series_table}
 WHERE ${key} = ${value} AND ${clustering_column} >= ${from} AND ${clustering_column} < ${to};"##,
     ),
     CheatEntry::new(
@@ -177,7 +177,7 @@ FROM system.local;"##,
         "CQL syntax",
         "Rows of a time window (timeuuid column)",
         r##"SELECT *
-FROM ${keyspace}.${table}
+FROM ${keyspace}.${series_table}
 WHERE ${key} = ${value} AND ${clustering_column} > minTimeuuid('2024-01-01 00:00:00+0000')
 LIMIT 20;"##,
     ),
@@ -187,7 +187,8 @@ LIMIT 20;"##,
         r##"SELECT *
 FROM ${keyspace}.${table}
 WHERE ${set_column} CONTAINS '${value}'
-LIMIT 20;"##,
+LIMIT 20
+ALLOW FILTERING;"##,
     ),
     // ── Write ──
     CheatEntry::new(
@@ -273,7 +274,7 @@ WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};"##,
         "Schema",
         "CREATE KEYSPACE (several data centers)",
         r##"CREATE KEYSPACE ${new_keyspace}
-WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': 3};"##,
+WITH replication = {'class': 'NetworkTopologyStrategy', '${datacenter}': 3};"##,
     ),
     CheatEntry::new(
         "Schema",

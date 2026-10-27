@@ -33,7 +33,11 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
     CheatEntry::new("Server", "Memory advice", r##"MEMORY DOCTOR"##),
     // ── Clients ──
     CheatEntry::new("Clients", "Client list", r##"CLIENT LIST"##),
-    CheatEntry::new("Clients", "Who am I connected as", r##"ACL WHOAMI"##),
+    CheatEntry::new(
+        "Clients",
+        "Who am I connected as (Redis 6+)",
+        r##"ACL WHOAMI"##,
+    ),
     CheatEntry::new(
         "Clients",
         "Close a client by id",
@@ -70,7 +74,11 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
         "Memory limit and eviction policy",
         r##"CONFIG GET maxmemory*"##,
     ),
-    CheatEntry::new("Slow log & config", "Access control rules", r##"ACL LIST"##),
+    CheatEntry::new(
+        "Slow log & config",
+        "Access control rules (Redis 6+)",
+        r##"ACL LIST"##,
+    ),
     // ── Keys ──
     CheatEntry::new(
         "Keys",
@@ -79,7 +87,7 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
     ),
     CheatEntry::new(
         "Keys",
-        "Find keys of one type",
+        "Find keys of one type (Redis 6+)",
         r##"SCAN 0 TYPE ${type} COUNT 100"##,
     ),
     CheatEntry::new("Keys", "Does a key exist", r##"EXISTS ${key}"##),
@@ -133,7 +141,7 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
     ),
     CheatEntry::new(
         "Read",
-        "Sorted set, top 10 by score",
+        "Sorted set, top 10 by score (Redis 6.2+)",
         r##"ZRANGE ${key} 0 9 REV WITHSCORES"##,
     ),
     CheatEntry::new(

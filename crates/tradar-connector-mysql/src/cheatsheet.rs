@@ -179,11 +179,6 @@ WHERE t.table_schema = DATABASE() AND t.table_type = 'BASE TABLE' AND c.constrai
     ),
     CheatEntry::new(
         "Health",
-        "Check a table for errors",
-        r##"CHECK TABLE ${table};"##,
-    ),
-    CheatEntry::new(
-        "Health",
         "Statements by total time (sys schema)",
         r##"SELECT query, exec_count, total_latency, avg_latency
 FROM sys.statement_analysis

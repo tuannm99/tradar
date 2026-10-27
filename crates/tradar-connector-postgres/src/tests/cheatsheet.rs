@@ -2,6 +2,7 @@
 //! entry is listed with its error; the entries that need something a stock
 //! container does not have are named in `MAY_FAIL`.
 use super::*;
+use testcontainers_modules::testcontainers::ImageExt;
 
 /// Needs an extension or a feature the stock image does not enable.
 const MAY_FAIL: &[&str] = &["Slowest statements (needs pg_stat_statements)"];
@@ -75,7 +76,12 @@ const RESET: &[&str] = &[
 
 #[tokio::test]
 async fn every_cheatsheet_entry_runs_on_a_real_server() {
-    let container = Postgres::default().start().await.unwrap();
+    // A current server: the entries are written for PostgreSQL 12+.
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let mut driver = PostgresDriver::new(&format!(
         "postgres://postgres:postgres@127.0.0.1:{port}/postgres"

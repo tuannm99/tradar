@@ -336,7 +336,7 @@ LIMIT 50;"##,
     ),
     CheatEntry::new(
         "SQL syntax",
-        "Latest version of each row (FINAL)",
+        "Latest version of each row (FINAL, for ReplacingMergeTree and similar)",
         r##"SELECT *
 FROM ${table} FINAL
 LIMIT 100;"##,

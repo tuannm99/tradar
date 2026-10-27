@@ -328,6 +328,7 @@ const CHEAT_MAY_FAIL: &[&str] = &[
     "CREATE a user",
     "GRANT SELECT on a database",
     "Grants of a user",
+    "Users",
 ];
 
 fn cheat_value(name: &str, title: &str) -> Option<String> {
@@ -335,6 +336,7 @@ fn cheat_value(name: &str, title: &str) -> Option<String> {
         match name {
             "database" => "default",
             "new_database" => "db_new",
+            "table" if title.starts_with("Latest version of each row") => "t_repl",
             "table" => "t_main",
             "other_table" => "t_other",
             "new_table" => "t_new",
@@ -371,6 +373,7 @@ const CHEAT_RESET_LOOSE: &[&str] = &[
     "DROP TABLE IF EXISTS v_new",
     "DROP TABLE IF EXISTS t_new",
     "DROP TABLE IF EXISTS t_main",
+    "DROP TABLE IF EXISTS t_repl",
     "DROP TABLE IF EXISTS t_other",
     "DROP DATABASE IF EXISTS db_new",
     "DROP USER IF EXISTS u_create",
@@ -378,6 +381,7 @@ const CHEAT_RESET_LOOSE: &[&str] = &[
 const CHEAT_RESET: &[&str] = &[
     "CREATE TABLE t_other (id UInt64, c String) ENGINE = MergeTree ORDER BY id",
     "CREATE TABLE t_main (id UInt64, c String, n UInt32, created_at DateTime, j String, g String, arr Array(String)) ENGINE = MergeTree PARTITION BY toYYYYMM(created_at) ORDER BY intHash32(id) SAMPLE BY intHash32(id)",
+    "CREATE TABLE t_repl (id UInt64, c String) ENGINE = ReplacingMergeTree ORDER BY id",
     "INSERT INTO t_other (id, c) VALUES (1, 'one')",
     "INSERT INTO t_main (id, c, n, created_at, j, g, arr) VALUES (1, 'a', 5, '2024-01-15 10:00:00', '{\"a\": 1}', 'g1', ['x', 'y']), (2, 'b', 7, '2024-01-15 11:00:00', '{}', 'g1', ['x']), (3, 'c', 9, '2024-01-16 12:00:00', '{}', 'g2', [])",
 ];

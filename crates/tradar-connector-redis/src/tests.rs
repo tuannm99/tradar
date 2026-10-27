@@ -64,6 +64,7 @@ fn quote_arg_round_trips_through_split_command() {
     }
 }
 use testcontainers_modules::redis::{REDIS_PORT, Redis};
+use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 #[test]
@@ -587,7 +588,12 @@ const CHEAT_SEED: &[&str] = &[
 
 #[tokio::test]
 async fn every_cheatsheet_entry_runs_on_a_real_server() {
-    let container = Redis::default().start().await.unwrap();
+    // A current server: some entries are for Redis 6 / 6.2+.
+    let container = Redis::default()
+        .with_tag("7.4-alpine")
+        .start()
+        .await
+        .unwrap();
     let port = container.get_host_port_ipv4(REDIS_PORT).await.unwrap();
     let mut driver = RedisDriver::new(&format!("redis://127.0.0.1:{port}"));
     driver.connect().await.unwrap();

@@ -63,6 +63,7 @@ const RESET_LOOSE: &[&str] = &[
 ];
 const RESET: &[&str] = &[
     "CREATE USER 'u1'@'%'",
+    "GRANT SELECT ON test.* TO 'u1'@'%'",
     "CREATE TABLE t_other (id BIGINT PRIMARY KEY, c VARCHAR(50)) ENGINE=InnoDB",
     "CREATE TABLE t_main (id BIGINT AUTO_INCREMENT PRIMARY KEY, c VARCHAR(50), n INT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, j JSON, o_id BIGINT, g VARCHAR(20), FOREIGN KEY (o_id) REFERENCES t_other (id)) ENGINE=InnoDB",
     "INSERT INTO t_other VALUES (1, 'one')",

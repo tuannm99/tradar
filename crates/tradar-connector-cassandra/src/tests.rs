@@ -434,6 +434,9 @@ mod docker {
                 "new_keyspace" => "ks_new",
                 "table" => "t_main",
                 "new_table" => "t_new",
+                "series_table" => "t_series",
+                "datacenter" => "datacenter1",
+                "second_value" => "2",
                 "counter_table" => "t_counter",
                 "counter_column" => "cnt",
                 "new_view" => "v_new",
@@ -478,11 +481,14 @@ mod docker {
             }
             statements.extend([
                 "CREATE KEYSPACE IF NOT EXISTS ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}",
-                "CREATE TABLE IF NOT EXISTS ks.t_main (id int, ts int, c text, tags set<text>, PRIMARY KEY (id, ts))",
+                "CREATE TABLE IF NOT EXISTS ks.t_main (id int PRIMARY KEY, c text, d text, tags set<text>)",
+                "CREATE TABLE IF NOT EXISTS ks.t_series (id int, ts int, c text, PRIMARY KEY (id, ts))",
                 "CREATE TABLE IF NOT EXISTS ks.t_counter (id int PRIMARY KEY, cnt counter)",
-                "CREATE INDEX IF NOT EXISTS ix_exist ON ks.t_main (c)",
-                "INSERT INTO ks.t_main (id, ts, c, tags) VALUES (1, 10, 'a', {'x'})",
-                "INSERT INTO ks.t_main (id, ts, c, tags) VALUES (1, 20, 'b', {'y'})",
+                "CREATE INDEX IF NOT EXISTS ix_exist ON ks.t_main (d)",
+                "INSERT INTO ks.t_main (id, c, d, tags) VALUES (1, 'a', 'd1', {'x'})",
+                "INSERT INTO ks.t_main (id, c, d, tags) VALUES (2, 'b', 'd2', {'y'})",
+                "INSERT INTO ks.t_series (id, ts, c) VALUES (1, 10, 'a')",
+                "INSERT INTO ks.t_series (id, ts, c) VALUES (1, 20, 'b')",
             ]);
             statements
         };

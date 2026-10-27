@@ -553,7 +553,7 @@ SELECT * FROM ${table};"##,
     CheatEntry::new("Admin", "ANALYZE a table", r##"ANALYZE ${table};"##),
     CheatEntry::new(
         "Admin",
-        "Rebuild the indexes of a table",
+        "Rebuild the indexes of a table (PostgreSQL 12+)",
         r##"REINDEX TABLE CONCURRENTLY ${table};"##,
     ),
     CheatEntry::new(
