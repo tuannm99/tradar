@@ -254,12 +254,12 @@ pub(crate) const ENTRIES: &[CheatEntry] = &[
     CheatEntry::new(
         "Aggregate",
         "Add a computed field ($addFields)",
-        r##"db.${collection}.aggregate([{$addFields: {size: {$size: "$${field}"}}}, {$limit: 20}])"##,
+        r##"db.${collection}.aggregate([{$addFields: {size: {$size: "$${array_field}"}}}, {$limit: 20}])"##,
     ),
     CheatEntry::new(
         "Aggregate",
         "Documents grouped into ranges ($bucket)",
-        r##"db.${collection}.aggregate([{$bucket: {groupBy: "$${field}", boundaries: [0, 10, 100, 1000], default: "other"}}])"##,
+        r##"db.${collection}.aggregate([{$bucket: {groupBy: "$${number_field}", boundaries: [0, 10, 100, 1000], default: "other"}}])"##,
     ),
     CheatEntry::new(
         "Aggregate",

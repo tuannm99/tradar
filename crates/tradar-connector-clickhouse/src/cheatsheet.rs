@@ -237,7 +237,7 @@ LIMIT 100;"##,
     CheatEntry::new(
         "Query",
         "Rows per day",
-        r##"SELECT toDate(${column}) AS day, count()
+        r##"SELECT toDate(${date_column}) AS day, count()
 FROM ${table}
 GROUP BY day
 ORDER BY day DESC
@@ -246,9 +246,9 @@ LIMIT 30;"##,
     CheatEntry::new(
         "Query",
         "Rows per hour, last day",
-        r##"SELECT toStartOfHour(${column}) AS hour, count()
+        r##"SELECT toStartOfHour(${date_column}) AS hour, count()
 FROM ${table}
-WHERE ${column} > now() - INTERVAL 1 DAY
+WHERE ${date_column} > now() - INTERVAL 1 DAY
 GROUP BY hour
 ORDER BY hour;"##,
     ),
@@ -343,14 +343,14 @@ LIMIT 100;"##,
     ),
     CheatEntry::new(
         "SQL syntax",
-        "Sample part of a big table (SAMPLE)",
+        "Sample part of a table (needs SAMPLE BY in the table)",
         r##"SELECT count() * 10 AS estimated_rows
 FROM ${table} SAMPLE 0.1;"##,
     ),
     CheatEntry::new(
         "SQL syntax",
         "Fixed time buckets",
-        r##"SELECT toStartOfInterval(${column}, INTERVAL 5 MINUTE) AS bucket, count()
+        r##"SELECT toStartOfInterval(${date_column}, INTERVAL 5 MINUTE) AS bucket, count()
 FROM ${table}
 GROUP BY bucket
 ORDER BY bucket DESC
@@ -475,7 +475,7 @@ ORDER BY id;"##,
         "Schema",
         "CREATE MATERIALIZED VIEW",
         r##"CREATE MATERIALIZED VIEW ${new_view} ENGINE = SummingMergeTree ORDER BY day AS
-SELECT toDate(${column}) AS day, count() AS n
+SELECT toDate(${date_column}) AS day, count() AS n
 FROM ${table}
 GROUP BY day;"##,
     ),
@@ -507,7 +507,7 @@ GROUP BY day;"##,
     CheatEntry::new(
         "Schema",
         "Set a TTL (delete old rows automatically)",
-        r##"ALTER TABLE ${table} MODIFY TTL ${column} + INTERVAL 90 DAY;"##,
+        r##"ALTER TABLE ${table} MODIFY TTL ${date_column} + INTERVAL 90 DAY;"##,
     ),
     CheatEntry::new(
         "Schema",

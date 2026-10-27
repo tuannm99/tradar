@@ -206,7 +206,7 @@ LIMIT 100;"##,
     CheatEntry::new(
         "Query",
         "Rows per day",
-        r##"SELECT DATE(${column}) AS day, COUNT(*)
+        r##"SELECT DATE(${date_column}) AS day, COUNT(*)
 FROM ${table}
 GROUP BY day
 ORDER BY day DESC
@@ -426,7 +426,7 @@ LIMIT 1000;"##,
     CheatEntry::new(
         "Schema",
         "Change the type of a column",
-        r##"ALTER TABLE ${table} MODIFY COLUMN ${column} BIGINT NOT NULL;"##,
+        r##"ALTER TABLE ${table} MODIFY COLUMN ${number_column} BIGINT NOT NULL;"##,
     ),
     CheatEntry::new(
         "Schema",
@@ -442,7 +442,7 @@ LIMIT 1000;"##,
         "Schema",
         "Add a foreign key",
         r##"ALTER TABLE ${table}
-ADD CONSTRAINT ${constraint} FOREIGN KEY (${column}) REFERENCES ${other_table} (${join_column});"##,
+ADD CONSTRAINT ${constraint} FOREIGN KEY (${fk_column}) REFERENCES ${other_table} (${join_column});"##,
     ),
     CheatEntry::new(
         "Schema",

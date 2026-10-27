@@ -128,7 +128,7 @@ WHERE ${key} = ${value} AND ${clustering_column} >= ${from} AND ${clustering_col
         "Filter on a non-key column (ALLOW FILTERING, scans)",
         r##"SELECT *
 FROM ${keyspace}.${table}
-WHERE ${column} = ${value}
+WHERE ${column} = '${other_value}'
 LIMIT 20
 ALLOW FILTERING;"##,
     ),
@@ -186,7 +186,7 @@ LIMIT 20;"##,
         "A value in a collection column (CONTAINS)",
         r##"SELECT *
 FROM ${keyspace}.${table}
-WHERE ${column} CONTAINS '${value}'
+WHERE ${set_column} CONTAINS '${value}'
 LIMIT 20;"##,
     ),
     // ── Write ──
@@ -235,14 +235,14 @@ IF ${column} = '${old_value}';"##,
         "Write",
         "Add to a set column",
         r##"UPDATE ${keyspace}.${table}
-SET ${column} = ${column} + {'${other_value}'}
+SET ${set_column} = ${set_column} + {'${other_value}'}
 WHERE ${key} = ${value};"##,
     ),
     CheatEntry::new(
         "Write",
-        "Add to a counter column",
-        r##"UPDATE ${keyspace}.${table}
-SET ${column} = ${column} + 1
+        "Add to a counter column (a counter table)",
+        r##"UPDATE ${keyspace}.${counter_table}
+SET ${counter_column} = ${counter_column} + 1
 WHERE ${key} = ${value};"##,
     ),
     CheatEntry::new(

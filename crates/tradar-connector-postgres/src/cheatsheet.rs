@@ -259,7 +259,7 @@ LIMIT 100;"##,
     CheatEntry::new(
         "Query",
         "Rows per day",
-        r##"SELECT date_trunc('day', ${column}) AS day, count(*)
+        r##"SELECT date_trunc('day', ${date_column}) AS day, count(*)
 FROM ${table}
 GROUP BY 1
 ORDER BY 1 DESC
@@ -489,7 +489,7 @@ WHERE a.ctid < b.ctid AND a.${column} = b.${column};"##,
         "Schema",
         "Change the type of a column",
         r##"ALTER TABLE ${table}
-ALTER COLUMN ${column} TYPE bigint USING ${column}::bigint;"##,
+ALTER COLUMN ${number_column} TYPE bigint USING ${number_column}::bigint;"##,
     ),
     CheatEntry::new(
         "Schema",
@@ -510,7 +510,7 @@ ALTER COLUMN ${column} TYPE bigint USING ${column}::bigint;"##,
         "Schema",
         "Add a foreign key",
         r##"ALTER TABLE ${table}
-ADD CONSTRAINT ${constraint} FOREIGN KEY (${column}) REFERENCES ${other_table} (${join_column});"##,
+ADD CONSTRAINT ${constraint} FOREIGN KEY (${fk_column}) REFERENCES ${other_table} (${join_column});"##,
     ),
     CheatEntry::new(
         "Schema",
