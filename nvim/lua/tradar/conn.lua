@@ -86,6 +86,21 @@ function M.cached_driver(conn) return state.drivers and state.drivers[conn] or n
 --- Whether the server has confirmed a connection (not merely a binding).
 function M.is_connected(name) return state.connected[name] == true end
 
+--- Closes a connection on the server (`disconnect`) and forgets it here, to
+--- free its pool and memory; the next use reconnects. `cb(closed)` is told
+--- whether there was anything to close.
+function M.disconnect(name, cb)
+  call('disconnect', { connection = name }, function(r)
+    state.connected[name], state.idle[name], state.alive[name], state.in_tx[name] = nil, nil, nil, nil
+    if state.poller and next(state.connected) == nil then
+      state.poller:stop()
+      state.poller:close()
+      state.poller = nil
+    end
+    if cb then cb(r.disconnected == true) end
+  end)
+end
+
 --- Connections whose name matches `setup{ protected = {...} }` (default
 --- `{"prod"}`): every write asks first, and the statusline shows `⚠`.
 function M.is_protected(name)

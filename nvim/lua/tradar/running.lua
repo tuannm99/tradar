@@ -82,7 +82,7 @@ local function run_text(buf, text, base_row, base_col, flags)
   if not conn then
     return M.connect(nil, function() run_text(buf, text, base_row, base_col) end)
   end
-  if not flags.refresh then state.sql_buf = buf end
+  if not flags.refresh and not flags.slot_of then state.sql_buf = buf end
 
   if not flags.confirmed and opts.confirm ~= false then
     local confirmed_flags = vim.tbl_extend('force', flags, { confirmed = true })
@@ -109,7 +109,7 @@ local function run_text(buf, text, base_row, base_col, flags)
     state.running = { id = id, conn = conn, started = uv.hrtime() }
     ctx.start_spinner()
     local started = uv.hrtime()
-    if not flags.refresh then ctx.remember(conn, text) end
+    if not flags.refresh and not flags.no_history then ctx.remember(conn, text) end
     local function finish()
       state.running = nil
       ctx.stop_spinner()
@@ -125,7 +125,7 @@ local function run_text(buf, text, base_row, base_col, flags)
         or ('%d/%d rows · %s'):format(#r.rows, r.total, took)
       if vim.api.nvim_buf_is_valid(buf) then vim.diagnostic.reset(ns, buf) end
       if guard.changes_schema(text) then state.schema_cache[conn] = nil end
-      ctx.show_result(r, { conn = conn, query = text, refresh = flags.refresh })
+      ctx.show_result(r, { conn = conn, query = text, refresh = flags.refresh, slot_of = flags.slot_of, view = flags.view })
       -- BEGIN/COMMIT/ROLLBACK flip the `tx` badge now, not at the next 15s poll.
       local verb = text:match('^%s*(%a+)')
       if verb and TX_VERBS[verb:lower()] then

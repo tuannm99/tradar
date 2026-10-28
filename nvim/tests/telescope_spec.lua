@@ -149,6 +149,30 @@ H.check('...marking it connected', p and results(p)[1].display:find('●', 1, tr
 keys('<CR>')
 H.check('<CR> binds the buffer to it', H.wait(3000, function() return vim.b[H.sqlbuf].tradar_connection == 'local' end), tostring(vim.b[H.sqlbuf].tradar_connection))
 
+-- <C-d> closes the connection on the server
+vim.cmd('TradarConnect')
+p = picker(1)
+local asked_confirm
+vim.fn.confirm = function(msg) asked_confirm = msg; return 1 end
+H.notes = {}
+keys('<C-d>')
+H.check('<C-d> asks before closing', H.wait(3000, function() return asked_confirm ~= nil end) and asked_confirm:find('Disconnect `local`', 1, true) ~= nil, tostring(asked_confirm))
+H.check('...then the connection is closed here', H.wait(3000, function() return not t.is_connected('local') end))
+H.check('...and the server really closed it', (function()
+  local list
+  require('tradar.rpc').request('connections.list', nil, function(e, r) list = r end)
+  H.wait(3000, function() return list ~= nil end)
+  return list and list[1].connected == false
+end)())
+H.check('...and says so', #H.notes_with('disconnected `local`') == 1, vim.inspect(H.notes))
+vim.cmd('TradarConnect')
+p = picker(1)
+H.notes = {}
+keys('<C-d>')
+H.check('on a connection that is not open it only says so', H.wait(3000, function() return #H.notes_with('is not connected') == 1 end), vim.inspect(H.notes))
+keys('<Esc><Esc>')
+H.check('it reconnects on the next use', H.connect())
+
 local ctx = require('tradar.ctx')
 ctx.opts.connection_picker = 'ui'
 local via_ui
