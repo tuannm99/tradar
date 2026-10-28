@@ -65,7 +65,7 @@ function M.connections(list, on_pick, opts)
   opts = opts or {}
   local current = vim.b.tradar_connection
   t.pickers.new(opts, {
-    prompt_title = 'tradar connections  (<CR> connect · <C-a> add · <C-e> edit file)',
+    prompt_title = 'tradar connections  (<CR> connect · <C-a> add · <C-d> disconnect · <C-e> edit file)',
     finder = t.finders.new_table({
       results = list,
       entry_maker = function(c)
@@ -97,6 +97,19 @@ function M.connections(list, on_pick, opts)
       map({ 'i', 'n' }, '<C-e>', function()
         t.actions.close(prompt_bufnr)
         tradar.edit_connections()
+      end)
+      map({ 'i', 'n' }, '<C-d>', function()
+        local entry = t.state.get_selected_entry()
+        if not entry then return end
+        local c = entry.value
+        if not c.connected and not state.connected[c.name] then
+          return vim.notify(('tradar: `%s` is not connected'):format(c.name), vim.log.levels.INFO)
+        end
+        t.actions.close(prompt_bufnr)
+        if vim.fn.confirm(('Disconnect `%s`? Open results keep what is loaded; the next query reconnects.'):format(c.name), '&Yes\n&No', 2) ~= 1 then return end
+        tradar.disconnect(c.name, function(closed)
+          vim.notify(closed and ('tradar: disconnected `%s`'):format(c.name) or ('tradar: `%s` was not connected'):format(c.name))
+        end)
       end)
       return true
     end,

@@ -37,6 +37,7 @@ require('tradar.complete')
 require('tradar.files')
 require('tradar.crud')
 require('tradar.cheatsheet')
+require('tradar.serverview')
 require('tradar.refresh')
 require('tradar.addconn')
 

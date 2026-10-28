@@ -189,6 +189,8 @@ local function quote_literal(value, driver)
   return "'" .. v .. "'"
 end
 
+ctx.quote_ident, ctx.quote_literal = quote_ident, quote_literal
+
 local function word_under_cursor()
   local line = vim.api.nvim_get_current_line()
   local col = vim.api.nvim_win_get_cursor(0)[2] + 1

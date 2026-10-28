@@ -34,6 +34,18 @@ local function compare(a, b, op)
   return a <= b
 end
 
+--- `col op value` in `text` as `{ col = index, name, op, value }`, or nil when
+--- `text` is not of that shape (plain text, or a column the result has not).
+--- `value` has its quotes taken off.
+function M.condition(text, columns)
+  text = vim.trim(text or '')
+  for _, op in ipairs(OPS) do
+    local name, value = text:match('^([%w_.]+)%s*' .. vim.pesc(op) .. '%s*(.*)$')
+    local idx = name and column_index(columns, name)
+    if idx then return { col = idx, name = columns[idx], op = op, value = unquote(value) } end
+  end
+end
+
 --- `text` as a predicate over a row, or nil for an empty filter.
 ---   `status = failed`, `age >= 30`, `name != bob`, `city ~ han` (a column,
 ---   an operator, a value), or plain `text`: any cell containing it.
@@ -41,17 +53,14 @@ end
 function M.parse(text, columns)
   text = vim.trim(text or '')
   if text == '' then return nil end
-  for _, op in ipairs(OPS) do
-    local name, value = text:match('^([%w_.]+)%s*' .. vim.pesc(op) .. '%s*(.*)$')
-    local idx = name and column_index(columns, name)
-    if idx then
-      value = unquote(value)
-      if op == '~' then
-        local needle = value:lower()
-        return function(row) return cell(row, idx):lower():find(needle, 1, true) ~= nil end
-      end
-      return function(row) return compare(cell(row, idx), value, op) end
+  local cond = M.condition(text, columns)
+  if cond then
+    local idx, op, value = cond.col, cond.op, cond.value
+    if op == '~' then
+      local needle = value:lower()
+      return function(row) return cell(row, idx):lower():find(needle, 1, true) ~= nil end
     end
+    return function(row) return compare(cell(row, idx), value, op) end
   end
   local needle = text:lower()
   return function(row)

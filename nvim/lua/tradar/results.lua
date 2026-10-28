@@ -122,6 +122,12 @@ local function results_title(r)
     if r.filter then note[#note + 1] = ('filter «%s»: %d of %d loaded'):format(r.filter, #(r.kind == 'documents' and r.tvrows or r.vrows or {}), #(r.kind == 'documents' and r.trows or r.rows or {})) end
     if r.sort and cols and cols[r.sort.col] then note[#note + 1] = ('sorted by %s %s'):format(cols[r.sort.col], r.sort.desc and '↓' or '↑') end
     if #note > 0 then text = text .. ' · ' .. table.concat(note, ' · ') end
+    if r.filter and r.shown < r.total and r.kind == 'table' and not r.hist then
+      text = text .. (' — %sA asks the server, for all %d rows'):format(opts.prefix or '<leader>r', r.total)
+    end
+  end
+  if r.server_view then
+    text = text .. ' · server ' .. ctx.M.describe_server_view(r.server_view.filter, r.server_view.sort, r.server_view.columns or r.columns)
   end
   local w = state.watch
   if w and w.query == r.query and w.conn == r.conn then text = text .. (' · watching every %gs'):format(w.secs) end
@@ -422,6 +428,10 @@ local function show_result(r, meta)
   local query = meta and meta.query
   local key = slots.key(meta and meta.conn, query)
   local label = slots.label(query or '')
+  -- A filter / sort asked of the server (`serverview`) runs a wrapper around the
+  -- statement but stays in the tab of the statement.
+  local origin = meta and meta.slot_of
+  if origin then key, label = origin.key, origin.label end
   if r.kind == 'affected' then
     state.result = nil
     local entry = { kind = 'affected', rows = r.rows, took_ms = took, conn = meta and meta.conn, query = query, closed = true, key = key, label = label, at = os.time() }
@@ -451,7 +461,11 @@ local function show_result(r, meta)
     key = key, label = label,
   }
   local prev = refresh and refresh.replacing
-  if prev then entry.filter, entry.sort = prev.filter, prev.sort end
+  if prev then
+    entry.filter, entry.sort = prev.filter, prev.sort
+    entry.server_view = prev.server_view
+  end
+  if meta and meta.view then entry.server_view = meta.view end
   state.result = entry
   log_result(entry, prev or nil)
   release_result(r.cursor)
