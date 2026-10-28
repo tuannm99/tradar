@@ -10,6 +10,7 @@ local call = ctx.call
 local slots = require('tradar.slots')
 local gridview = require('tradar.gridview')
 local rdiff = require('tradar.rdiff')
+local jsonhl = require('tradar.jsonhl')
 
 -- ── results buffer ───────────────────────────────────────────────────────
 
@@ -238,19 +239,13 @@ local function paint_results(new_from)
   local win = vim.fn.bufwinid(buf)
   local pos = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
   set_lines(buf, lines)
-  -- JSON highlighting by `syntax` only: no `filetype`, so no JSON ftplugins/LSP attach to a scratch buffer.
-  -- Regex syntax highlighting of a big JSON buffer is slow, so it is capped:
-  -- only the first 200 columns of a line, and not at all past 3000 lines.
-  vim.bo[buf].synmaxcol = 200
+  -- The JSON view is coloured by `jsonhl` (extmarks), not `syntax json`: the regex
+  -- engine is time-limited and dropped colours on big results. No `filetype`, so
+  -- no JSON ftplugins/LSP attach to a scratch buffer.
+  vim.bo[buf].syntax = ''
   local json_view = (r.kind == 'documents' or r.kind == 'table') and r.view == 'json'
-  vim.bo[buf].syntax = (json_view and #lines <= 3000) and 'json' or ''
-  if json_view and r.kind == 'documents' and vim.bo[buf].syntax == 'json' then
-    -- `ObjectId(...)` is not JSON: no red \"error\" on it, and colour its name.
-    vim.api.nvim_buf_call(buf, function()
-      vim.cmd([[silent! syntax clear jsonNoQuotesError]])
-      vim.cmd([[syntax match Function /\<\%(ObjectId\|ISODate\)\ze(/]])
-    end)
-  end
+  -- Not the blank line and the footer that close the buffer.
+  jsonhl.apply(buf, json_view and lines or nil, #lines - 2)
   if pos then pcall(vim.api.nvim_win_set_cursor, win, { math.min(pos[1], #lines), pos[2] }) end
   sync_editable(r)
 end
