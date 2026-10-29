@@ -46,7 +46,6 @@ HTTP và gRPC dùng **chung một workbench**: mỗi connection một buffer s�
 | `:TradarRequests [tên]` | mở workbench của một connection HTTP hoặc gRPC (đang đứng trong workbench thì chạy block) |
 | `:TradarHttpSend [tên]` / `:TradarGrpcSend [tên]` | như trên, giới hạn theo driver |
 | `:TradarHttpConnect [tên]` | ghi nhận connection HTTP (không gọi ra ngoài, nên không bao giờ lỗi) |
-| `:TradarHttpEndpoints [tên] [đường-dẫn]` | chọn endpoint từ tài liệu OpenAPI của API, thêm block vào workbench |
 
 ### Cú pháp
 
@@ -78,10 +77,11 @@ deadline: 5s                          # deadline của call, không gửi như h
 - **Biến theo connection** (`setup`): `request_vars = { ['*'] = { ... }, web = { token = '...' } }` — `'*'` cho mọi workbench, mục theo tên connection ghi đè `'*'`, và `@tên = …` trong file ghi đè cả hai. Hợp với giá trị dùng chung nhiều file (base path, tenant); bí mật nên lấy từ `{{$env.TÊN}}` thay vì ghi vào config.
 - Workbench là scratch buffer, giữ nội dung trong phiên Neovim; `:w đường-dẫn` lưu ra file.
 
-### Điền nhanh
+### Xuất curl và điền nhanh
+
+- **Xuất curl** (`<leader>ry` hoặc `:TradarCopyCurl`, con trỏ trong block): copy block thành lệnh `curl` (HTTP) hoặc `grpcurl` (gRPC) vào register `"` và clipboard. Biến `{{x}}` đã được thay, `url` tương đối được nối vào `target` của connection, header/metadata/deadline/body đi theo, nên dán vào terminal hoặc gửi cho đồng nghiệp là chạy được. `$uuid`/`$timestamp` mỗi lần copy cho giá trị mới.
 
 - **Cheatsheet** (`<leader>rk` hoặc `:TradarCheatsheet` trong workbench): các block mẫu theo driver — HTTP (GET/POST/PUT/PATCH/DELETE, Bearer/Basic/API key, form, multipart, GraphQL, JSON-RPC, conditional GET, CORS preflight, health…), gRPC (health check chuẩn, metadata, deadline, well-known types, stream…). `<CR>` thêm block vào cuối workbench, `<C-r>` thêm và chạy luôn.
-- **Endpoint từ OpenAPI** (`:TradarHttpEndpoints [connection] [đường-dẫn]`): đọc tài liệu OpenAPI 3 / Swagger 2 của API (thử `/openapi.json`, `/swagger.json`, `/v3/api-docs`, `/v2/api-docs`, `/api-docs`; hoặc đường dẫn/URL bạn đưa vào) rồi liệt kê `METHOD path  summary`. Chọn một endpoint thì thêm block: tham số path thành `{{id}}` kèm dòng nhắc `@id = `, query bắt buộc thành `?a=&b=`, header bắt buộc, và body JSON mẫu sinh từ schema (`example`/`default`/enum nếu có). Chỉ đọc JSON, chưa đọc YAML.
 - **Gợi ý** (`<C-x><C-o>`): động từ HTTP và `GRPC` ở dòng request, tên header và giá trị thông dụng (`Content-Type`, `Accept`, …), `{{biến}}` (kể cả `$uuid`…), và với dòng `GRPC` thì tên service rồi `service/Method` lấy từ reflection.
 
 ### Phím trong workbench

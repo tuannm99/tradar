@@ -580,7 +580,7 @@ function M.copy(buf)
   notify(('copied as %s'):format(req.kind == 'grpc' and 'grpcurl' or 'curl'))
 end
 
--- ── cheat sheet, OpenAPI endpoints, completion ──────────────────────────
+-- ── cheat sheet, completion ──────────────────────────
 
 --- Adds the lines of a block to the end of the workbench `buf` and puts the
 --- cursor on the first non-title line.
@@ -625,47 +625,6 @@ function M.cheatsheet(buf)
     prompt = 'tradar request cheat sheet',
     format_item = function(e) return ('%-10s %s'):format(e.category, e.title) end,
   }, function(e) if e then put(e, false) end end)
-end
-
---- The OpenAPI / Swagger document of an HTTP connection: `path` when given
---- (a path or a full URL), else the usual places in turn. `cb(doc, path)`.
-local function fetch_openapi(conn, path, cb)
-  local candidates = (path and path ~= '') and { path } or require('tradar.openapi').CANDIDATES
-  local tried = {}
-  local function try(i)
-    if i > #candidates then
-      return notify(('no OpenAPI document found (tried %s) -- give its path: :TradarHttpEndpoints %s /path/to/openapi.json'):format(table.concat(tried, ', '), conn), vim.log.levels.WARN)
-    end
-    local url = candidates[i]
-    rpc.request('http.send', { connection = conn, method = 'GET', url = url, headers = 'Accept: application/json', body = '' }, function(e, resp)
-      tried[#tried + 1] = url
-      if not e and resp and resp.status == 200 then
-        local ok, doc = pcall(vim.json.decode, resp.body, { luanil = { object = true, array = true } })
-        if ok and type(doc) == 'table' and type(doc.paths) == 'table' then return cb(doc, url) end
-      end
-      try(i + 1)
-    end)
-  end
-  try(1)
-end
-
---- `:TradarHttpEndpoints [conn] [path]`: the endpoints of the API's OpenAPI
---- document in a list; the pick becomes a request block (path parameters as
---- `@x = ` lines, required query parameters, a sample JSON body).
-function M.endpoints(name, path)
-  with_bench(name, { 'http' }, function(buf, _, c)
-    fetch_openapi(c.name, path, function(doc, url)
-      local openapi = require('tradar.openapi')
-      local list = openapi.endpoints(doc)
-      if #list == 0 then return notify(url .. ' lists no endpoints', vim.log.levels.WARN) end
-      vim.ui.select(list, {
-        prompt = ('%s (%d endpoints)'):format(url, #list),
-        format_item = function(ep) return ('%-7s %s%s'):format(ep.method, ep.path, ep.summary ~= '' and ('  ' .. ep.summary) or '') end,
-      }, function(ep)
-        if ep then append_block(buf, openapi.block(doc, ep)) end
-      end)
-    end)
-  end)
 end
 
 local HEADERS = {

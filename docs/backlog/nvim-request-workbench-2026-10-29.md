@@ -17,9 +17,10 @@ Test: `rest_spec` (parser, biến, tab key, curl/grpcurl, jsonfmt), `restbench_s
 Làm tiếp cùng ngày (phần "chưa làm" của bản đầu):
 
 - **Biến theo connection**: `setup{ request_vars = { ['*'] = {...}, [conn] = {...} } }` (plugin, không đụng `connections.toml` vì `SavedConnection` chỉ có name/driver/target và lần lưu sẽ bỏ field lạ); thứ tự ưu tiên `'*'` < connection < `@x = …` trong file. `@x = ` để trống là dòng nhắc, không phải giá trị (dùng thì báo chưa khai báo).
-- **Endpoint từ OpenAPI** (`openapi.lua`, `:TradarHttpEndpoints`): thử `/openapi.json`, `/swagger.json`, `/v3/api-docs`, `/v2/api-docs`, `/api-docs` qua `http.send`; liệt kê bằng `vim.ui.select`; block sinh ra có `@id = `, `{{id}}`, query/header bắt buộc, body mẫu từ schema (`$ref`, `allOf`, `oneOf` nhánh đầu, enum, format, độ sâu 4). Chỉ JSON.
 - **Gợi ý** (`omnifunc` của workbench): động từ, header và giá trị thông dụng, `{{biến}}`, và dòng `GRPC` hỏi `grpc.services` / `grpc.methods` đồng bộ (`request_sync`, 1,5 s).
 - **Cheatsheet** (`reqcheats.lua`, `rk`): danh sách tĩnh trong plugin chứ không qua server — HTTP/gRPC không phải `QueryDriver` nên không có `cheatsheet` method; test parse mọi entry thành request hợp lệ.
 - **Lọc response** (`rF`, `jsonpath.lua`): đường dẫn kiểu jq hoặc chuỗi con theo dòng; `render.pretty` thôi viết `/` thành `\/`.
 
-Chưa làm: lọc phía server cho response lớn, đọc OpenAPI dạng YAML, cheatsheet của riêng người dùng cho HTTP/gRPC (hiện chỉ cần giữ file workbench).
+Đã thử rồi bỏ: picker endpoint từ OpenAPI (`:TradarHttpEndpoints`) — người dùng không cần, chỉ cần xuất curl (`ry` / `:TradarCopyCurl`).
+
+Chưa làm: lọc phía server cho response lớn, cheatsheet của riêng người dùng cho HTTP/gRPC (hiện chỉ cần giữ file workbench).

@@ -84,9 +84,7 @@ vim.api.nvim_create_user_command('TradarHttpSend', function(a) require('tradar.h
 -- one buffer per connection, `###`-separated request blocks, `<leader>rr` runs
 -- the one under the cursor, responses open in the result tabs.
 vim.api.nvim_create_user_command('TradarGrpcSend', function(a) require('tradar.restbench').open(a.args, 'grpc') end, { nargs = '?', complete = names('grpc') })
-vim.api.nvim_create_user_command('TradarHttpEndpoints', function(a)
-  require('tradar.restbench').endpoints(a.fargs[1], a.fargs[2])
-end, { nargs = '*', complete = names('http'), desc = "pick an endpoint from the API's OpenAPI document and add its request block" })
+vim.api.nvim_create_user_command('TradarCopyCurl', function() require('tradar.restbench').copy() end, { desc = 'copy the request block under the cursor as a curl / grpcurl command' })
 vim.api.nvim_create_user_command('TradarRequests', function(a) require('tradar.restbench').open(a.args) end, {
   nargs = '?',
   complete = function(...)

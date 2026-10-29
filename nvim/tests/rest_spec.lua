@@ -107,42 +107,6 @@ local none, why2 = q('.data.nope')
 H.check('path: a missing key is explained', none == nil and why2:find('nothing at', 1, true) ~= nil, why2)
 H.check('path: a bad path is explained', select(2, q('.data..x')) ~= nil and select(2, q('.list[a]')) ~= nil)
 
--- OpenAPI
-local oa = require('tradar.openapi')
-local api = vim.json.decode([[{
-  "openapi": "3.0.0",
-  "paths": {
-    "/users/{id}": {
-      "parameters": [{"name": "id", "in": "path", "required": true}],
-      "get": {"summary": "Get user", "parameters": [{"name": "expand", "in": "query", "required": true}, {"name": "X-Trace", "in": "header", "required": true}]},
-      "delete": {"operationId": "removeUser"}
-    },
-    "/users": {
-      "post": {"summary": "Create", "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/User"}}}}}
-    }
-  },
-  "components": {"schemas": {
-    "Tag": {"type": "string", "enum": ["a", "b"]},
-    "User": {"type": "object", "properties": {
-      "name": {"type": "string", "example": "ann"},
-      "age": {"type": "integer"},
-      "active": {"type": "boolean"},
-      "tag": {"$ref": "#/components/schemas/Tag"},
-      "friends": {"type": "array", "items": {"$ref": "#/components/schemas/User"}},
-      "at": {"type": "string", "format": "date-time"}
-    }}
-  }}
-}]])
-local eps = oa.endpoints(api)
-H.check('endpoints are ordered by path then method', #eps == 3 and eps[1].path == '/users' and eps[2].method == 'GET' and eps[3].method == 'DELETE' and eps[3].summary == 'removeUser', vim.inspect(vim.tbl_map(function(e) return e.method .. e.path end, eps)))
-local get = oa.block(api, eps[2])
-H.check('a block: title, @id reminder, {{id}} in the path, required query, required header', get[1] == '### GET /users/{id} — Get user' and get[2] == '@id = ' and get[3] == 'GET /users/{{id}}?expand=' and get[4] == 'X-Trace: ', vim.inspect(get))
-local post = table.concat(oa.block(api, eps[1]), '\n')
-H.check('a body schema becomes a JSON sample (examples, enums, formats; a recursive schema ends)', post:find('"name": "ann"', 1, true) and post:find('"age": 0', 1, true) and post:find('"active": false', 1, true) and post:find('"tag": "a"', 1, true) and post:find('"at": "1970-01-01T00:00:00Z"', 1, true) and post:find('Content-Type: application/json', 1, true), post)
-local rendered = vim.split(post, '\n', { plain = true })
-local parsed = rp.parse(rendered, rp.block_at(rendered, 3), {})
-H.check('and the generated block is a request that parses', parsed and parsed.method == 'POST' and parsed.url == '/users' and #parsed.headers == 1, vim.inspect(parsed))
-
 -- the cheat sheet entries are all valid requests
 local cheats = require('tradar.reqcheats')
 vim.env.API_TOKEN = 'envtoken'

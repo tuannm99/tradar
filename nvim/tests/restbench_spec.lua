@@ -18,15 +18,6 @@ class H(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith('/count'):
             n[0] += 1
             out = json.dumps({'n': n[0]}).encode()
-        elif self.path.startswith('/openapi.json'):
-            out = json.dumps({'openapi': '3.0.0', 'paths': {
-                '/items': {
-                    'get': {'summary': 'List items', 'parameters': [{'name': 'limit', 'in': 'query', 'required': True}]},
-                    'post': {'summary': 'Create item', 'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/Item'}}}}},
-                },
-                '/items/{id}': {'get': {'summary': 'Get item', 'parameters': [{'name': 'id', 'in': 'path', 'required': True}]}},
-            }, 'components': {'schemas': {'Item': {'type': 'object', 'properties': {
-                'name': {'type': 'string'}, 'price': {'type': 'number'}, 'tags': {'type': 'array', 'items': {'type': 'string'}}}}}}}).encode()
         elif self.path.startswith('/missing'):
             status, out = 404, b'{"error":"gone"}'
         else:
@@ -155,6 +146,11 @@ rb.copy(buf)
 local curl = vim.fn.getreg('"')
 H.check('<leader>ry copies the block as curl, with the base url', curl:find('-X POST', 1, true) and curl:find('http://127.0.0.1:' .. port .. '/echo?x=1', 1, true) and curl:find('Authorization: Bearer abc', 1, true), curl)
 
+vim.fn.setreg('"', '')
+vim.api.nvim_win_set_cursor(vim.fn.bufwinid(buf), { row_of(buf, '^POST /echo'), 0 })
+vim.cmd('TradarCopyCurl')
+H.check(':TradarCopyCurl does the same as <leader>ry', vim.fn.getreg('"'):find("-X POST \\\n  'http://127.0.0.1:" .. port .. "/echo?x=1'", 1, true) ~= nil, vim.fn.getreg('"'))
+
 -- filtering a response
 run_at(buf, '^POST /echo')
 H.check('back on the echo response', shown('POST /echo'))
@@ -186,22 +182,15 @@ vim.api.nvim_buf_set_lines(buf, rows + 1, rows + 1, false, { '@tok = from-file' 
 run_at(buf, '^GET /echo$')
 H.check('request_vars: a variable in the file overrides them', H.wait(5000, function() return state.result and table.concat(state.result.lines, '\n'):find('Bearer from-file', 1, true) end), vim.inspect(state.result and state.result.lines))
 
--- OpenAPI endpoints
 local real_select = vim.ui.select
 local picked
 vim.ui.select = function(items, o, cb)
   picked = { items = items, opts = o }
   for _, item in ipairs(items) do
-    if (item.method == 'POST' and item.path == '/items') or (item.title == 'Bearer token') then return cb(item) end
+    if item.title == 'Bearer token' then return cb(item) end
   end
   cb(nil)
 end
-H.notes = {}
-rb.endpoints('web')
-H.check('the endpoints of /openapi.json are listed', H.wait(5000, function() return picked ~= nil or #H.notes > 0 end) and picked ~= nil and #picked.items == 3 and picked.opts.prompt:find('/openapi.json', 1, true) ~= nil, vim.inspect({ picked and picked.opts, H.notes }))
-H.check('...ordered by path, then method', picked.items[1].method == 'GET' and picked.items[1].path == '/items' and picked.items[2].method == 'POST')
-local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
-H.check('the picked one is added as a block with a sample body', text:find('### POST /items — Create item\nPOST /items\nContent-Type: application/json\n\n{\n  "name": "",\n  "price": 0,\n  "tags": [\n    ""\n  ]\n}', 1, true) ~= nil, text:sub(-300))
 
 -- the cheat sheet
 ctx.opts.cheatsheet_picker = 'ui'

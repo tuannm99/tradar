@@ -27,7 +27,6 @@ M.http = {
   { category = 'Protocols', title = 'JSON-RPC 2.0 call', text = 'POST /rpc\nContent-Type: application/json\n\n{\n  "jsonrpc": "2.0",\n  "id": 1,\n  "method": "ping",\n  "params": []\n}' },
   { category = 'Protocols', title = 'CORS preflight', text = 'OPTIONS /items\nOrigin: https://example.org\nAccess-Control-Request-Method: POST\nAccess-Control-Request-Headers: content-type' },
   { category = 'Health', title = 'Health check', text = 'GET /health' },
-  { category = 'Health', title = 'OpenAPI document', text = 'GET /openapi.json' },
 }
 
 M.grpc = {
