@@ -123,7 +123,7 @@ function M.cheatsheet(entries, driver, on_pick, opts)
   local t = deps()
   if not t then return end
   opts = opts or {}
-  local ft = ({ mongo = 'mongo', elasticsearch = 'esq', redis = 'redis' })[driver or ''] or 'sql'
+  local ft = ({ mongo = 'mongo', elasticsearch = 'esq', redis = 'redis', http = 'http', grpc = 'http' })[driver or ''] or 'sql'
   t.pickers.new(opts, {
     prompt_title = 'tradar cheat sheet  (<CR> insert · <C-r> insert and run · <C-e> your own)',
     finder = t.finders.new_table({

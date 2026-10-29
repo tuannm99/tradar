@@ -78,12 +78,13 @@ end
 local MAX_LINES = 100000
 
 --- Colours `buf`'s lines `1..last` (all of `lines`, or nothing when `lines` is
---- nil -- the buffer is not JSON now). Replaces the previous colours.
-function M.apply(buf, lines, last)
+--- nil -- the buffer is not JSON now), from line `from` (default 1). Replaces
+--- the previous colours.
+function M.apply(buf, lines, last, from)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   if not lines then return end
   M.define()
-  for i = 1, math.min(last or #lines, #lines, MAX_LINES) do
+  for i = from or 1, math.min(last or #lines, #lines, MAX_LINES) do
     for _, t in ipairs(M.tokens(lines[i])) do
       vim.api.nvim_buf_set_extmark(buf, ns, i - 1, t[1], { end_col = t[2], hl_group = t[3] })
     end

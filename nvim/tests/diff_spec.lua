@@ -51,5 +51,5 @@ H.check('...columns only in one are listed', diff_text():find('only before: age'
 H.check('...the removed rows are shown', diff_text():find('- id=2 | 2 | bob', 1, true) ~= nil, diff_text())
 H.notes = {}
 t.diff_result(7)
-H.check('a missing tab is refused', #H.notes_with('is not another table result') == 1, vim.inspect(H.notes))
+H.check('a missing tab is refused', #H.notes_with('is not another result of the same kind') == 1, vim.inspect(H.notes))
 H.done()
