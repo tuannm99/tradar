@@ -43,9 +43,9 @@ vim.api.nvim_create_user_command('TradarExport', function(a)
   t().export(fmt, path)
 end, { nargs = '*', complete = function() return { 'csv', 'json', 'md', 'tsv' } end })
 
--- gRPC: unary-only v1 (docs/architecture.md, "Chốt lại scope v1" under
--- gRPC) -- a connection, not a buffer's filetype, so these have no `attach`
--- autocmd the way sql/mongo/redis/esq do; run them from anywhere.
+-- gRPC: a connection, not a buffer's filetype, so these have no `attach`
+-- autocmd the way sql/mongo/redis/esq do; run them from anywhere. A picked
+-- method becomes a block in the request workbench (`:TradarRequests`).
 vim.api.nvim_create_user_command('TradarGrpcConnect', function(a) require('tradar.grpc').connect(a.args) end, { nargs = '?', complete = names('grpc') })
 vim.api.nvim_create_user_command('TradarGrpcServices', function() require('tradar.grpc').services() end, {})
 vim.api.nvim_create_user_command('TradarGrpcMethods', function(a) require('tradar.grpc').methods(nil, a.args) end, { nargs = 1 })
@@ -79,6 +79,20 @@ vim.api.nvim_create_user_command('TradarRabbitmqPublish', function(a) require('t
 -- request/response, see docs/backlog/http-server-2026-10-17.md.
 vim.api.nvim_create_user_command('TradarHttpConnect', function(a) require('tradar.http').connect(a.args) end, { nargs = '?', complete = names('http') })
 vim.api.nvim_create_user_command('TradarHttpSend', function(a) require('tradar.http').send(a.args) end, { nargs = '?', complete = names('http') })
+
+-- The request workbench shared by HTTP and gRPC (nvim/lua/tradar/restbench.lua):
+-- one buffer per connection, `###`-separated request blocks, `<leader>rr` runs
+-- the one under the cursor, responses open in the result tabs.
+vim.api.nvim_create_user_command('TradarGrpcSend', function(a) require('tradar.restbench').open(a.args, 'grpc') end, { nargs = '?', complete = names('grpc') })
+vim.api.nvim_create_user_command('TradarRequests', function(a) require('tradar.restbench').open(a.args) end, {
+  nargs = '?',
+  complete = function(...)
+    local out = vim.list_extend(names('http')(...), names('grpc')(...))
+    table.sort(out)
+    return out
+  end,
+  desc = 'open the HTTP / gRPC request workbench of a connection (inside it: run the block)',
+})
 
 -- One entry point: `:Tradar kafka tail [conn]` = `:TradarKafkaTail [conn]`,
 -- with completion of every subcommand and its arguments.

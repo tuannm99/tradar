@@ -62,6 +62,7 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] Menu sinh câu lệnh theo driver (Mongo thêm find by _id / count / aggregate…), picker connection bằng telescope — `docs/backlog/nvim-snippet-menu-connection-picker-2026-10-26.md`
 - [x] Lịch sử lần chạy + ghim tab, lọc/sắp xếp dòng đã tải, `:TradarDiff` — `docs/backlog/nvim-result-history-filter-diff-2026-10-24.md`
 - [x] Tab kết quả theo bảng/collection/index/key (thanh tab, click, `r1..9`/`rx`) — `docs/backlog/nvim-result-tabs-2026-10-23.md`
+- [x] HTTP + gRPC: workbench request chung (`###`, biến, response vào result tabs) — `docs/backlog/nvim-request-workbench-2026-10-29.md`
 - [x] HTTP: buffer request sửa được — `docs/backlog/http-request-buffer-2026-10-21.md`
 - [x] RabbitMQ publish buffer + refresh — `docs/backlog/rabbitmq-publish-buffer-2026-10-21.md`
 - [x] Kafka tail: tạm dừng/lọc/xoá/nối lại — `docs/backlog/kafka-tail-controls-2026-10-21.md`

@@ -28,6 +28,11 @@ end
 --- entry, same cursor position and filter / sort). `on_error(err)` is told when it fails; the grid
 --- stays on screen either way.
 function M.refresh(on_error)
+  local cur = state.result
+  if cur and cur.kind == 'text' then
+    if not cur.rerun then return notify('this response has nothing to repeat', vim.log.levels.WARN) end
+    return cur.rerun(cur)
+  end
   local r, why = target()
   if not r then return notify(why, vim.log.levels.WARN) end
   if ctx.dirty() then

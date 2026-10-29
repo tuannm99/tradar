@@ -111,7 +111,21 @@ end
 
 local function view_active(r) return r.filter ~= nil or r.sort ~= nil end
 
+--- Footer of a text result (an HTTP / gRPC response): status, time, size.
+local function text_title(r)
+  local text = position_text(r)
+  if r.hist then text = text .. ('run %d back of %d (%s) · '):format(r.hist, r.hist_total or r.hist, r.at and os.date('%H:%M:%S', r.at) or '?') end
+  text = text .. (r.status or 'response')
+  if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
+  if r.bytes then text = text .. (' · %d bytes'):format(r.bytes) end
+  text = text .. (' · %d lines'):format(#(r.lines or {}))
+  if r.stream then text = text .. (r.stream_open and ' · streaming (' .. (opts.prefix or '<leader>r') .. 'x stops)' or ' · stream ended') end
+  if r.head and #r.head > 0 then text = text .. (' · %sH %s headers'):format(opts.prefix or '<leader>r', r.show_head and 'hides' or 'shows') end
+  return text
+end
+
 local function results_title(r)
+  if r.kind == 'text' then return text_title(r) end
   local text = position_text(r)
   if r.hist then text = text .. ('run %d back of %d (%s) · '):format(r.hist, r.hist_total or r.hist, r.at and os.date('%H:%M:%S', r.at) or '?') end
   text = text .. ('%d/%d rows%s'):format(r.shown, r.total, r.truncated and (' (stopped at %d rows; setup{ max_rows } reads more)'):format(r.total) or '')
@@ -227,7 +241,16 @@ local function paint_results(new_from)
   end
 
   local lines
-  if r.kind == 'table' and r.view == 'json' then
+  local body_from = 1 -- first line that is the body (what gets JSON colours)
+  if r.kind == 'text' then
+    lines = {}
+    if r.show_head and r.head and #r.head > 0 then
+      vim.list_extend(lines, r.head)
+      lines[#lines + 1] = ''
+      body_from = #lines + 1
+    end
+    vim.list_extend(lines, r.lines)
+  elseif r.kind == 'table' and r.view == 'json' then
     lines = vim.split(render.json(r.columns, r.rows), '\n', { plain = true })
     lines[#lines] = nil -- the trailing newline
   elseif r.kind == 'table' then
@@ -251,7 +274,11 @@ local function paint_results(new_from)
   vim.bo[buf].syntax = ''
   local json_view = (r.kind == 'documents' or r.kind == 'table') and r.view == 'json'
   -- Not the blank line and the footer that close the buffer.
-  jsonhl.apply(buf, json_view and lines or nil, #lines - 2)
+  if r.kind == 'text' then
+    jsonhl.apply(buf, r.json and lines or nil, #lines - 2, body_from)
+  else
+    jsonhl.apply(buf, json_view and lines or nil, #lines - 2)
+  end
   if pos then pcall(vim.api.nvim_win_set_cursor, win, { math.min(pos[1], #lines), pos[2] }) end
   sync_editable(r)
 end
@@ -480,6 +507,58 @@ local function show_result(r, meta)
   if not state.result.edit then ctx.resolve_edit(state.result) end
 end
 
+--- A text result: an HTTP / gRPC response, or a stream's transcript, built by
+--- `restbench`. `entry`: `lines` (the body), `head` (status line + headers),
+--- `status`, `json` (colour the body), `took_ms`, `bytes`, `key`, `label`,
+--- `conn`, `query`; `rerun` (a function) lets `<leader>rR` repeat it.
+local function show_text(entry, refresh_of)
+  save_cursor()
+  entry.kind = 'text'
+  entry.rows = entry.lines
+  entry.total, entry.shown = #entry.lines, #entry.lines
+  entry.closed = true
+  entry.at = entry.at or os.time()
+  state.result = entry
+  log_result(entry, refresh_of)
+  release_result()
+  local buf = slot_buffer(entry)
+  state.results_buf = buf
+  ctx.attach_results(buf)
+  paint_results()
+  local win = show(buf)
+  pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 })
+  return win
+end
+
+--- Lines pushed onto a text result that is still open (a stream's replies).
+--- Repaints are coalesced; the view follows the end only when it was there.
+local append_pending = setmetatable({}, { __mode = 'k' })
+local function text_append(entry, new)
+  vim.list_extend(entry.lines, new)
+  local over = #entry.lines - require('tradar.tail').MAX_LINES
+  if over > 0 then
+    for _ = 1, over do table.remove(entry.lines, 1) end
+  end
+  entry.total, entry.shown = #entry.lines, #entry.lines
+  if append_pending[entry] then return end
+  append_pending[entry] = true
+  vim.defer_fn(function()
+    append_pending[entry] = nil
+    if state.result ~= entry or not (entry.buf and vim.api.nvim_buf_is_valid(entry.buf)) then return end
+    local win = vim.fn.bufwinid(entry.buf)
+    local follow = win ~= -1 and vim.api.nvim_win_get_cursor(win)[1] >= vim.api.nvim_buf_line_count(entry.buf) - 2
+    paint_results()
+    if win ~= -1 and follow then
+      pcall(vim.api.nvim_win_set_cursor, win, { math.max(vim.api.nvim_buf_line_count(entry.buf) - 2, 1), 0 })
+    end
+  end, 40)
+end
+
+--- Repaints the tab on screen (a stream ended, the headers were toggled).
+local function text_changed(entry)
+  if state.result == entry and entry.buf and vim.api.nvim_buf_is_valid(entry.buf) then paint_results() end
+end
+
 --- Shows logged result `i` (read-only unless its cursor is still open, see
 --- `release_result`).
 local function show_entry(i)
@@ -571,14 +650,26 @@ local function run_title(r)
 end
 
 local function show_diff(a, b)
-  local ca, ra = full_grid(a)
-  local cb, rb = full_grid(b)
-  local keys = (b.edit and b.edit.keys) or (a.edit and a.edit.keys)
-  local d, err = rdiff.compare(ca, ra, cb, rb, keys)
-  if not d then return notify(err, vim.log.levels.WARN) end
-  local note = (a.shown < a.total or b.shown < b.total) and ' (rows not loaded are not compared)' or ''
-  local lines = rdiff.lines(d, run_title(a), run_title(b))
-  if note ~= '' then lines[2] = lines[2] .. note end
+  local lines
+  if a.kind == 'text' or b.kind == 'text' then
+    if a.kind ~= b.kind then return notify('a response can only be compared with another response', vim.log.levels.WARN) end
+    local d = vim.diff(table.concat(a.lines, '\n') .. '\n', table.concat(b.lines, '\n') .. '\n', { result_type = 'unified', ctxlen = 3 })
+    lines = { ('tradar diff  %s  →  %s'):format(run_title(a), run_title(b)) }
+    if d == '' then
+      lines[#lines + 1] = 'no differences in the body'
+    else
+      vim.list_extend(lines, vim.split(d, '\n', { plain = true, trimempty = true }))
+    end
+  else
+    local ca, ra = full_grid(a)
+    local cb, rb = full_grid(b)
+    local keys = (b.edit and b.edit.keys) or (a.edit and a.edit.keys)
+    local d, err = rdiff.compare(ca, ra, cb, rb, keys)
+    if not d then return notify(err, vim.log.levels.WARN) end
+    local note = (a.shown < a.total or b.shown < b.total) and ' (rows not loaded are not compared)' or ''
+    lines = rdiff.lines(d, run_title(a), run_title(b))
+    if note ~= '' then lines[2] = lines[2] .. note end
+  end
   local buf = scratch('tradar://diff', state.diff_buf)
   state.diff_buf = buf
   set_lines(buf, lines)
@@ -586,6 +677,7 @@ local function show_diff(a, b)
     vim.cmd([[syntax match DiffAdd /^+.*/]])
     vim.cmd([[syntax match DiffDelete /^-.*/]])
     vim.cmd([[syntax match DiffChange /^\~.*/]])
+    vim.cmd([[syntax match DiffChange /^@@.*/]])
     vim.cmd([[syntax match Comment /^tradar diff.*\|^matched by.*\|^only .*/]])
   end)
   vim.keymap.set('n', 'q', function()
@@ -615,14 +707,14 @@ function M.diff_result(arg)
   local n = tonumber(arg)
   if n then
     local a = log[n]
-    if not a or a.kind == 'affected' or a == e then return notify(('tab %s is not another table result'):format(arg), vim.log.levels.WARN) end
+    if not a or a.kind == 'affected' or a == e or (a.kind == 'text') ~= (e.kind == 'text') then return notify(('tab %s is not another result of the same kind'):format(arg), vim.log.levels.WARN) end
     return show_diff(a, e)
   end
   if state.result ~= e and state.result and state.result.hist then return show_diff(state.result, e) end
   if e.history and #e.history > 0 then return show_diff(e.history[1], e) end
   local items = {}
   for i, other in ipairs(log) do
-    if other ~= e and other.kind ~= 'affected' then items[#items + 1] = i end
+    if other ~= e and other.kind ~= 'affected' and (other.kind == 'text') == (e.kind == 'text') then items[#items + 1] = i end
   end
   if #items == 0 then return notify('nothing to compare with yet — run it again, or open another result', vim.log.levels.WARN) end
   vim.ui.select(items, {
@@ -683,7 +775,7 @@ function M.pick_result()
       local e = log[i]
       local q = (e.query or ''):gsub('%s+', ' ')
       if #q > 60 then q = q:sub(1, 59) .. '…' end
-      local what = e.kind == 'affected' and ('%d row(s) affected'):format(e.rows) or ('%d rows'):format(e.total)
+      local what = e.kind == 'affected' and ('%d row(s) affected'):format(e.rows) or e.kind == 'text' and (e.status or 'response') or ('%d rows'):format(e.total)
       return ('%d  %s  (%s)  %s%s'):format(i, e.label or '', what, q, i == state.result_pos and '  ◀' or '')
     end,
   }, function(i)
@@ -801,6 +893,14 @@ function M.toggle_sort()
   if span then pcall(vim.cmd, ('normal! %d|'):format(span[1])) end
 end
 
+--- `<leader>rH`: show / hide the status line and headers above a response body.
+function M.toggle_head()
+  local r = state.result
+  if not r or r.kind ~= 'text' or not r.head or #r.head == 0 then return notify('no response headers on screen') end
+  r.show_head = (not r.show_head) or nil
+  paint_results()
+end
+
 function M.toggle_view()
   local r = state.result
   if not r or (r.kind ~= 'documents' and r.kind ~= 'table') then return notify('no result to switch views on') end
@@ -883,6 +983,7 @@ local function cell_at()
 end
 
 local function export_text(fmt, r)
+  if r.kind == 'text' then return table.concat(r.lines, '\n') .. '\n' end
   local columns, rows = r.columns, r.rows
   if r.kind == 'documents' then
     -- Documents keep their real structure as JSON; the flat formats use the
@@ -946,6 +1047,9 @@ end
 
 ctx.show = show
 ctx.show_result = show_result
+ctx.show_text = show_text
+ctx.text_append = text_append
+ctx.text_changed = text_changed
 ctx.took_text = took_text
 ctx.scratch = scratch
 ctx.set_lines = set_lines

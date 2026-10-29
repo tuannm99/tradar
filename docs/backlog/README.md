@@ -60,6 +60,7 @@ Nhóm theo chủ đề, trong mỗi nhóm theo thứ tự thời gian. Mục m�
 - [`small-fixes-socket-telescope-2026-10-22.md`](small-fixes-socket-telescope-2026-10-22.md) — lỗi rõ + đường dẫn mặc định ngắn khi socket quá dài; spec cho picker telescope (`deps.sh`)
 - [`nvim-server-view-disconnect-2026-10-28.md`](nvim-server-view-disconnect-2026-10-28.md) — `rA` hỏi server lọc/sắp xếp cho mọi dòng (SQL), `<C-d>` ngắt kết nối trong picker
 - [`nvim-json-colours-2026-10-28.md`](nvim-json-colours-2026-10-28.md) — màu view JSON bằng extmark thay `syntax json` (hết mất màu / sai màu theo dữ liệu)
+- [`nvim-request-workbench-2026-10-29.md`](nvim-request-workbench-2026-10-29.md) — HTTP + gRPC chung một workbench `###` (biến `{{x}}`, response vào result tabs có history/diff/rerun, copy curl/grpcurl)
 - [`nvim-cheatsheet-2026-10-26.md`](nvim-cheatsheet-2026-10-26.md) — cheatsheet query mẫu theo driver (protocol 1.15), `<leader>rk`, telescope có preview
 - [`nvim-snippet-menu-connection-picker-2026-10-26.md`](nvim-snippet-menu-connection-picker-2026-10-26.md) — menu sinh câu lệnh theo driver (Mongo: find by _id, count, aggregate…; protocol 1.14), picker connection bằng telescope
 - [`nvim-result-history-filter-diff-2026-10-24.md`](nvim-result-history-filter-diff-2026-10-24.md) — lịch sử lần chạy (`[R`/`]R`), ghim tab, lọc/sắp xếp (`rF`/`ro`), `:TradarDiff`, gợi ý giá trị `${}`

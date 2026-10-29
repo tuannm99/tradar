@@ -67,6 +67,7 @@ ctx.attach_results = function(buf)
   map('n', (opts.prefix or '<leader>r') .. 'A', function() M.apply_server_view() end, 'ask the server for this filter / sort (all rows)')
   map('n', ']R', function() M.step_history(-1) end, 'later run of this result')
   map('n', '[R', function() M.step_history(1) end, 'earlier run of this result')
+  map('n', (opts.prefix or '<leader>r') .. 'H', function() M.toggle_head() end, 'response: show / hide the status line and headers')
   map('n', 'zw', function() M.toggle_column_width() end, 'show this column in full / cut it back')
   map('n', 'zW', function() M.toggle_column_width(true) end, 'show every column in full / cut them all back')
   map('n', 'gd', function() M.follow_fk() end, 'follow foreign key under cursor')
@@ -146,6 +147,7 @@ ctx.attach_results = function(buf)
       ('- `[R` / `]R` earlier / later run of this tab (`setup{ results_history }`, default 5); `%sp` pin the tab so a new run of it opens another'):format(opts.prefix or '<leader>r'),
       ('- `%sF` / `:TradarFilter` show only loaded rows matching `col = v`, `col ~ text`, `col > 3` or any text; `%so` sort by this column (asc, desc, off). Nothing is fetched; exports keep every row'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
       ('- `%sD` / `:TradarDiff [n]` rows added / removed / changed against the previous run (or tab n), matched by the key column'):format(opts.prefix or '<leader>r'),
+      ('- HTTP / gRPC responses: `%sH` shows / hides the status and headers, `%sR` sends the request again, `%sD` diffs it against the previous run'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
       ('- `%sA` ask the server for the filter / sort on screen (SQL: wraps the query, covers every row; again with none on screen takes it off; `[R` is the unfiltered run)'):format(opts.prefix or '<leader>r'),
       '- `zw` show the column under the cursor in full (not cut at 40) / cut it back; `zW` every column',
       '- `gd` follow foreign key under cursor',
