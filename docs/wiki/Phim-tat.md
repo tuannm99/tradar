@@ -100,9 +100,11 @@ Cả hai theo connection của block/buffer đang đứng; preview tô màu theo
 | **Workbench HTTP / gRPC** | `rr` | chạy block `###` dưới con trỏ (hoặc `:TradarHttpSend` / `:TradarGrpcSend`); gRPC streaming: bắt đầu call, hoặc gửi thêm một message |
 | | `rx` | HTTP: ngừng chờ response; gRPC: huỷ call hoặc dừng stream |
 | | `rc` | đóng chiều gửi của client-/bidi-stream |
-| | `ry` | copy block thành lệnh `curl` / `grpcurl` |
+| | `ry` / `rk` | copy block thành lệnh `curl` / `grpcurl` / cheatsheet block mẫu |
+| | `<C-x><C-o>` | gợi ý động từ, header, `{{biến}}`, service/method gRPC |
 | **Response HTTP / gRPC** (result tab) | `rH` | hiện/ẩn status và header |
 | | `rR` / `rD` / `[R` `]R` | gửi lại / diff với lần trước / lần chạy trước — như mọi result tab |
+| | `rF` | lọc body: `.data.items[0].id` (đường dẫn kiểu jq) hoặc chuỗi để giữ các dòng khớp |
 
 Buffer request (workbench HTTP/gRPC, RabbitMQ publish) **sửa được** nên không chiếm `q` — đóng bằng `:q`/`:tabclose`.
 
@@ -125,6 +127,6 @@ Mọi lệnh dưới đây cũng gọi được qua một lệnh chung `:Tradar 
 | RabbitMQ | `:TradarRabbitmqConnect`, `…Peek [tên] [queue]`, `…Bindings [tên] [exchange]`, `…Publish [tên]` |
 | HTTP | `:TradarHttpConnect [tên]`, `:TradarHttpSend [tên]` |
 | gRPC | `:TradarGrpcConnect [tên]`, `…Services`, `…Methods <service>`, `…LoadProto <đường-dẫn>`, `…Send [tên]` |
-| Workbench HTTP / gRPC | `:TradarRequests [tên]` |
+| Workbench HTTP / gRPC | `:TradarRequests [tên]`, `:TradarHttpEndpoints [tên] [đường-dẫn]` |
 
 `:checkhealth tradar` kiểm tra binary server, phiên bản protocol, kết nối và yêu cầu Neovim ≥ 0.10.

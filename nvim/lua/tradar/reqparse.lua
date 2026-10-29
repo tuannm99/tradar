@@ -65,12 +65,14 @@ function M.has_request(lines, block)
 end
 
 --- `@name = value` lines anywhere in the file: `name -> value`. A value may
---- use the variables defined above it.
-function M.variables(lines)
-  local vars = {}
+--- use the variables defined above it. `base` (variables from `setup{
+--- request_vars }`) comes first; the file's own override it.
+function M.variables(lines, base)
+  local vars = vim.deepcopy(base or {})
   for _, line in ipairs(lines) do
     local name, value = line:match('^@([%w_%.%-]+)%s*=%s*(.-)%s*$')
-    if name then vars[name] = M.expand(value, vars) or value end
+    -- `@id = ` with nothing after it is a reminder to fill in, not a value.
+    if name and value ~= '' then vars[name] = M.expand(value, vars) or value end
   end
   return vars
 end

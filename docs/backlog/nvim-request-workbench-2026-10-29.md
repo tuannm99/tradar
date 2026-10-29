@@ -14,4 +14,12 @@ Bỏ: buffer `tradar://http`, split response gRPC, buffer request gRPC một-met
 
 Test: `rest_spec` (parser, biến, tab key, curl/grpcurl, jsonfmt), `restbench_spec` (server HTTP thật bằng python: block, biến, tab, history, diff, rerun, 404, text, copy curl; gRPC với `rpc.request` stub: thêm block từ method, unary với metadata + deadline, stream tới khi kết thúc).
 
-Chưa làm (để dành): biến theo connection trong `connections.toml` (hiện chỉ biến trong file + `$env`), picker endpoint từ OpenAPI, hoàn thành tên service/method trong dòng `GRPC`, cheatsheet cho HTTP/gRPC (cần mở rộng phía server), lọc/tìm trong body response.
+Làm tiếp cùng ngày (phần "chưa làm" của bản đầu):
+
+- **Biến theo connection**: `setup{ request_vars = { ['*'] = {...}, [conn] = {...} } }` (plugin, không đụng `connections.toml` vì `SavedConnection` chỉ có name/driver/target và lần lưu sẽ bỏ field lạ); thứ tự ưu tiên `'*'` < connection < `@x = …` trong file. `@x = ` để trống là dòng nhắc, không phải giá trị (dùng thì báo chưa khai báo).
+- **Endpoint từ OpenAPI** (`openapi.lua`, `:TradarHttpEndpoints`): thử `/openapi.json`, `/swagger.json`, `/v3/api-docs`, `/v2/api-docs`, `/api-docs` qua `http.send`; liệt kê bằng `vim.ui.select`; block sinh ra có `@id = `, `{{id}}`, query/header bắt buộc, body mẫu từ schema (`$ref`, `allOf`, `oneOf` nhánh đầu, enum, format, độ sâu 4). Chỉ JSON.
+- **Gợi ý** (`omnifunc` của workbench): động từ, header và giá trị thông dụng, `{{biến}}`, và dòng `GRPC` hỏi `grpc.services` / `grpc.methods` đồng bộ (`request_sync`, 1,5 s).
+- **Cheatsheet** (`reqcheats.lua`, `rk`): danh sách tĩnh trong plugin chứ không qua server — HTTP/gRPC không phải `QueryDriver` nên không có `cheatsheet` method; test parse mọi entry thành request hợp lệ.
+- **Lọc response** (`rF`, `jsonpath.lua`): đường dẫn kiểu jq hoặc chuỗi con theo dòng; `render.pretty` thôi viết `/` thành `\/`.
+
+Chưa làm: lọc phía server cho response lớn, đọc OpenAPI dạng YAML, cheatsheet của riêng người dùng cho HTTP/gRPC (hiện chỉ cần giữ file workbench).

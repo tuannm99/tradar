@@ -340,13 +340,24 @@ local function shell_literal(text)
   return text:match('^ObjectId%("%x+"%)$') ~= nil or text:match('^ISODate%("[^"\\]*"%)$') ~= nil
 end
 
+--- `vim.json.encode` writes `/` as `\/`; a path or a URL reads better as is.
+--- (`\/` and `/` are the same JSON string.)
+local function encode_scalar(value)
+  local text = vim.json.encode(value)
+  if type(value) ~= 'string' then return text end
+  return (text:gsub('(\\+)/', function(slashes)
+    -- an odd run: the last backslash escapes the slash, the rest are pairs
+    if #slashes % 2 == 1 then return slashes:sub(1, -2) .. '/' end
+  end))
+end
+
 --- `shell`: print those literals as they are (`"_id": ObjectId("507f…")`)
 --- instead of as JSON strings (`"ObjectId(\"507f…\")"`). For looking at;
 --- the text is no longer JSON, so exports leave it off.
 function M.pretty(value, order, indent, shell)
   indent = indent or ''
   if type(value) == 'string' and shell and shell_literal(value) then return value end
-  if type(value) ~= 'table' then return vim.json.encode(value) end
+  if type(value) ~= 'table' then return encode_scalar(value) end
   local inner = indent .. '  '
   if is_array(value) then
     if #value == 0 then return '[]' end
@@ -367,7 +378,7 @@ function M.pretty(value, order, indent, shell)
   if #keys == 0 then return '{}' end
   local parts = {}
   for i, k in ipairs(keys) do
-    parts[i] = inner .. vim.json.encode(tostring(k)) .. ': ' .. M.pretty(value[k], nil, inner, shell)
+    parts[i] = inner .. encode_scalar(tostring(k)) .. ': ' .. M.pretty(value[k], nil, inner, shell)
   end
   return '{\n' .. table.concat(parts, ',\n') .. '\n' .. indent .. '}'
 end

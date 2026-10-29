@@ -18,6 +18,15 @@ class H(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith('/count'):
             n[0] += 1
             out = json.dumps({'n': n[0]}).encode()
+        elif self.path.startswith('/openapi.json'):
+            out = json.dumps({'openapi': '3.0.0', 'paths': {
+                '/items': {
+                    'get': {'summary': 'List items', 'parameters': [{'name': 'limit', 'in': 'query', 'required': True}]},
+                    'post': {'summary': 'Create item', 'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/Item'}}}}},
+                },
+                '/items/{id}': {'get': {'summary': 'Get item', 'parameters': [{'name': 'id', 'in': 'path', 'required': True}]}},
+            }, 'components': {'schemas': {'Item': {'type': 'object', 'properties': {
+                'name': {'type': 'string'}, 'price': {'type': 'number'}, 'tags': {'type': 'array', 'items': {'type': 'string'}}}}}}}).encode()
         elif self.path.startswith('/missing'):
             status, out = 404, b'{"error":"gone"}'
         else:
@@ -146,6 +155,84 @@ rb.copy(buf)
 local curl = vim.fn.getreg('"')
 H.check('<leader>ry copies the block as curl, with the base url', curl:find('-X POST', 1, true) and curl:find('http://127.0.0.1:' .. port .. '/echo?x=1', 1, true) and curl:find('Authorization: Bearer abc', 1, true), curl)
 
+-- filtering a response
+run_at(buf, '^POST /echo')
+H.check('back on the echo response', shown('POST /echo'))
+t.set_filter('.method')
+H.check('a path filter shows just that value', table.concat(H.lines(), '\n'):find('^"POST"\n') ~= nil and H.lines()[#H.lines()]:find('filter «.method»: 1 lines', 1, true) ~= nil, H.text())
+t.set_filter('.path')
+H.check('and another', H.lines()[1] == '"/echo?x=1"', H.text())
+H.notes = {}
+t.set_filter('.nope')
+H.check('a path with nothing in it is refused and the previous filter stays', #H.notes_with('nothing at .nope') == 1 and H.lines()[1] == '"/echo?x=1"', vim.inspect(H.notes))
+t.set_filter('auth')
+H.check('plain text keeps the matching lines', H.lines()[1]:find('"auth"', 1, true) ~= nil and not H.text():find('"method"', 1, true), H.text())
+t.set_filter('off')
+H.check('off shows everything again', H.text():find('"method"', 1, true) ~= nil and H.text():find('"auth"', 1, true) ~= nil)
+run_at(buf, '^GET /text')
+H.check('on a text body', shown('GET /text'))
+H.notes = {}
+t.set_filter('.a')
+H.check('a path on a body that is not JSON says so', #H.notes_with('not JSON') == 1, vim.inspect(H.notes))
+
+-- variables from setup{ request_vars }
+require('tradar').rpc_opts().request_vars = { ['*'] = { who = 'everyone' }, web = { tok = 'abc', who = 'web' } }
+local rows = vim.api.nvim_buf_line_count(buf)
+vim.api.nvim_buf_set_lines(buf, rows, rows, false, { '', '### vars', 'GET /echo', 'X-Who: {{who}}', 'Authorization: Bearer {{tok}}' })
+run_at(buf, '^GET /echo$')
+H.check('request_vars: the connection\'s variables reach the request', H.wait(5000, function() return state.result and state.result.label == 'GET /echo' end)
+  and table.concat(state.result.lines, '\n'):find('Bearer abc', 1, true) ~= nil, vim.inspect(state.result and state.result.lines))
+vim.api.nvim_buf_set_lines(buf, rows + 1, rows + 1, false, { '@tok = from-file' })
+run_at(buf, '^GET /echo$')
+H.check('request_vars: a variable in the file overrides them', H.wait(5000, function() return state.result and table.concat(state.result.lines, '\n'):find('Bearer from-file', 1, true) end), vim.inspect(state.result and state.result.lines))
+
+-- OpenAPI endpoints
+local real_select = vim.ui.select
+local picked
+vim.ui.select = function(items, o, cb)
+  picked = { items = items, opts = o }
+  for _, item in ipairs(items) do
+    if (item.method == 'POST' and item.path == '/items') or (item.title == 'Bearer token') then return cb(item) end
+  end
+  cb(nil)
+end
+H.notes = {}
+rb.endpoints('web')
+H.check('the endpoints of /openapi.json are listed', H.wait(5000, function() return picked ~= nil or #H.notes > 0 end) and picked ~= nil and #picked.items == 3 and picked.opts.prompt:find('/openapi.json', 1, true) ~= nil, vim.inspect({ picked and picked.opts, H.notes }))
+H.check('...ordered by path, then method', picked.items[1].method == 'GET' and picked.items[1].path == '/items' and picked.items[2].method == 'POST')
+local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+H.check('the picked one is added as a block with a sample body', text:find('### POST /items — Create item\nPOST /items\nContent-Type: application/json\n\n{\n  "name": "",\n  "price": 0,\n  "tags": [\n    ""\n  ]\n}', 1, true) ~= nil, text:sub(-300))
+
+-- the cheat sheet
+ctx.opts.cheatsheet_picker = 'ui'
+picked = nil
+rb.cheatsheet(buf)
+text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+H.check('the cheat sheet offers the HTTP blocks', picked and #picked.items > 10, vim.inspect(picked and #picked.items))
+H.check('a pick is added as a titled block', text:find('### Bearer token\n@token = \nGET /me\nAuthorization: Bearer {{token}}', 1, true) ~= nil or text:find('@token = \n### Bearer token', 1, true) ~= nil, text:sub(-200))
+vim.api.nvim_win_set_cursor(0, { row_of(buf, '^GET /me$'), 0 })
+rb.run(buf)
+H.check('and runs like any other (the file\'s @token fills it in)', shown('GET /me') and table.concat(state.result.lines, '\n'):find('Bearer abc', 1, true) ~= nil, vim.inspect(state.result and state.result.lines))
+
+-- completion
+local function complete(line, col, rows_before)
+  local b = vim.api.nvim_create_buf(false, true)
+  vim.b[b].tradar_rest = vim.b[buf].tradar_rest
+  vim.api.nvim_buf_set_lines(b, 0, -1, false, vim.list_extend(vim.deepcopy(rows_before or {}), { line }))
+  local start, words = rb.complete_at(b, (rows_before and #rows_before or 0) + 1, col or #line)
+  return start, words
+end
+local start, words = complete('PO')
+H.check('completion: an HTTP verb at the start of the request line', start == 0 and vim.deep_equal(words, { 'POST' }), vim.inspect(words))
+start, words = complete('Content-T', nil, { 'POST /x' })
+H.check('completion: a header name', vim.tbl_contains(words or {}, 'Content-Type') and start == 0, vim.inspect(words))
+start, words = complete('Content-Type: app', nil, { 'POST /x' })
+H.check('completion: a header value', vim.tbl_contains(words or {}, 'application/json') and start == #'Content-Type: ', vim.inspect({ start, words }))
+start, words = complete('', nil, { 'POST /x', 'A: b', '' })
+H.check('completion: nothing in the body', words == nil)
+start, words = complete('X: {{', nil, { '@tok = 1', 'GET /x' })
+H.check('completion: variables inside {{ }}', vim.tbl_contains(words or {}, 'tok') and vim.tbl_contains(words, '$uuid') and start == #'X: {{', vim.inspect({ start, words }))
+
 -- gRPC (rpc stubbed)
 local rpc = require('tradar.rpc')
 local real_request, real_on = rpc.request, rpc.on
@@ -217,6 +304,30 @@ H.check('replies are appended as they arrive and the end is noted', H.wait(5000,
   return text:find('‹ {', 1, true) and text:find('# end of stream', 1, true)
 end), vim.inspect(state.result and state.result.lines))
 H.check('the footer no longer says streaming', H.wait(2000, function() return not H.text():find('streaming', 1, true) end), H.text())
+
+-- completion on a GRPC line (reflection stubbed)
+local real_sync = rpc.request_sync
+rpc.request_sync = function(method, params)
+  if method == 'grpc.services' then return nil, { 'pkg.Svc', 'pkg.Other', 'zzz.Api' } end
+  if method == 'grpc.methods' then return nil, { { name = 'Get' }, { name = 'Watch' } } end
+  return real_sync(method, params)
+end
+local gstart, gwords = (function()
+  local b = vim.api.nvim_create_buf(false, true)
+  vim.b[b].tradar_rest = vim.b[gbuf].tradar_rest
+  vim.api.nvim_buf_set_lines(b, 0, -1, false, { 'GRPC pk' })
+  return rb.complete_at(b, 1, 7)
+end)()
+H.check('completion: GRPC offers the services that match', gstart == 5 and vim.deep_equal(gwords, { 'pkg.Svc', 'pkg.Other' }), vim.inspect({ gstart, gwords }))
+gstart, gwords = (function()
+  local b = vim.api.nvim_create_buf(false, true)
+  vim.b[b].tradar_rest = vim.b[gbuf].tradar_rest
+  vim.api.nvim_buf_set_lines(b, 0, -1, false, { 'GRPC pkg.Svc/W' })
+  return rb.complete_at(b, 1, 14)
+end)()
+H.check('completion: after the slash, the service\'s methods', gstart == 5 and vim.deep_equal(gwords, { 'pkg.Svc/Watch' }), vim.inspect({ gstart, gwords }))
+rpc.request_sync = real_sync
+vim.ui.select = real_select
 
 rpc.request, rpc.on = real_request, real_on
 vim.fn.jobstop(job)

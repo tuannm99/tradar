@@ -82,7 +82,7 @@ local function help(buf)
     '# tradar: request workbench (HTTP / gRPC)',
     ('- `%sr` / `:TradarHttpSend` / `:TradarGrpcSend` run the block under the cursor; the response opens in the result tabs'):format(p),
     ('- `%sx` stop waiting (HTTP) / cancel the call / stop the stream; `%sc` close the send side of a client / bidi stream'):format(p, p),
-    ('- `%sy` copy the block as a curl / grpcurl command'):format(p),
+    ('- `%sy` copy the block as a curl / grpcurl command; `%sk` / `:TradarCheatsheet` ready-made blocks; `<C-x><C-o>` completes verbs, headers, `{{variables}}` and gRPC services / methods'):format(p, p),
     '- `###` (optional title) starts a block; the text before the first one is a block too',
     '- HTTP block: `METHOD url` (a bare url is a GET; a relative url is joined to the connection\'s base), `Name: value` headers, a blank line, the body',
     '- gRPC block: `GRPC service/Method`, `name: value` metadata, `deadline: 5s`, a blank line, the JSON body (`// …` lines are ignored)',
@@ -110,6 +110,8 @@ local function bench_buffer(conn, driver, target)
   map('x', function() M.cancel(buf) end, 'cancel the request / stop the stream')
   map('c', function() M.close_send(buf) end, 'close the send side of a client / bidi stream')
   map('y', function() M.copy(buf) end, 'copy the block as a curl / grpcurl command')
+  map('k', function() M.cheatsheet(buf) end, 'ready-made request blocks')
+  vim.bo[buf].omnifunc = "v:lua.require'tradar.restbench'.omni"
   vim.keymap.set('n', 'g?', function() help(buf) end, { buffer = buf, desc = 'tradar: show keymap help' })
   local send = driver == 'grpc' and 'TradarGrpcSend' or 'TradarHttpSend'
   vim.api.nvim_buf_create_user_command(buf, send, function() M.run(buf) end, {})
@@ -220,6 +222,18 @@ end
 
 -- ── running a block ──────────────────────────────────────────────────────
 
+--- Variables from `setup{ request_vars = { ['*'] = {...}, [connection] = {...} } }`:
+--- every workbench gets `'*'`, a connection's own entry overrides it, and the
+--- file's `@name = value` lines override both. Values may be strings or numbers.
+function M.base_vars(conn)
+  local all = require('tradar').rpc_opts().request_vars or {}
+  local out = {}
+  for _, set in ipairs({ all['*'] or {}, all[conn] or {} }) do
+    for k, v in pairs(set) do out[k] = tostring(v) end
+  end
+  return out
+end
+
 local function cursor_row(buf)
   local win = vim.fn.bufwinid(buf)
   if win ~= -1 then return vim.api.nvim_win_get_cursor(win)[1] end
@@ -235,7 +249,7 @@ local function request_at(buf)
   end
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local block = reqparse.block_at(lines, cursor_row(buf))
-  local req, err = reqparse.parse(lines, block)
+  local req, err = reqparse.parse(lines, block, reqparse.variables(lines, M.base_vars(info.connection)))
   if not req then
     notify(err, vim.log.levels.WARN)
     return
@@ -506,7 +520,7 @@ local function running_at(buf)
   local info = vim.b[buf].tradar_rest
   if not info then return nil, notify('not a tradar request workbench', vim.log.levels.WARN) end
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local req = reqparse.parse(lines, reqparse.block_at(lines, cursor_row(buf)))
+  local req = reqparse.parse(lines, reqparse.block_at(lines, cursor_row(buf)), reqparse.variables(lines, M.base_vars(info.connection)))
   if req then
     local key = reqparse.slot(req, info.connection)
     if running[key] then return running[key], key end
@@ -564,6 +578,203 @@ function M.copy(buf)
   vim.fn.setreg('"', text)
   pcall(vim.fn.setreg, '+', text)
   notify(('copied as %s'):format(req.kind == 'grpc' and 'grpcurl' or 'curl'))
+end
+
+-- ── cheat sheet, OpenAPI endpoints, completion ──────────────────────────
+
+--- Adds the lines of a block to the end of the workbench `buf` and puts the
+--- cursor on the first non-title line.
+local function append_block(buf, block)
+  focus(buf)
+  local at = vim.api.nvim_buf_line_count(buf)
+  local lines = { '' }
+  vim.list_extend(lines, block)
+  vim.api.nvim_buf_set_lines(buf, at, at, false, lines)
+  vim.bo[buf].modified = false
+  local row = at + 2
+  for i, l in ipairs(block) do
+    if not (l:match('^###') or l:match('^@') or l:match('^#')) then
+      row = at + 1 + i
+      break
+    end
+  end
+  pcall(vim.api.nvim_win_set_cursor, vim.fn.bufwinid(buf), { row, 0 })
+end
+
+--- `:TradarCheatsheet` / `<leader>rk` in a workbench: ready-made request
+--- blocks for the connection's driver. `<CR>` adds the block, `<C-r>` adds
+--- it and runs it.
+function M.cheatsheet(buf)
+  buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
+  local info = vim.b[buf].tradar_rest
+  if not info then return notify('not a tradar request workbench', vim.log.levels.WARN) end
+  local entries = require('tradar.reqcheats').for_driver(info.driver)
+  local function put(entry, run)
+    local lines = vim.split(entry.text, '\n', { plain = true })
+    local titled = false
+    for _, l in ipairs(lines) do titled = titled or l:match('^###') ~= nil end
+    if not titled then table.insert(lines, 1, '### ' .. entry.title) end
+    append_block(buf, lines)
+    if run then M.run(buf) end
+  end
+  local tele = require('tradar.telescope')
+  if ctx.opts.cheatsheet_picker ~= 'ui' and tele.available() then
+    return tele.cheatsheet(entries, 'http', put)
+  end
+  vim.ui.select(entries, {
+    prompt = 'tradar request cheat sheet',
+    format_item = function(e) return ('%-10s %s'):format(e.category, e.title) end,
+  }, function(e) if e then put(e, false) end end)
+end
+
+--- The OpenAPI / Swagger document of an HTTP connection: `path` when given
+--- (a path or a full URL), else the usual places in turn. `cb(doc, path)`.
+local function fetch_openapi(conn, path, cb)
+  local candidates = (path and path ~= '') and { path } or require('tradar.openapi').CANDIDATES
+  local tried = {}
+  local function try(i)
+    if i > #candidates then
+      return notify(('no OpenAPI document found (tried %s) -- give its path: :TradarHttpEndpoints %s /path/to/openapi.json'):format(table.concat(tried, ', '), conn), vim.log.levels.WARN)
+    end
+    local url = candidates[i]
+    rpc.request('http.send', { connection = conn, method = 'GET', url = url, headers = 'Accept: application/json', body = '' }, function(e, resp)
+      tried[#tried + 1] = url
+      if not e and resp and resp.status == 200 then
+        local ok, doc = pcall(vim.json.decode, resp.body, { luanil = { object = true, array = true } })
+        if ok and type(doc) == 'table' and type(doc.paths) == 'table' then return cb(doc, url) end
+      end
+      try(i + 1)
+    end)
+  end
+  try(1)
+end
+
+--- `:TradarHttpEndpoints [conn] [path]`: the endpoints of the API's OpenAPI
+--- document in a list; the pick becomes a request block (path parameters as
+--- `@x = ` lines, required query parameters, a sample JSON body).
+function M.endpoints(name, path)
+  with_bench(name, { 'http' }, function(buf, _, c)
+    fetch_openapi(c.name, path, function(doc, url)
+      local openapi = require('tradar.openapi')
+      local list = openapi.endpoints(doc)
+      if #list == 0 then return notify(url .. ' lists no endpoints', vim.log.levels.WARN) end
+      vim.ui.select(list, {
+        prompt = ('%s (%d endpoints)'):format(url, #list),
+        format_item = function(ep) return ('%-7s %s%s'):format(ep.method, ep.path, ep.summary ~= '' and ('  ' .. ep.summary) or '') end,
+      }, function(ep)
+        if ep then append_block(buf, openapi.block(doc, ep)) end
+      end)
+    end)
+  end)
+end
+
+local HEADERS = {
+  'Accept', 'Accept-Encoding', 'Accept-Language', 'Authorization', 'Cache-Control', 'Content-Type', 'Content-Length',
+  'Cookie', 'If-Match', 'If-Modified-Since', 'If-None-Match', 'Origin', 'Range', 'Referer', 'User-Agent',
+  'X-API-Key', 'X-Request-ID', 'X-Requested-With',
+}
+local HEADER_VALUES = {
+  ['content-type'] = { 'application/json', 'application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain', 'application/xml' },
+  accept = { 'application/json', 'text/plain', 'text/html', '*/*' },
+  ['accept-encoding'] = { 'gzip', 'identity' },
+  ['cache-control'] = { 'no-cache', 'no-store', 'max-age=0' },
+}
+local HTTP_VERBS = { 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'GRPC' }
+local GRPC_META = { 'authorization', 'deadline', 'x-request-id' }
+
+local function starts(list, base)
+  local out = {}
+  for _, item in ipairs(list) do
+    if base == '' or item:lower():sub(1, #base) == base:lower() then out[#out + 1] = item end
+  end
+  return out
+end
+
+--- What can be completed before the cursor on a workbench line: `{{variables}}`,
+--- the request line (HTTP verbs, gRPC `service/Method` from reflection), header
+--- names and well-known header values. Returns `start_col, words`.
+function M.complete_at(buf, row, col)
+  local info = vim.b[buf].tradar_rest
+  if not info then return nil end
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local before = lines[row]:sub(1, col)
+
+  local open = before:match('{{%s*()[%w_%.%$]*$')
+  if open then
+    local base = before:sub(open)
+    local names = {}
+    for k in pairs(reqparse.variables(lines, M.base_vars(info.connection))) do names[#names + 1] = k end
+    table.sort(names)
+    vim.list_extend(names, { '$uuid', '$timestamp', '$isoTimestamp', '$env.' })
+    return open - 1, starts(names, base)
+  end
+
+  -- Where in the block are we: before / on the request line, headers, or body?
+  local block = reqparse.block_at(lines, row)
+  local request_row
+  for i = block.first, row do
+    local l = lines[i]
+    if not (l:match('^###') or l:match('^%s*$') or l:match('^%s*#') or l:match('^%s*//') or l:match('^@')) then
+      request_row = i
+      break
+    end
+  end
+  if request_row and request_row < row then
+    -- a blank line between the request line and here means the body
+    for i = request_row + 1, row - 1 do
+      if lines[i]:match('^%s*$') then return nil end
+    end
+  end
+  if not request_row or request_row == row then
+    if before:match('^%s*[Gg][Rr][Pp][Cc]%s+') then
+      local typed = before:match('^%s*[Gg][Rr][Pp][Cc]%s+(%S*)$')
+      if not typed then return nil end
+      local start = #before - #typed
+      local service = typed:match('^(.-)/')
+      local words = {}
+      if service then
+        local err, methods = rpc.request_sync('grpc.methods', { connection = info.connection, service = service }, 1500)
+        if not err then
+          for _, m in ipairs(methods or {}) do words[#words + 1] = service .. '/' .. m.name end
+        end
+      else
+        local err, services = rpc.request_sync('grpc.services', { connection = info.connection }, 1500)
+        if not err then
+          for _, s in ipairs(services or {}) do words[#words + 1] = s end
+        end
+      end
+      return start, starts(words, typed)
+    end
+    local typed = before:match('^%s*(%a*)$')
+    if typed then return #before - #typed, starts(HTTP_VERBS, typed) end
+    return nil
+  end
+
+  -- a header line
+  local name, value = before:match('^%s*([%w%-]+)%s*:%s*(.*)$')
+  if name then
+    local values = info.driver == 'http' and HEADER_VALUES[name:lower()] or nil
+    if not values then return nil end
+    return #before - #value, starts(values, value)
+  end
+  local typed = before:match('^%s*([%w%-]*)$')
+  if typed then
+    return #before - #typed, starts(info.driver == 'grpc' and GRPC_META or HEADERS, typed)
+  end
+end
+
+--- `omnifunc` of the workbench (`<C-x><C-o>`).
+function M.omni(findstart, base)
+  local buf = vim.api.nvim_get_current_buf()
+  local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+  if findstart == 1 then
+    local start, words = M.complete_at(buf, row, col)
+    vim.b[buf].tradar_rest_words = words
+    return start or -3
+  end
+  local words = vim.b[buf].tradar_rest_words or {}
+  vim.b[buf].tradar_rest_words = nil
+  return starts(words, base)
 end
 
 return M

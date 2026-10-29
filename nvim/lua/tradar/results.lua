@@ -111,6 +111,34 @@ end
 
 local function view_active(r) return r.filter ~= nil or r.sort ~= nil end
 
+--- The lines of a text result as `r.filter` shows them: `.data.items[0]`
+--- (a jq-style path, see jsonpath.lua) picks values out of a JSON body; any
+--- other text keeps the lines that contain it (case does not matter).
+--- Returns `lines`, or nil and why the filter does not apply.
+local function text_view(r)
+  local f = r.filter
+  if not f then return r.lines end
+  local cache = r.fcache
+  if cache and cache.filter == f and cache.n == #r.lines then return cache.lines end
+  local out
+  if f:match('^%.') or f:match('^%[') then
+    local ok, value = pcall(vim.json.decode, table.concat(r.lines, '\n'), { luanil = { object = true, array = true } })
+    if not ok then return nil, 'the body is not JSON, so a path does not apply -- use plain text to filter lines' end
+    local found, err = require('tradar.jsonpath').query(value, f)
+    if not found then return nil, err end
+    out = {}
+    for _, item in ipairs(found) do vim.list_extend(out, vim.split(render.pretty(item), '\n', { plain = true })) end
+  else
+    out = {}
+    local needle = f:lower()
+    for _, line in ipairs(r.lines) do
+      if line:lower():find(needle, 1, true) then out[#out + 1] = line end
+    end
+  end
+  r.fcache = { filter = f, n = #r.lines, lines = out }
+  return out
+end
+
 --- Footer of a text result (an HTTP / gRPC response): status, time, size.
 local function text_title(r)
   local text = position_text(r)
@@ -119,6 +147,7 @@ local function text_title(r)
   if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
   if r.bytes then text = text .. (' · %d bytes'):format(r.bytes) end
   text = text .. (' · %d lines'):format(#(r.lines or {}))
+  if r.filter then text = text .. (' · filter «%s»: %d lines'):format(r.filter, #(text_view(r) or {})) end
   if r.stream then text = text .. (r.stream_open and ' · streaming (' .. (opts.prefix or '<leader>r') .. 'x stops)' or ' · stream ended') end
   if r.head and #r.head > 0 then text = text .. (' · %sH %s headers'):format(opts.prefix or '<leader>r', r.show_head and 'hides' or 'shows') end
   return text
@@ -249,7 +278,7 @@ local function paint_results(new_from)
       lines[#lines + 1] = ''
       body_from = #lines + 1
     end
-    vim.list_extend(lines, r.lines)
+    vim.list_extend(lines, text_view(r) or r.lines)
   elseif r.kind == 'table' and r.view == 'json' then
     lines = vim.split(render.json(r.columns, r.rows), '\n', { plain = true })
     lines[#lines] = nil -- the trailing newline
@@ -856,6 +885,24 @@ end
 --- `M.more`); exports keep every row. The grid is read-only while it is on.
 function M.set_filter(text)
   local r = state.result
+  if r and r.kind == 'text' then
+    local function apply_text(value)
+      if value == nil then return end
+      value = vim.trim(value)
+      local previous = r.filter
+      r.filter = (value ~= '' and value ~= 'off') and value or nil
+      local _, why = text_view(r)
+      if why then
+        r.filter = previous
+        return notify(why, vim.log.levels.WARN)
+      end
+      paint_results()
+      local win = results_win()
+      if win then pcall(vim.api.nvim_win_set_cursor, win, { 1, 0 }) end
+    end
+    if text ~= nil then return apply_text(text) end
+    return vim.ui.input({ prompt = 'Filter the response (.data.items[0].id for JSON, or text to keep matching lines; empty clears): ', default = r.filter or '' }, apply_text)
+  end
   if not r or not grid_of(r) then return notify('filter applies to the table view', vim.log.levels.WARN) end
   if ctx.dirty() then
     return notify('unsaved grid edits — :w to commit or ' .. (opts.prefix or '<leader>r') .. 'u to revert first', vim.log.levels.WARN)

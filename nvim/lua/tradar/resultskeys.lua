@@ -147,7 +147,7 @@ ctx.attach_results = function(buf)
       ('- `[R` / `]R` earlier / later run of this tab (`setup{ results_history }`, default 5); `%sp` pin the tab so a new run of it opens another'):format(opts.prefix or '<leader>r'),
       ('- `%sF` / `:TradarFilter` show only loaded rows matching `col = v`, `col ~ text`, `col > 3` or any text; `%so` sort by this column (asc, desc, off). Nothing is fetched; exports keep every row'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
       ('- `%sD` / `:TradarDiff [n]` rows added / removed / changed against the previous run (or tab n), matched by the key column'):format(opts.prefix or '<leader>r'),
-      ('- HTTP / gRPC responses: `%sH` shows / hides the status and headers, `%sR` sends the request again, `%sD` diffs it against the previous run'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
+      ('- HTTP / gRPC responses: `%sH` shows / hides the status and headers, `%sR` sends the request again, `%sD` diffs it against the previous run, `%sF` filters the body (`.data.items[0].id` for JSON, or text to keep matching lines)'):format(opts.prefix or '<leader>r', opts.prefix or '<leader>r', opts.prefix or '<leader>r', opts.prefix or '<leader>r'),
       ('- `%sA` ask the server for the filter / sort on screen (SQL: wraps the query, covers every row; again with none on screen takes it off; `[R` is the unfiltered run)'):format(opts.prefix or '<leader>r'),
       '- `zw` show the column under the cursor in full (not cut at 40) / cut it back; `zW` every column',
       '- `gd` follow foreign key under cursor',

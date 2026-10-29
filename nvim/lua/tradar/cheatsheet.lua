@@ -52,6 +52,7 @@ end
 --- list, which only inserts.
 function M.cheatsheet()
   local buf = vim.api.nvim_get_current_buf()
+  if vim.b[buf].tradar_rest then return require('tradar.restbench').cheatsheet(buf) end
   local conn = M.block_connection(buf, vim.api.nvim_win_get_cursor(0)[1])
   if not conn then return notify('no connection for this buffer -- :TradarConnect', vim.log.levels.WARN) end
   ctx.ensure_connected(conn, function()

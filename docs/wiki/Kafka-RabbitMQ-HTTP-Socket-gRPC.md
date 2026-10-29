@@ -46,6 +46,7 @@ HTTP và gRPC dùng **chung một workbench**: mỗi connection một buffer s�
 | `:TradarRequests [tên]` | mở workbench của một connection HTTP hoặc gRPC (đang đứng trong workbench thì chạy block) |
 | `:TradarHttpSend [tên]` / `:TradarGrpcSend [tên]` | như trên, giới hạn theo driver |
 | `:TradarHttpConnect [tên]` | ghi nhận connection HTTP (không gọi ra ngoài, nên không bao giờ lỗi) |
+| `:TradarHttpEndpoints [tên] [đường-dẫn]` | chọn endpoint từ tài liệu OpenAPI của API, thêm block vào workbench |
 
 ### Cú pháp
 
@@ -73,8 +74,15 @@ deadline: 5s                          # deadline của call, không gửi như h
 - **Block**: bắt đầu bằng `###`; phần trước `###` đầu tiên cũng là một block (chỗ để khai báo biến và ghi chú). Dòng `#` và `//` trước dòng request là comment.
 - **HTTP**: dòng đầu `METHOD url` (`GET /x HTTP/1.1` cũng được; url `http://`/`https://` dùng nguyên văn, còn lại nối vào `target` của connection). Các dòng `Tên: giá trị` là header, đến dòng trống đầu tiên; từ đó trở xuống là body, giữ nguyên văn. Body dính ngay dòng request (thiếu dòng trống) sẽ báo lỗi kèm số dòng.
 - **gRPC**: dòng đầu `GRPC service/Method`; `tên: giá trị` là metadata (tên tự chuyển chữ thường); `deadline: 5s` (`500ms`, `2m`, hoặc số trần = giây) đặt deadline; body là JSON, dòng `//` bị bỏ khi gửi (đó là gợi ý của skeleton). Không có body = message rỗng.
-- **Biến**: `@tên = giá trị` ở bất kỳ đâu trong file (giá trị có thể dùng biến khai báo trước đó); `{{tên}}` được thay trong dòng request, header/metadata và body. Có sẵn `{{$uuid}}`, `{{$timestamp}}` (giây), `{{$isoTimestamp}}`, `{{$env.TÊN}}` (biến môi trường). Biến chưa khai báo thì báo rõ tên, không gửi gì.
+- **Biến**: `@tên = giá trị` ở bất kỳ đâu trong file (giá trị có thể dùng biến khai báo trước đó); `{{tên}}` được thay trong dòng request, header/metadata và body. Có sẵn `{{$uuid}}`, `{{$timestamp}}` (giây), `{{$isoTimestamp}}`, `{{$env.TÊN}}` (biến môi trường). Biến chưa khai báo thì báo rõ tên, không gửi gì; `@tên = ` để trống chỉ là dòng nhắc điền, không phải giá trị.
+- **Biến theo connection** (`setup`): `request_vars = { ['*'] = { ... }, web = { token = '...' } }` — `'*'` cho mọi workbench, mục theo tên connection ghi đè `'*'`, và `@tên = …` trong file ghi đè cả hai. Hợp với giá trị dùng chung nhiều file (base path, tenant); bí mật nên lấy từ `{{$env.TÊN}}` thay vì ghi vào config.
 - Workbench là scratch buffer, giữ nội dung trong phiên Neovim; `:w đường-dẫn` lưu ra file.
+
+### Điền nhanh
+
+- **Cheatsheet** (`<leader>rk` hoặc `:TradarCheatsheet` trong workbench): các block mẫu theo driver — HTTP (GET/POST/PUT/PATCH/DELETE, Bearer/Basic/API key, form, multipart, GraphQL, JSON-RPC, conditional GET, CORS preflight, health…), gRPC (health check chuẩn, metadata, deadline, well-known types, stream…). `<CR>` thêm block vào cuối workbench, `<C-r>` thêm và chạy luôn.
+- **Endpoint từ OpenAPI** (`:TradarHttpEndpoints [connection] [đường-dẫn]`): đọc tài liệu OpenAPI 3 / Swagger 2 của API (thử `/openapi.json`, `/swagger.json`, `/v3/api-docs`, `/v2/api-docs`, `/api-docs`; hoặc đường dẫn/URL bạn đưa vào) rồi liệt kê `METHOD path  summary`. Chọn một endpoint thì thêm block: tham số path thành `{{id}}` kèm dòng nhắc `@id = `, query bắt buộc thành `?a=&b=`, header bắt buộc, và body JSON mẫu sinh từ schema (`example`/`default`/enum nếu có). Chỉ đọc JSON, chưa đọc YAML.
+- **Gợi ý** (`<C-x><C-o>`): động từ HTTP và `GRPC` ở dòng request, tên header và giá trị thông dụng (`Content-Type`, `Accept`, …), `{{biến}}` (kể cả `$uuid`…), và với dòng `GRPC` thì tên service rồi `service/Method` lấy từ reflection.
 
 ### Phím trong workbench
 
@@ -84,6 +92,7 @@ deadline: 5s                          # deadline của call, không gửi như h
 | `<leader>rx` | HTTP: ngừng chờ response; gRPC unary: huỷ call; stream: dừng |
 | `<leader>rc` | client/bidi stream: đóng chiều gửi |
 | `<leader>ry` | copy block thành lệnh `curl` / `grpcurl` |
+| `<leader>rk` | cheatsheet: block mẫu |
 | `g?` | xem phím |
 
 ### Response
@@ -92,6 +101,7 @@ deadline: 5s                          # deadline của call, không gửi như h
 - Body JSON được thụt lề **giữ nguyên thứ tự key và chữ số** như server trả, tô màu như kết quả JSON của DB khác; body không phải JSON hiện nguyên văn. Footer ghi status, thời gian, số byte.
 - `<leader>rH` hiện/ẩn dòng trạng thái và header phía trên body (gRPC: header của response).
 - `<leader>rD` so response với lần chạy trước (hoặc tab khác) bằng diff theo dòng; `<leader>rR` gửi lại đúng request đó tại chỗ. Mã 4xx/5xx vẫn là response bình thường, không phải lỗi.
+- `<leader>rF` (hoặc `:TradarFilter`) lọc response: `.data.items[0].id` (đường dẫn kiểu jq: `.a.b`, `[0]`, `[-1]`, `[]` để trải mảng, `."khoá lạ"`) lấy đúng giá trị ra khỏi body JSON; chuỗi khác thì giữ các dòng có chứa nó (không phân biệt hoa thường); để trống hoặc `off` bỏ lọc. Đường dẫn không có gì thì báo và giữ bộ lọc cũ. Giá trị lấy ra in lại với key xếp theo thứ tự chữ cái.
 - `gy…` ở tab response chép toàn bộ body; `:TradarExport` ghi ra file.
 
 ### gRPC
