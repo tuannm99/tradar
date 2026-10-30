@@ -84,6 +84,8 @@ vim.api.nvim_create_user_command('TradarHttpSend', function(a) require('tradar.h
 -- one buffer per connection, `###`-separated request blocks, `<leader>rr` runs
 -- the one under the cursor, responses open in the result tabs.
 vim.api.nvim_create_user_command('TradarGrpcSend', function(a) require('tradar.restbench').open(a.args, 'grpc') end, { nargs = '?', complete = names('grpc') })
+vim.api.nvim_create_user_command('TradarGrpcCancel', function() require('tradar.restbench').cancel() end, { desc = 'cancel the gRPC call / stop the stream under the cursor' })
+vim.api.nvim_create_user_command('TradarGrpcClose', function() require('tradar.restbench').close_send() end, { desc = 'close the send side of the client / bidi stream under the cursor' })
 vim.api.nvim_create_user_command('TradarCopyCurl', function() require('tradar.restbench').copy() end, { desc = 'copy the request block under the cursor as a curl / grpcurl command' })
 vim.api.nvim_create_user_command('TradarRequests', function(a) require('tradar.restbench').open(a.args) end, {
   nargs = '?',
@@ -105,7 +107,7 @@ vim.api.nvim_create_user_command('Tradar', function(a) require('tradar.commands'
 
 -- Query files for the non-SQL connectors. Highlighting borrows a real
 -- grammar where one fits (`.mongo` is JavaScript) -- see README.
-vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq' } })
+vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq', http = 'http' } })
 pcall(vim.treesitter.language.register, 'javascript', 'mongo')
 pcall(vim.treesitter.language.register, 'json', 'esq')
 
@@ -164,7 +166,7 @@ end
 -- `-- tradar: name` / `// tradar: name` / `# tradar: name` line.
 local group = vim.api.nvim_create_augroup('tradar_sql', { clear = true })
 vim.api.nvim_create_autocmd('FileType', {
-  pattern = { 'sql', 'mongo', 'redis', 'esq', 'tdb' },
+  pattern = { 'sql', 'mongo', 'redis', 'esq', 'tdb', 'http' },
   group = group,
   callback = function(a) t().attach(a.buf) end,
 })

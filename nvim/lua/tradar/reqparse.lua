@@ -14,7 +14,7 @@
 --     {"name": "ann"}
 --
 --     ### get user
---     GRPC users.UserService/GetUser     -- GRPC service/Method
+--     GRPC users.UserService/GetUser     -- GRPC service/Method (or GRPC host:port service/Method)
 --     x-token: {{token}}                 -- metadata
 --     deadline: 5s                       -- the call's deadline, not a header
 --
@@ -136,11 +136,14 @@ end
 --- as `{ kind = 'http', method, url }` / `{ kind = 'grpc', service, method }`.
 local function request_line(line)
   line = vim.trim(line)
-  local target = line:match('^[Gg][Rr][Pp][Cc]%s+(%S+)$')
+  -- `GRPC service/Method` (on the buffer's connection) or, straight at a
+  -- server with no saved connection, `GRPC host:port service/Method`.
+  local direct, path = line:match('^[Gg][Rr][Pp][Cc]%s+(%S+)%s+(%S+)$')
+  local target = path or line:match('^[Gg][Rr][Pp][Cc]%s+(%S+)$')
   if target then
     local service, method = target:match('^(.+)/([^/]+)$')
     if not service then return nil, 'GRPC needs service/Method, e.g. GRPC users.UserService/GetUser' end
-    return { kind = 'grpc', service = service, method = method }
+    return { kind = 'grpc', service = service, method = method, target = direct }
   end
   line = line:gsub('%s+HTTP/%d[%.%d]*$', '')
   local verb, url = line:match('^(%a+)%s+(%S.*)$')

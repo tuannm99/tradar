@@ -94,6 +94,13 @@ local ev = vim.split('@id = \nGET /x/{{id}}', '\n', { plain = true })
 bad, why = rp.parse(ev, rp.block_at(ev, 2))
 H.check('an unfilled @id reminder stops the request', bad == nil and why:find('{{id}}', 1, true) ~= nil, why)
 
+-- GRPC straight at a server
+r = parse('GRPC localhost:50051 pkg.Svc/Get\n\n{"id": 1}')
+H.check('grpc: GRPC host:port service/Method carries its own target', r and r.kind == 'grpc' and r.target == 'localhost:50051' and r.service == 'pkg.Svc' and r.method == 'Get', vim.inspect(r))
+r = parse('GRPC pkg.Svc/Get')
+H.check('grpc: without a target it uses the connection', r and r.target == nil)
+H.check('grpcurl: a direct request uses its own address', rp.as_grpcurl(r, 'ignored:1'):find('ignored:1', 1, true) ~= nil)
+
 -- jq-style paths
 local jp = require('tradar.jsonpath')
 local doc = vim.json.decode('{"data":{"items":[{"id":1,"n":"a"},{"id":2,"n":"b"}],"odd key":true},"list":[10,20,30]}')

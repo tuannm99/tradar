@@ -12,6 +12,8 @@ end
 
 function source:enabled()
   if vim.b.tradar_attached ~= true then return false end
+  -- HTTP / gRPC requests are completed by the workbench's own omnifunc.
+  if require('tradar.restbench').applies(0) then return false end
   local tradar = require('tradar')
   local row = vim.api.nvim_win_get_cursor(0)[1]
   return tradar.block_connection(0, row) ~= nil

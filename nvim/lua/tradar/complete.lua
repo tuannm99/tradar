@@ -41,6 +41,7 @@ end
 
 --- Built-in `omnifunc` fallback for setups without blink.cmp.
 function M.omnifunc(findstart, base)
+  if require('tradar.restbench').applies(0) then return require('tradar.restbench').omni(findstart, base) end
   local row, col = unpack(vim.api.nvim_win_get_cursor(0))
   if findstart == 1 then
     local line = vim.api.nvim_get_current_line():sub(1, col)

@@ -24,3 +24,10 @@ Làm tiếp cùng ngày (phần "chưa làm" của bản đầu):
 Đã thử rồi bỏ: picker endpoint từ OpenAPI (`:TradarHttpEndpoints`) — người dùng không cần, chỉ cần xuất curl (`ry` / `:TradarCopyCurl`).
 
 Chưa làm: lọc phía server cho response lớn, cheatsheet của riêng người dùng cho HTTP/gRPC (hiện chỉ cần giữ file workbench).
+
+Làm tiếp 2026-10-30: request không còn bó trong workbench.
+
+- **Chỗ viết request** (`restbench.context`): workbench, buffer filetype `http` (`*.http` được đăng ký filetype; `# tradar: tên` là alias), block ` ```http [conn] ` / ` ```grpc [conn] ` của `.tdb`. `rr`/`rx`/`ry`/`rk`, omnifunc và blink đều định tuyến theo `restbench.applies(buf)` nên cùng phím với file query; block `.tdb` chỉ dùng `@var` và request của chính nó, biến đọc từ cả buffer. Khác SQL: không rơi về "connection chọn gần nhất" (thường là database).
+- **URL thẳng, không connection**: server nhận tên connection `@đích` cho `http.*`/`grpc.*` (`Ctx::saved`): `@` cho HTTP (URL đầy đủ), `@host:port` cho gRPC; plugin dùng nó khi request có URL đầy đủ / `GRPC host:port service/Method` mà không có alias. Protocol 1.16 (cộng thêm); tên connection không có `@` vẫn phải có trong `connections.toml`.
+- Thêm `:TradarGrpcCancel` / `:TradarGrpcClose` toàn cục (theo con trỏ) vì trong `.tdb`/`.http` `rc` vẫn là "chọn connection".
+- Test: `restbench_spec` (file `.http` URL thẳng / alias / lỗi thiếu connection, `.tdb` trộn block http/sql, curl, gợi ý, cheatsheet vào trong block, gRPC thẳng), `rest_spec` (cú pháp `GRPC host:port …`), unit test `Ctx::saved`.

@@ -97,7 +97,7 @@ Cả hai theo connection của block/buffer đang đứng; preview tô màu theo
 | **RabbitMQ peek/bindings** | `r` | làm mới (peek lại / liệt kê lại) |
 | | `q` | đóng |
 | **RabbitMQ publish** | `rr` | publish (hoặc `:TradarRabbitmqPublish` khi đang trong buffer) |
-| **Workbench HTTP / gRPC** | `rr` | chạy block `###` dưới con trỏ (hoặc `:TradarHttpSend` / `:TradarGrpcSend`); gRPC streaming: bắt đầu call, hoặc gửi thêm một message |
+| **Request HTTP / gRPC** (workbench, file `.http`, block ` ```http `/` ```grpc ` trong `.tdb`) | `rr` | chạy block `###` dưới con trỏ (hoặc `:TradarHttpSend` / `:TradarGrpcSend`); gRPC streaming: bắt đầu call, hoặc gửi thêm một message |
 | | `rx` | HTTP: ngừng chờ response; gRPC: huỷ call hoặc dừng stream |
 | | `rc` | đóng chiều gửi của client-/bidi-stream |
 | | `ry` / `rk` | copy block thành lệnh `curl` / `grpcurl` (`:TradarCopyCurl`) / cheatsheet block mẫu |

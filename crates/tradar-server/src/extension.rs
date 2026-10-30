@@ -36,7 +36,21 @@ pub(crate) struct Ctx<'a> {
 
 impl Ctx<'_> {
     /// The saved connection `name`, which must use `driver`.
+    ///
+    /// `@target` (HTTP and gRPC only) is an ad-hoc connection to `target`
+    /// that needs no `connections.toml` entry: `@` alone for HTTP (every
+    /// request then carries a full URL), `@host:port` or `@https://host:port`
+    /// for gRPC -- what a request written straight against a URL uses.
     pub fn saved(&self, name: &str, driver: &str) -> Result<SavedConnection, RpcError> {
+        if let Some(target) = name.strip_prefix('@')
+            && matches!(driver, "http" | "grpc")
+        {
+            return Ok(SavedConnection {
+                name: name.to_string(),
+                driver: driver.to_string(),
+                target: target.to_string(),
+            });
+        }
         let all = match self.store {
             Some(store) => store.load()?,
             None => Vec::new(),
@@ -117,4 +131,35 @@ pub(crate) fn all() -> Vec<Box<dyn Extension>> {
     #[cfg(feature = "http")]
     extensions.push(Box::new(crate::http::HttpExtension::default()));
     extensions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(client: &ClientConnection) -> Ctx<'_> {
+        Ctx {
+            store: None,
+            client,
+        }
+    }
+
+    #[test]
+    fn an_at_name_is_an_ad_hoc_http_or_grpc_connection() {
+        let client = ClientConnection::detached();
+        let ctx = ctx(&client);
+        let http = ctx.saved("@", "http").ok().unwrap();
+        assert_eq!((http.driver.as_str(), http.target.as_str()), ("http", ""));
+        let grpc = ctx.saved("@localhost:50051", "grpc").ok().unwrap();
+        assert_eq!(grpc.target, "localhost:50051");
+        assert_eq!(grpc.name, "@localhost:50051");
+    }
+
+    #[test]
+    fn other_drivers_still_need_a_saved_connection() {
+        let client = ClientConnection::detached();
+        let ctx = ctx(&client);
+        assert!(ctx.saved("@localhost:9092", "kafka").is_err());
+        assert!(ctx.saved("plain", "http").is_err());
+    }
 }
