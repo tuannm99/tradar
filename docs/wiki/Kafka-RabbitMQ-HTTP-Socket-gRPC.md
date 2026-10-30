@@ -47,6 +47,13 @@ HTTP và gRPC dùng **chung một workbench**: mỗi connection một buffer s�
 | `:TradarHttpSend [tên]` / `:TradarGrpcSend [tên]` | như trên, giới hạn theo driver |
 | `:TradarHttpConnect [tên]` | ghi nhận connection HTTP (không gọi ra ngoài, nên không bao giờ lỗi) |
 
+### Viết request ở đâu
+
+- **Workbench** (`:TradarRequests [tên]`): buffer tạm của một connection.
+- **File `.http`**: mở file có đuôi `.http`; `# tradar: web` ở đầu file chọn connection (alias, giống `-- tradar: tên` của file query). Phím `rr`/`rx`/`ry`/`rk` và gợi ý có sẵn như trong workbench.
+- **File `.tdb`**: block ` ```http [connection] ` / ` ```grpc [connection] ` — xem [File `.tdb`](File-tdb).
+- **URL thẳng, không connection**: `GET https://api.example.com/users` (HTTP) hoặc `GRPC host:port pkg.Service/Method` (gRPC, `https://host:port` cho TLS) chạy được mà không cần `connections.toml`; chỉ url tương đối mới cần connection (alias).
+
 ### Cú pháp
 
 ```
@@ -72,7 +79,7 @@ deadline: 5s                          # deadline của call, không gửi như h
 
 - **Block**: bắt đầu bằng `###`; phần trước `###` đầu tiên cũng là một block (chỗ để khai báo biến và ghi chú). Dòng `#` và `//` trước dòng request là comment.
 - **HTTP**: dòng đầu `METHOD url` (`GET /x HTTP/1.1` cũng được; url `http://`/`https://` dùng nguyên văn, còn lại nối vào `target` của connection). Các dòng `Tên: giá trị` là header, đến dòng trống đầu tiên; từ đó trở xuống là body, giữ nguyên văn. Body dính ngay dòng request (thiếu dòng trống) sẽ báo lỗi kèm số dòng.
-- **gRPC**: dòng đầu `GRPC service/Method`; `tên: giá trị` là metadata (tên tự chuyển chữ thường); `deadline: 5s` (`500ms`, `2m`, hoặc số trần = giây) đặt deadline; body là JSON, dòng `//` bị bỏ khi gửi (đó là gợi ý của skeleton). Không có body = message rỗng.
+- **gRPC**: dòng đầu `GRPC service/Method` (hoặc `GRPC host:port service/Method` để gọi thẳng một server không có trong `connections.toml`); `tên: giá trị` là metadata (tên tự chuyển chữ thường); `deadline: 5s` (`500ms`, `2m`, hoặc số trần = giây) đặt deadline; body là JSON, dòng `//` bị bỏ khi gửi (đó là gợi ý của skeleton). Không có body = message rỗng.
 - **Biến**: `@tên = giá trị` ở bất kỳ đâu trong file (giá trị có thể dùng biến khai báo trước đó); `{{tên}}` được thay trong dòng request, header/metadata và body. Có sẵn `{{$uuid}}`, `{{$timestamp}}` (giây), `{{$isoTimestamp}}`, `{{$env.TÊN}}` (biến môi trường). Biến chưa khai báo thì báo rõ tên, không gửi gì; `@tên = ` để trống chỉ là dòng nhắc điền, không phải giá trị.
 - **Biến theo connection** (`setup`): `request_vars = { ['*'] = { ... }, web = { token = '...' } }` — `'*'` cho mọi workbench, mục theo tên connection ghi đè `'*'`, và `@tên = …` trong file ghi đè cả hai. Hợp với giá trị dùng chung nhiều file (base path, tenant); bí mật nên lấy từ `{{$env.TÊN}}` thay vì ghi vào config.
 - Workbench là scratch buffer, giữ nội dung trong phiên Neovim; `:w đường-dẫn` lưu ra file.

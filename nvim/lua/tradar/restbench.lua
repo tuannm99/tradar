@@ -22,6 +22,7 @@ local early = {} -- stream pushes that beat the answer to `grpc.stream.start`
 local last_start = 0
 local stream_listener
 local methods_cache = {} -- connection .. service -> grpc.methods answer
+local context -- defined with the running code below; the workbench functions above use it
 
 local function notify(msg, level) vim.notify('tradar: ' .. msg, level or vim.log.levels.INFO) end
 
@@ -100,9 +101,9 @@ local function bench_buffer(conn, driver, target)
   benches[conn] = buf
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
-  vim.bo[buf].filetype = 'http'
   pcall(vim.api.nvim_buf_set_name, buf, ('tradar-%s://%s [%d]'):format(driver, conn, buf))
   vim.b[buf].tradar_rest = { connection = conn, driver = driver, target = target }
+  vim.bo[buf].filetype = 'http'
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, TEMPLATE[driver] or TEMPLATE.http)
   local p = prefix()
   local function map(lhs, fn, desc) vim.keymap.set('n', p .. lhs, fn, { buffer = buf, desc = 'tradar: ' .. desc }) end
@@ -193,30 +194,39 @@ end
 --- The `GRPC service/Method` block of a method in the workbench of `conn`
 --- (added, with a request skeleton, when it is not there yet), cursor in its body.
 function M.insert_grpc(conn, service, method, kind)
+  -- Where the user is writing requests for this very connection (a ```grpc
+  -- block of a .tdb, a .http file), else the connection's workbench.
+  local here = context(vim.api.nvim_get_current_buf())
+  if here and not here.bench and here.conn == conn and here.driver ~= 'http' then
+    return M._insert_grpc_into(here.buf, here, conn, service, method, kind)
+  end
   with_bench(conn, { 'grpc' }, function(buf)
     focus(buf)
-    local want = vim.pesc(service .. '/' .. method)
-    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-    for i, l in ipairs(lines) do
-      if l:match('^%s*[Gg][Rr][Pp][Cc]%s+' .. want .. '%s*$') then
-        pcall(vim.api.nvim_win_set_cursor, 0, { i, 0 })
-        return notify(('%s/%s is already in the workbench'):format(service, method))
-      end
+    M._insert_grpc_into(buf, context(buf, 1), conn, service, method, kind)
+  end)
+end
+
+function M._insert_grpc_into(buf, c, conn, service, method, kind)
+  local want = vim.pesc(service .. '/' .. method)
+  for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    if l:match('^%s*[Gg][Rr][Pp][Cc]%s+' .. want .. '%s*$') then
+      pcall(vim.api.nvim_win_set_cursor, 0, { i, 0 })
+      return notify(('%s/%s is already there'):format(service, method))
     end
-    local tag = (kind and kind.client_streaming and kind.server_streaming and ' [bidi stream]')
-      or (kind and kind.client_streaming and ' [client stream]')
-      or (kind and kind.server_streaming and ' [server stream]')
-      or ''
-    rpc.request('grpc.skeleton', { connection = conn, service = service, method = method, comments = true }, function(e, result)
-      local body = (not e and result and result.skeleton) or '{}'
-      local block = { '', ('### %s%s'):format(method, tag), ('GRPC %s/%s'):format(service, method), '' }
-      vim.list_extend(block, vim.split(body, '\n', { plain = true }))
-      local at = vim.api.nvim_buf_line_count(buf)
-      vim.api.nvim_buf_set_lines(buf, at, at, false, block)
-      vim.bo[buf].modified = false
-      pcall(vim.api.nvim_win_set_cursor, vim.fn.bufwinid(buf), { at + 5, 0 })
-      notify(('%s/%s added -- edit the JSON body, then %sr'):format(service, method, prefix()))
-    end)
+  end
+  local tag = (kind and kind.client_streaming and kind.server_streaming and ' [bidi stream]')
+    or (kind and kind.client_streaming and ' [client stream]')
+    or (kind and kind.server_streaming and ' [server stream]')
+    or ''
+  rpc.request('grpc.skeleton', { connection = conn, service = service, method = method, comments = true }, function(e, result)
+    local body = (not e and result and result.skeleton) or '{}'
+    local block = { ('### %s%s'):format(method, tag), ('GRPC %s/%s'):format(service, method), '' }
+    vim.list_extend(block, vim.split(body, '\n', { plain = true }))
+    local at = c and c.insert_at or vim.api.nvim_buf_line_count(buf)
+    vim.api.nvim_buf_set_lines(buf, at, at, false, vim.list_extend({ '' }, block))
+    if vim.b[buf].tradar_rest then vim.bo[buf].modified = false end
+    pcall(vim.api.nvim_win_set_cursor, vim.fn.bufwinid(buf), { at + 5, 0 })
+    notify(('%s/%s added -- edit the JSON body, then %sr'):format(service, method, prefix()))
   end)
 end
 
@@ -240,29 +250,95 @@ local function cursor_row(buf)
   return 1
 end
 
---- The request of the block under the cursor, or nil (already told why).
-local function request_at(buf)
+--- The connection a plain buffer asks for: `:TradarConnect` in it, or a
+--- `# tradar: name` line near the top. (Not the "last one chosen" fallback
+--- SQL buffers use: that is usually a database.)
+local function explicit_connection(buf)
+  return vim.b[buf].tradar_connection or ctx.modeline(buf)
+end
+
+--- Where requests are being edited, for `row` of `buf`, or nil elsewhere:
+---   - a workbench (`:TradarRequests`): the whole buffer, bound to its connection;
+---   - a ```` ```http ```` / ```` ```grpc ```` block of a `.tdb` (the fence may
+---     name the connection: ```` ```http web ````): that block's lines;
+---   - a buffer of filetype `http` (a `.http` file): the whole buffer, on the
+---     connection its `# tradar: name` line names, if any.
+--- `{ lines, row, all, conn, driver, insert_at }`: the lines the request text
+--- is read from and the cursor row in them, the whole buffer (variables are
+--- read from all of it), the connection name (nil: none -- only a request
+--- written straight at a URL can run), the driver the place is for (nil: either),
+--- and the buffer line after which a new block is added.
+context = function(buf, row)
+  if buf == nil or buf == 0 then buf = vim.api.nvim_get_current_buf() end
+  if not vim.api.nvim_buf_is_valid(buf) then return nil end
+  row = row or cursor_row(buf)
+  local all = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local info = vim.b[buf].tradar_rest
-  if not info then
-    notify('not a tradar request workbench (open one with :TradarHttpSend or :TradarGrpcSend)', vim.log.levels.WARN)
-    return
+  if info then
+    return { buf = buf, lines = all, row = row, all = all, conn = info.connection, driver = info.driver, insert_at = #all, bench = true, target = info.target }
   end
-  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local block = reqparse.block_at(lines, cursor_row(buf))
-  local req, err = reqparse.parse(lines, block, reqparse.variables(lines, M.base_vars(info.connection)))
-  if not req then
-    notify(err, vim.log.levels.WARN)
-    return
+  if ctx.M.is_tdb(buf) then
+    local block = ctx.blocks.at(all, row, true)
+    local lang = block and block.lang and block.lang:lower()
+    if lang ~= 'http' and lang ~= 'grpc' then return nil end
+    local body = vim.list_slice(all, block.start, block.finish)
+    if #body == 0 then body = { '' } end
+    local r = math.min(math.max(row - block.start + 1, 1), #body)
+    return { buf = buf, lines = body, row = r, all = all, conn = block.conn or explicit_connection(buf), driver = lang, insert_at = block.finish }
   end
-  if req.kind ~= info.driver then
-    notify(
-      req.kind == 'grpc' and ('"%s" is an HTTP connection -- a GRPC block needs a gRPC one'):format(info.connection)
-        or ('"%s" is a gRPC connection -- this block is an HTTP request'):format(info.connection),
-      vim.log.levels.WARN
-    )
-    return
+  if vim.bo[buf].filetype == 'http' then
+    return { buf = buf, lines = all, row = row, all = all, conn = explicit_connection(buf), insert_at = #all }
   end
-  return req, info
+end
+
+--- Whether the cursor of `buf` is somewhere HTTP / gRPC requests are written
+--- (see `context`) -- `<leader>rr`, `rx`, completion... then mean requests.
+function M.applies(buf, row) return context(buf, row) ~= nil end
+
+--- A buffer of requests (a `.http` file, a workbench), as opposed to a
+--- `.tdb` that may hold some among its queries.
+function M.is_request_buffer(buf)
+  return vim.b[buf].tradar_rest ~= nil or (vim.bo[buf].filetype == 'http' and not ctx.M.is_tdb(buf))
+end
+
+--- The connection `req` runs on in place `c`, as `{ connection, target }`, or
+--- nil and why not. A request with a full URL needs no saved connection (`@`,
+--- an ad-hoc one); neither does `GRPC host:port service/Method`.
+local function connection_for(req, c)
+  if req.kind == 'grpc' and req.target then return { connection = '@' .. req.target, target = req.target } end
+  local conn = c.conn
+  if conn then
+    local driver = c.driver or ctx.M.cached_driver(conn)
+    if driver and driver ~= req.kind then
+      return nil, req.kind == 'grpc'
+          and ('"%s" is an HTTP connection -- a GRPC block needs a gRPC one'):format(conn)
+        or ('"%s" is a %s connection -- this block is an HTTP request'):format(conn, driver)
+    end
+    return { connection = conn, target = c.target }
+  end
+  if req.kind == 'http' and req.url:match('^https?://') then return { connection = '@', target = '' } end
+  if req.kind == 'grpc' then
+    return nil, 'no connection for this request -- add a `# tradar: <name>` line at the top, name it in the fence (```grpc <name>), or write GRPC host:port service/Method'
+  end
+  return nil, 'no connection for this relative URL -- add a `# tradar: <name>` line at the top, name it in the fence (```http <name>), or write the full URL'
+end
+
+--- The request of the block under the cursor and where it runs, or nil
+--- (already told why; `quiet`: not told).
+local function request_at(buf, quiet)
+  local c = context(buf)
+  local function fail(msg, level)
+    if not quiet then notify(msg, level or vim.log.levels.WARN) end
+  end
+  if not c then
+    return fail('not on a request -- use a workbench (:TradarRequests), a ```http / ```grpc block in a .tdb, or a .http file')
+  end
+  local block = reqparse.block_at(c.lines, c.row)
+  local req, err = reqparse.parse(c.lines, block, reqparse.variables(c.all, M.base_vars(c.conn)))
+  if not req then return fail(err) end
+  local info, why = connection_for(req, c)
+  if not info then return fail(why) end
+  return req, info, c
 end
 
 local function metadata_lines(label, metadata)
@@ -514,21 +590,16 @@ function M.run(buf)
   if req then M.execute(req, info) end
 end
 
---- The running thing of the block under the cursor (or the only one of the
---- workbench), with its key.
+--- The running thing of the block under the cursor (or the only one running),
+--- with its key.
 local function running_at(buf)
-  local info = vim.b[buf].tradar_rest
-  if not info then return nil, notify('not a tradar request workbench', vim.log.levels.WARN) end
-  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local req = reqparse.parse(lines, reqparse.block_at(lines, cursor_row(buf)), reqparse.variables(lines, M.base_vars(info.connection)))
+  local req, info = request_at(buf, true)
   if req then
     local key = reqparse.slot(req, info.connection)
     if running[key] then return running[key], key end
   end
   local only, only_key, n = nil, nil, 0
-  for key, r in pairs(running) do
-    if key:sub(1, #info.connection + 1) == info.connection .. '\n' then only, only_key, n = r, key, n + 1 end
-  end
+  for key, r in pairs(running) do only, only_key, n = r, key, n + 1 end
   if n == 1 then return only, only_key end
   notify(n == 0 and 'nothing is running here' or 'several requests are running -- put the cursor in the block to stop', vim.log.levels.WARN)
 end
@@ -569,28 +640,40 @@ function M.close_send(buf)
   queue_send(r.sub, { close = true })
 end
 
---- `<leader>ry`: the block under the cursor as a `curl` / `grpcurl` command, yanked.
+--- `<leader>ry` / `:TradarCopyCurl`: the block under the cursor as a `curl` /
+--- `grpcurl` command, yanked. Variables are replaced and a relative URL is
+--- joined to the connection's base, so it runs as it stands in a terminal.
 function M.copy(buf)
   buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
   local req, info = request_at(buf)
   if not req then return end
-  local text = req.kind == 'grpc' and reqparse.as_grpcurl(req, info.target) or reqparse.as_curl(req, info.target)
-  vim.fn.setreg('"', text)
-  pcall(vim.fn.setreg, '+', text)
-  notify(('copied as %s'):format(req.kind == 'grpc' and 'grpcurl' or 'curl'))
+  local function done(target)
+    local text = req.kind == 'grpc' and reqparse.as_grpcurl(req, req.target or target) or reqparse.as_curl(req, target)
+    vim.fn.setreg('"', text)
+    pcall(vim.fn.setreg, '+', text)
+    notify(('copied as %s'):format(req.kind == 'grpc' and 'grpcurl' or 'curl'))
+  end
+  if info.target ~= nil then return done(info.target) end
+  call('connections.list', nil, function(list)
+    for _, c in ipairs(list) do
+      if c.name == info.connection then return done(c.target) end
+    end
+    done('')
+  end)
 end
 
 -- ── cheat sheet, completion ──────────────────────────
 
---- Adds the lines of a block to the end of the workbench `buf` and puts the
---- cursor on the first non-title line.
-local function append_block(buf, block)
-  focus(buf)
-  local at = vim.api.nvim_buf_line_count(buf)
+--- Adds the lines of a request block to `buf` -- the end of a workbench /
+--- `.http` file, the inside of the `.tdb` block it is called from (`c.insert_at`)
+--- -- and puts the cursor on its request line.
+local function append_block(buf, block, c)
+  if vim.fn.bufwinid(buf) == -1 then focus(buf) end
+  local at = c and c.insert_at or vim.api.nvim_buf_line_count(buf)
   local lines = { '' }
   vim.list_extend(lines, block)
   vim.api.nvim_buf_set_lines(buf, at, at, false, lines)
-  vim.bo[buf].modified = false
+  if vim.b[buf].tradar_rest then vim.bo[buf].modified = false end
   local row = at + 2
   for i, l in ipairs(block) do
     if not (l:match('^###') or l:match('^@') or l:match('^#')) then
@@ -606,15 +689,16 @@ end
 --- it and runs it.
 function M.cheatsheet(buf)
   buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
-  local info = vim.b[buf].tradar_rest
-  if not info then return notify('not a tradar request workbench', vim.log.levels.WARN) end
-  local entries = require('tradar.reqcheats').for_driver(info.driver)
+  local c = context(buf)
+  if not c then return notify('not on a request -- use a workbench (:TradarRequests), a ```http / ```grpc block in a .tdb, or a .http file', vim.log.levels.WARN) end
+  local driver = c.driver or (c.conn and ctx.M.cached_driver(c.conn) == 'grpc') and 'grpc' or 'http'
+  local entries = require('tradar.reqcheats').for_driver(driver)
   local function put(entry, run)
     local lines = vim.split(entry.text, '\n', { plain = true })
     local titled = false
     for _, l in ipairs(lines) do titled = titled or l:match('^###') ~= nil end
     if not titled then table.insert(lines, 1, '### ' .. entry.title) end
-    append_block(buf, lines)
+    append_block(buf, lines, c)
     if run then M.run(buf) end
   end
   local tele = require('tradar.telescope')
@@ -653,53 +737,55 @@ end
 --- the request line (HTTP verbs, gRPC `service/Method` from reflection), header
 --- names and well-known header values. Returns `start_col, words`.
 function M.complete_at(buf, row, col)
-  local info = vim.b[buf].tradar_rest
-  if not info then return nil end
-  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local before = lines[row]:sub(1, col)
+  local c = context(buf, row)
+  if not c then return nil end
+  local lines = c.lines
+  local before = (lines[c.row] or ''):sub(1, col)
+  local driver = c.driver
 
   local open = before:match('{{%s*()[%w_%.%$]*$')
   if open then
     local base = before:sub(open)
     local names = {}
-    for k in pairs(reqparse.variables(lines, M.base_vars(info.connection))) do names[#names + 1] = k end
+    for k in pairs(reqparse.variables(c.all, M.base_vars(c.conn))) do names[#names + 1] = k end
     table.sort(names)
     vim.list_extend(names, { '$uuid', '$timestamp', '$isoTimestamp', '$env.' })
     return open - 1, starts(names, base)
   end
 
   -- Where in the block are we: before / on the request line, headers, or body?
-  local block = reqparse.block_at(lines, row)
+  local block = reqparse.block_at(lines, c.row)
   local request_row
-  for i = block.first, row do
+  for i = block.first, c.row do
     local l = lines[i]
     if not (l:match('^###') or l:match('^%s*$') or l:match('^%s*#') or l:match('^%s*//') or l:match('^@')) then
       request_row = i
       break
     end
   end
-  if request_row and request_row < row then
+  if request_row and request_row < c.row then
     -- a blank line between the request line and here means the body
-    for i = request_row + 1, row - 1 do
+    for i = request_row + 1, c.row - 1 do
       if lines[i]:match('^%s*$') then return nil end
     end
+    if lines[request_row]:match('^%s*[Gg][Rr][Pp][Cc]%s') then driver = 'grpc' end
   end
-  if not request_row or request_row == row then
+  if not request_row or request_row == c.row then
     if before:match('^%s*[Gg][Rr][Pp][Cc]%s+') then
       local typed = before:match('^%s*[Gg][Rr][Pp][Cc]%s+(%S*)$')
-      if not typed then return nil end
+      if not typed or not c.conn then return nil end
       local start = #before - #typed
       local service = typed:match('^(.-)/')
       local words = {}
       if service then
-        local err, methods = rpc.request_sync('grpc.methods', { connection = info.connection, service = service }, 1500)
+        local err, methods = rpc.request_sync('grpc.methods', { connection = c.conn, service = service }, 1500)
         if not err then
           for _, m in ipairs(methods or {}) do words[#words + 1] = service .. '/' .. m.name end
         end
       else
-        local err, services = rpc.request_sync('grpc.services', { connection = info.connection }, 1500)
+        local err, services = rpc.request_sync('grpc.services', { connection = c.conn }, 1500)
         if not err then
-          for _, s in ipairs(services or {}) do words[#words + 1] = s end
+          for _, svc in ipairs(services or {}) do words[#words + 1] = svc end
         end
       end
       return start, starts(words, typed)
@@ -712,13 +798,13 @@ function M.complete_at(buf, row, col)
   -- a header line
   local name, value = before:match('^%s*([%w%-]+)%s*:%s*(.*)$')
   if name then
-    local values = info.driver == 'http' and HEADER_VALUES[name:lower()] or nil
+    local values = driver ~= 'grpc' and HEADER_VALUES[name:lower()] or nil
     if not values then return nil end
     return #before - #value, starts(values, value)
   end
   local typed = before:match('^%s*([%w%-]*)$')
   if typed then
-    return #before - #typed, starts(info.driver == 'grpc' and GRPC_META or HEADERS, typed)
+    return #before - #typed, starts(driver == 'grpc' and GRPC_META or HEADERS, typed)
   end
 end
 

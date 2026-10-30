@@ -222,6 +222,100 @@ H.check('completion: nothing in the body', words == nil)
 start, words = complete('X: {{', nil, { '@tok = 1', 'GET /x' })
 H.check('completion: variables inside {{ }}', vim.tbl_contains(words or {}, 'tok') and vim.tbl_contains(words, '$uuid') and start == #'X: {{', vim.inspect({ start, words }))
 
+-- requests outside a workbench: .http files and .tdb blocks
+local function open_file(name, lines)
+  vim.cmd('edit! ' .. vim.fn.fnameescape(H.tmp .. '/' .. name))
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
+  vim.bo.modified = false
+  return vim.api.nvim_get_current_buf()
+end
+local function win_cursor(b, pattern)
+  vim.api.nvim_set_current_win(vim.fn.bufwinid(b))
+  vim.api.nvim_win_set_cursor(0, { row_of(b, pattern), 0 })
+end
+
+local base_url = 'http://127.0.0.1:' .. port
+local fbuf = open_file('direct.http', { 'GET ' .. base_url .. '/echo?direct=1', 'X-Who: nobody' })
+H.check('a .http file is a request buffer with the plugin\'s keys', vim.bo[fbuf].filetype == 'http' and H.mapped(fbuf, '<leader>rr'))
+H.check('a request buffer is not connected as a database', vim.b[fbuf].tradar_attached == true and not H.t.is_connected('web'))
+win_cursor(fbuf, '^GET http')
+t.run()
+H.check('a full URL runs with no saved connection at all', H.wait(5000, function() return state.result and state.result.label == 'GET /echo' and state.result.conn == '@' end), vim.inspect(state.result and state.result.conn))
+H.check('...and the response is the real one', table.concat(state.result.lines, '\n'):find('"path": "/echo?direct=1"', 1, true) ~= nil)
+vim.api.nvim_buf_set_lines(fbuf, 0, -1, false, { 'GET /echo?relative=1' })
+H.notes = {}
+win_cursor(fbuf, '^GET /echo')
+t.run()
+H.check('a relative URL with no connection says how to give one', #H.notes_with('no connection for this relative URL') == 1 and H.notes[1].msg:find('# tradar: <name>', 1, true) ~= nil, vim.inspect(H.notes))
+vim.api.nvim_buf_set_lines(fbuf, 0, -1, false, { '# tradar: web', '', 'GET /echo?alias=1' })
+win_cursor(fbuf, '^GET /echo')
+t.run()
+H.check('a `# tradar: name` line gives the buffer its connection, like any other file', H.wait(5000, function() return state.result and state.result.conn == 'web' and table.concat(state.result.lines, '\n'):find('alias=1', 1, true) end), vim.inspect(state.result and state.result.conn))
+H.check('...and no database connection is tried for it', #H.notes_with('could not connect') == 0)
+vim.fn.setreg('"', '')
+t.set_filter('off')
+vim.cmd('TradarCopyCurl')
+H.check('copying as curl joins the relative URL to the alias\'s base', H.wait(5000, function() return vim.fn.getreg('"'):find(base_url .. '/echo?alias=1', 1, true) end), vim.fn.getreg('"'))
+
+local tbuf = open_file('mixed.tdb', {
+  '# notes',
+  '@who = from-prose',
+  '',
+  '```http web',
+  'GET /echo?tdb=1',
+  'X-Who: {{who}}',
+  '```',
+  '',
+  '```http',
+  'GET ' .. base_url .. '/echo?noname=1',
+  '```',
+  '',
+  '```sql local',
+  'select 1 as one',
+  '```',
+})
+H.check('a .tdb attaches as before', vim.bo[tbuf].filetype == 'tdb' or vim.api.nvim_buf_get_name(tbuf):match('%.tdb$') ~= nil)
+win_cursor(tbuf, '^GET /echo%?tdb')
+t.run()
+H.check('an ```http block runs on the connection named in its fence', H.wait(5000, function() return state.result and state.result.conn == 'web' and table.concat(state.result.lines, '\n'):find('tdb=1', 1, true) end), vim.inspect(state.result and state.result.conn))
+local echoed = H.text()
+vim.api.nvim_win_set_cursor(0, { 4, 0 })
+t.run()
+H.check('...also from its fence line', H.wait(5000, function() return state.result and state.result.at ~= nil and #state.result_log >= 1 end))
+win_cursor(tbuf, '^GET http')
+t.run()
+H.check('an ```http block with no connection runs a full URL straight', H.wait(5000, function() return state.result and state.result.conn == '@' and table.concat(state.result.lines, '\n'):find('noname=1', 1, true) end), vim.inspect(state.result and state.result.conn))
+win_cursor(tbuf, '^select 1')
+t.run()
+H.check('a ```sql block of the same file still runs as a query', H.wait(5000, function() return H.text():find('1/1 rows', 1, true) ~= nil end), H.text())
+
+-- the .tdb block: curl, completion, cheat sheet go to the block under the cursor
+win_cursor(tbuf, '^GET /echo%?tdb')
+vim.fn.setreg('"', '')
+rb.copy(tbuf)
+H.check('copying as curl in a .tdb block expands the file\'s variable and joins the base', H.wait(5000, function() return vim.fn.getreg('"'):find("-H 'X-Who: from-prose'", 1, true) and vim.fn.getreg('"'):find(base_url .. '/echo?tdb=1', 1, true) end), vim.fn.getreg('"'))
+local cstart, cwords = rb.complete_at(tbuf, row_of(tbuf, '^X%-Who'), 3)
+H.check('completion works inside a .tdb request block', cstart == 0 and vim.tbl_contains(cwords or {}, 'X-Request-ID') == false and vim.tbl_contains(cwords or {}, 'X-API-Key') == false and cwords ~= nil, vim.inspect({ cstart, cwords }))
+cstart, cwords = rb.complete_at(tbuf, row_of(tbuf, '^select 1'), 3)
+H.check('...and nothing is offered in a ```sql block', cstart == nil)
+ctx.opts.cheatsheet_picker = 'ui'
+local real_select2 = vim.ui.select
+vim.ui.select = function(items, o, cb)
+  for _, item in ipairs(items) do
+    if item.title == 'DELETE' then return cb(item) end
+  end
+end
+vim.api.nvim_set_current_win(vim.fn.bufwinid(tbuf))
+vim.api.nvim_win_set_cursor(0, { row_of(tbuf, '^GET /echo%?tdb'), 0 })
+rb.cheatsheet(tbuf)
+local tl = vim.api.nvim_buf_get_lines(tbuf, 0, -1, false)
+local close_at
+for i, l in ipairs(tl) do
+  if l == '```' and i > row_of(tbuf, '^GET /echo%?tdb') then close_at = i break end
+end
+H.check('a cheat sheet pick lands inside the block, before its closing fence', tl[close_at - 1] == 'DELETE /items/{{id}}' and tl[close_at - 2] == '### DELETE', vim.inspect(vim.list_slice(tl, 1, 12)))
+vim.ui.select = real_select2
+
 -- gRPC (rpc stubbed)
 local rpc = require('tradar.rpc')
 local real_request, real_on = rpc.request, rpc.on
@@ -256,7 +350,7 @@ local gbuf = vim.api.nvim_get_current_buf()
 local glines = table.concat(vim.api.nvim_buf_get_lines(gbuf, 0, -1, false), '\n')
 H.check('the block has a title, the GRPC line and the JSON skeleton', glines:find('### Get\nGRPC pkg.Svc/Get\n\n{\n  "id": ""\n}', 1, true) ~= nil, glines)
 rb.insert_grpc('rpc', 'pkg.Svc', 'Get', {})
-H.check('picking it again jumps to the block instead of adding another', H.wait(2000, function() return #H.notes_with('already in the workbench') == 1 end) and select(2, glines:gsub('GRPC pkg.Svc/Get', '')) == 1)
+H.check('picking it again jumps to the block instead of adding another', H.wait(2000, function() return #H.notes_with('is already there') == 1 end) and select(2, glines:gsub('GRPC pkg.Svc/Get', '')) == 1)
 
 local row = row_of(gbuf, '^  "id"')
 vim.api.nvim_buf_set_lines(gbuf, row - 1, row, false, { '  "id": "7"' })
@@ -293,6 +387,26 @@ H.check('replies are appended as they arrive and the end is noted', H.wait(5000,
   return text:find('‹ {', 1, true) and text:find('# end of stream', 1, true)
 end), vim.inspect(state.result and state.result.lines))
 H.check('the footer no longer says streaming', H.wait(2000, function() return not H.text():find('streaming', 1, true) end), H.text())
+
+local dbuf = open_file('direct.tdb', {
+  '```grpc',
+  'GRPC localhost:50051 pkg.Svc/Get',
+  '',
+  '{"id": "9"}',
+  '```',
+})
+win_cursor(dbuf, '^GRPC localhost')
+t.run()
+local direct
+H.check('GRPC host:port service/Method calls a server with no saved connection', H.wait(5000, function()
+  for _, c in ipairs(calls) do
+    if c.method == 'grpc.invoke' and c.params.connection == '@localhost:50051' then direct = c.params return true end
+  end
+end), vim.inspect(calls[#calls]))
+H.check('...with the body as written', direct and direct.request.id == '9' and direct.service == 'pkg.Svc')
+vim.fn.setreg('"', '')
+rb.copy(dbuf)
+H.check('...and copies as grpcurl against that address', vim.fn.getreg('"'):find('localhost:50051', 1, true) ~= nil and vim.fn.getreg('"'):find('pkg.Svc/Get', 1, true) ~= nil, vim.fn.getreg('"'))
 
 -- completion on a GRPC line (reflection stubbed)
 local real_sync = rpc.request_sync

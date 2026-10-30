@@ -48,6 +48,8 @@ require('tradar.addconn')
 --- connect so the first completion/run has nothing to wait for.
 function M.attach(buf)
   buf = resolve_buf(buf)
+  -- A request workbench has its own keys (restbench.lua).
+  if vim.b[buf].tradar_rest then return end
   vim.b[buf].tradar_attached = true
   vim.bo[buf].omnifunc = "v:lua.require'tradar'.omnifunc"
   if opts.keymaps ~= false then
@@ -74,6 +76,7 @@ function M.attach(buf)
     map('n', 'm', function() M.more() end, 'load more rows')
     map('n', 'z', function() M.zoom() end, 'zoom the results window to full screen / restore')
     map('n', 'e', M.explain, 'explain statement under cursor')
+    map('n', 'y', function() require('tradar.restbench').copy() end, 'copy the HTTP / gRPC request under the cursor as curl / grpcurl')
     vim.keymap.set('n', 'g?', function()
       show_help({
         '# tradar: SQL buffer',
@@ -87,6 +90,7 @@ function M.attach(buf)
         ('- `%sm` load the next page of rows (scrolling does not)'):format(p),
         ('- `%sz` zoom the results window to the full screen / restore'):format(p),
         ('- `%se` explain statement under cursor'):format(p),
+        ('- in a ```http / ```grpc block or a .http file: `%sr` sends the request, `%sx` cancels, `%sy` copies it as curl / grpcurl, `%sk` ready-made requests'):format(p, p, p, p),
         '- `K` table/column info under cursor (falls back to LSP hover)',
         '- `gd` open table under cursor (falls back to LSP go-to-definition)',
       })
@@ -94,7 +98,8 @@ function M.attach(buf)
   end
   M.attach_nav(buf)
   local conn = M.connection_for(buf)
-  if conn and not state.connected[conn] then
+  -- A .http file's connection is an HTTP / gRPC one, connected when a request runs.
+  if conn and not state.connected[conn] and not require('tradar.restbench').is_request_buffer(buf) then
     ctx.ensure_connected(conn, function() end, function(err)
       notify(('could not connect `%s`: %s'):format(conn, err), vim.log.levels.WARN)
     end)
@@ -116,7 +121,7 @@ end
 function M.maybe_attach(buf)
   buf = resolve_buf(buf)
   if vim.b[buf].tradar_attached then return end
-  if vim.bo[buf].filetype == 'sql' or M.is_tdb(buf) or ctx.modeline(buf) then M.attach(buf) end
+  if vim.bo[buf].filetype == 'sql' or vim.bo[buf].filetype == 'http' or M.is_tdb(buf) or ctx.modeline(buf) then M.attach(buf) end
 end
 
 function M.setup(user)

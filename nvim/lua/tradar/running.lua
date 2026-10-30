@@ -168,6 +168,9 @@ end
 --- not a regex here). `all`: every statement in the buffer, in order.
 function M.run(range_start, range_end, all, transform)
   local buf = vim.api.nvim_get_current_buf()
+  -- An HTTP / gRPC request (a ```http / ```grpc block of a .tdb, a .http file,
+  -- a request workbench) is sent, not split and run as a statement.
+  if require('tradar.restbench').applies(buf) then return require('tradar.restbench').run(buf) end
   -- A visual selection is run the way "run all" runs a buffer: the server
   -- splits it on the dialect's own statement boundaries (`;` for SQL), so
   -- several statements run one after another instead of being sent as one
@@ -293,6 +296,7 @@ function M.restart()
 end
 
 function M.cancel()
+  if require('tradar.restbench').applies(vim.api.nvim_get_current_buf()) then return require('tradar.restbench').cancel() end
   if not state.running then return notify('nothing is running') end
   call('cancel', { query_id = state.running.id }, function() end)
 end
