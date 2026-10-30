@@ -22,6 +22,7 @@ Quy ước: `<leader>r` là **tiền tố** mặc định, đổi bằng `setup{
 | `re` | n | `EXPLAIN` câu dưới con trỏ (chỉ SQL; không bao giờ `ANALYZE`) |
 | `K` | n | thông tin bảng/cột dưới con trỏ (không có thì rơi về LSP hover) |
 | `rk` | n | cheatsheet: query mẫu của loại database này (`<CR>` chèn, `<C-r>` chèn và chạy; `:TradarCheatsheet`) |
+| `rK` | n | cả cheatsheet trong một buffer (nhóm gập được, `rr` chạy block); `:TradarCheatsheetFile` |
 | `gd` | n | sinh câu xem dòng của bảng dưới con trỏ vào buffer, chưa chạy (không có bảng thì rơi về LSP go-to-definition) |
 | `<C-x><C-o>` | i | completion qua `omnifunc` (hoặc nguồn `tradar.blink` của `blink.cmp`, tự động sau `.`) |
 
@@ -117,7 +118,7 @@ Mọi lệnh dưới đây cũng gọi được qua một lệnh chung `:Tradar 
 | Connection | `:TradarConnect [tên]`, `:TradarAddConnection` (thêm bằng hỏi đáp, thử kết nối ngay), `:TradarConnections` (mở `connections.toml`), `:TradarRestart` (dừng server nền), `:TradarLog` (xem log của server) |
 | Chạy | `:TradarRun` (nhận range), `:TradarRunAll`, `:TradarCancel`, `:TradarMore` |
 | Điều hướng | `:TradarSchema`, `:TradarTables`, `:TradarHistory` |
-| Cheatsheet | `:TradarCheatsheet` (`rk`), `:TradarCheatsheetEdit` (query của riêng bạn, `cheatsheet.toml`) |
+| Cheatsheet | `:TradarCheatsheet` (`rk`), `:TradarCheatsheetFile` (`rK`, cả bảng trong một buffer để đọc/gập), `:TradarCheatsheetEdit` (query của riêng bạn, `cheatsheet.toml`) |
 | Sinh câu lệnh | `:TradarCrud [create\|read\|update\|delete]` (`rg`) — chèn câu lệnh mẫu của bảng vào buffer, không chạy |
 | Lưu / mở query | `:TradarSave[!] [tên]` (vào thư viện, `<leader>rS`), `:TradarSaveHere[!] [đường dẫn]` (cạnh file hiện tại), `:TradarOpen` (duyệt thư viện, `<leader>rf`) |
 | Kết quả | `:TradarResults` (chọn tab), `:TradarRefresh`, `:TradarWatch [giây\|off]`, `:TradarFilter [biểu thức\|off]`, `:TradarDiff [n]`, `:TradarResultsZoom` |

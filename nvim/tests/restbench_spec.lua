@@ -203,6 +203,17 @@ vim.api.nvim_win_set_cursor(0, { row_of(buf, '^GET /me$'), 0 })
 rb.run(buf)
 H.check('and runs like any other (the file\'s @token fills it in)', shown('GET /me') and table.concat(state.result.lines, '\n'):find('Bearer abc', 1, true) ~= nil, vim.inspect(state.result and state.result.lines))
 
+-- the whole sheet in one buffer, for requests
+vim.api.nvim_set_current_win(vim.fn.bufwinid(buf))
+vim.cmd('TradarCheatsheetFile')
+H.check('the request cheat sheet opens as one buffer of http blocks on the connection', H.wait(3000, function()
+  return vim.api.nvim_buf_get_name(0):find('tradar://cheatsheet/web', 1, true) ~= nil
+end), vim.api.nvim_buf_get_name(0))
+local sheet_text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n')
+H.check('...with a block per entry', sheet_text:find('### Bearer token\n```http web\n@token = \nGET /me', 1, true) ~= nil and sheet_text:find('## Auth', 1, true) ~= nil, sheet_text:sub(1, 400))
+vim.cmd('tabclose')
+vim.api.nvim_set_current_win(vim.fn.bufwinid(buf))
+
 -- completion
 local function complete(line, col, rows_before)
   local b = vim.api.nvim_create_buf(false, true)

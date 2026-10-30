@@ -132,6 +132,8 @@ Hai chỗ để lưu một query:
 - Chỗ cần điền là `${table}`, `${column}`, `${pattern}`… — đúng cú pháp tham số ở trên: lúc chạy plugin hỏi giá trị (nhớ giá trị lần trước, `<Tab>` gợi ý), buffer vẫn giữ `${...}` để dùng lại.
 - Query nằm trong server (mỗi driver một bộ, đúng ngôn ngữ native của nó), nên mọi phiên Neovim dùng chung.
 
+**Xem cả cheatsheet trong một buffer:** `<leader>rK` (hoặc `:TradarCheatsheetFile`) mở **toàn bộ** cheatsheet của connection trong một tab — mỗi nhóm là một tiêu đề `## …`, mỗi query là `### tên` kèm một block ```` ```sql <connection> ````, giống một file [`.tdb`](File-tdb). Đọc từ trên xuống, `/` để tìm, `zM` gập lại chỉ còn tiêu đề nhóm và query, `zR` mở hết, `za` mở/đóng một mục; đặt con trỏ trong block rồi `rr` chạy luôn (`${tên}` vẫn được hỏi). Query của bạn (★) nằm cùng trong đó. Buffer là bản tạm: sửa thoải mái, `:w đường-dẫn.tdb` để giữ một bản; gọi lại lệnh thì quay về đúng buffer (chưa sửa gì thì được vẽ lại theo `cheatsheet.toml` mới). Trong workbench/`.http`/block `http`/`grpc`, lệnh này mở cheatsheet request tương ứng.
+
 **Thêm query của riêng bạn:** `:TradarCheatsheetEdit` (hoặc `<C-e>` trong picker) mở `cheatsheet.toml` cạnh `connections.toml` (có template). Mỗi query là một bảng `[[entry]]`:
 
 ```toml
