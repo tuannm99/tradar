@@ -10,6 +10,8 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét. 
 
 1. **Dùng thật vài ngày trên database của chính mình** (người dùng làm, không phải việc code) — mọi lỗi gặp được vào đây trước tính năng mới.
 2. ~~Quyết định cuối về TUI~~ — **đã chốt: deprecated** (2026-10-31). Không phát triển thêm, không sửa chủ động (chỉ khi có người yêu cầu); vẫn nằm trong cây và phải build/test qua; không xoá.
+3. **Kiểm chứng trên backend thật** những gì mới chỉ có spec SQLite hoặc stub: workbench gRPC qua một server gRPC thật (hiện `rpc.request` giả lập ở `restbench_spec`; phía server đã có test tonic thật), result tabs/lọc/diff/`rA` trên Postgres/MySQL/Mongo/ES/Redis, màu request trên terminal thật, blink.cmp thật (hiện chỉ gọi nguồn trực tiếp).
+4. **Mở rộng đã đề xuất, chưa làm** (làm khi có nhu cầu): lọc/sắp xếp phía server cho Mongo và ES (như `rA` của SQL); thêm dòng mới ngay trong lưới Mongo; chạy cheatsheet trên nhiều version DB trong CI (entry cần version tối thiểu: Postgres 12+, Redis 6+); proxy theo từng connection (`?proxy=`/`?noproxy=1`, hiện chỉ biến môi trường của server, gRPC chưa đi qua proxy); cheatsheet riêng của người dùng cho HTTP/gRPC; lọc request/response phía server cho body rất lớn; biến request theo connection trong `connections.toml` (hiện `setup{ request_vars }` + `@x` trong file).
 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước — bảo mật hiện dựa vào quyền `0600` của unix socket); Windows named pipe.
 
@@ -63,6 +65,12 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] Lịch sử lần chạy + ghim tab, lọc/sắp xếp dòng đã tải, `:TradarDiff` — `docs/backlog/nvim-result-history-filter-diff-2026-10-24.md`
 - [x] Tab kết quả theo bảng/collection/index/key (thanh tab, click, `r1..9`/`rx`) — `docs/backlog/nvim-result-tabs-2026-10-23.md`
 - [x] HTTP + gRPC: workbench request chung (`###`, biến, response vào result tabs) — `docs/backlog/nvim-request-workbench-2026-10-29.md`
+- [x] HTTP/gRPC: request viết trong `.tdb`/file `.http` (alias connection hoặc URL thẳng, protocol 1.16), tô màu, gợi ý (omnifunc + blink), xuất curl/grpcurl, cheatsheet block mẫu, lọc body — `docs/backlog/nvim-request-workbench-2026-10-29.md`
+- [x] Không kiểm tra chứng chỉ TLS (`?insecure=1` cho HTTP/gRPC, `@insecure = 1`, protocol 1.17) và `setup{ server_env }` (biến môi trường/proxy cho server do plugin khởi động) — cùng backlog
+- [x] Cheatsheet: xem cả bảng trong một buffer `.tdb` (`rK`, gập được, block chạy được) — `docs/backlog/nvim-cheatsheet-overview-2026-10-30.md`
+- [x] `rA` hỏi server lọc/sắp xếp cho mọi dòng (SQL), `<C-d>` ngắt kết nối trong picker — `docs/backlog/nvim-server-view-disconnect-2026-10-28.md`
+- [x] Màu view JSON bằng extmark (hết mất màu theo dữ liệu) — `docs/backlog/nvim-json-colours-2026-10-28.md`
+- [x] Test cheatsheet chạy từng câu mẫu trên container thật (7 driver) — `docs/backlog/nvim-cheatsheet-2026-10-26.md`
 - [x] HTTP: buffer request sửa được — `docs/backlog/http-request-buffer-2026-10-21.md`
 - [x] RabbitMQ publish buffer + refresh — `docs/backlog/rabbitmq-publish-buffer-2026-10-21.md`
 - [x] Kafka tail: tạm dừng/lọc/xoá/nối lại — `docs/backlog/kafka-tail-controls-2026-10-21.md`
