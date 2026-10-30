@@ -114,6 +114,40 @@ H.check("setup{ cheatsheet_picker = 'ui' } lists category and title", H.wait(300
 H.check('...and inserts the choice', H.wait(2000, function() return buf_text():find(entries[1].text:sub(1, 20), 1, true) ~= nil end), buf_text())
 ctx.opts.cheatsheet_picker = nil
 
+-- the whole sheet in one buffer
+vim.api.nvim_set_current_win(vim.fn.bufwinid(H.sqlbuf))
+vim.api.nvim_buf_set_lines(H.sqlbuf, 0, -1, false, { '' })
+vim.api.nvim_win_set_cursor(0, { 1, 0 })
+local tabs_before = #vim.api.nvim_list_tabpages()
+vim.cmd('TradarCheatsheetFile')
+H.check('the overview opens in a tab of its own', H.wait(5000, function() return #vim.api.nvim_list_tabpages() == tabs_before + 1 end))
+local sheet = vim.api.nvim_get_current_buf()
+local text = table.concat(vim.api.nvim_buf_get_lines(sheet, 0, -1, false), '\n')
+H.check('...named after the connection, as a .tdb', vim.api.nvim_buf_get_name(sheet):find('tradar://cheatsheet/local', 1, true) and vim.bo[sheet].filetype == 'tdb', vim.api.nvim_buf_get_name(sheet))
+H.check('every entry is there under its category', (function()
+  for _, e in ipairs(entries) do
+    if not text:find('### ' .. e.title, 1, true) or not text:find('## ' .. e.category, 1, true) then return false, e.title end
+  end
+  return true
+end)(), text:sub(1, 300))
+H.check('each entry is a fenced block on the connection', text:find('### Integrity check\n```sql local\nPRAGMA integrity_check;\n```', 1, true) ~= nil, text:sub(1, 500))
+H.check('categories and entries fold', vim.fn.foldlevel(1) == 0 and (function()
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_cursor(win, { vim.fn.search('^## ', 'nw'), 0 })
+  return vim.fn.foldlevel(vim.fn.line('.')) == 1
+end)())
+vim.cmd('normal! zM')
+H.check('zM shows just the headings', vim.fn.foldclosed(vim.fn.search('^## ', 'nw')) ~= -1)
+vim.cmd('normal! zR')
+
+-- a block runs from the overview
+vim.api.nvim_win_set_cursor(0, { vim.fn.search('^PRAGMA integrity_check;', 'nw'), 0 })
+H.t.run()
+H.check('rr on a block runs it', H.wait(5000, function() return H.text():find('ok', 1, true) ~= nil end), H.text())
+local before = #vim.api.nvim_list_tabpages()
+vim.cmd('TradarCheatsheetFile')
+H.check('asking again goes back to the same buffer', H.wait(2000, function() return vim.api.nvim_get_current_buf() == sheet end) and #vim.api.nvim_list_tabpages() == before)
+
 -- no connection
 vim.cmd('enew')
 H.notes = {}

@@ -32,6 +32,7 @@ vim.api.nvim_create_user_command('TradarMore', function() t().more() end, {})
 vim.api.nvim_create_user_command('TradarSchema', function() t().schema() end, {})
 vim.api.nvim_create_user_command('TradarTables', function() require('tradar.telescope').tables() end, {})
 vim.api.nvim_create_user_command('TradarCheatsheet', function() require('tradar.cheatsheet').cheatsheet() end, { desc = 'ready-made queries for this connection' })
+vim.api.nvim_create_user_command('TradarCheatsheetFile', function() require('tradar.cheatsheet').cheatsheet_file() end, { desc = 'the whole cheat sheet in one buffer (headings, folds, runnable blocks)' })
 vim.api.nvim_create_user_command('TradarCheatsheetEdit', function() require('tradar.cheatsheet').edit_cheatsheet() end, { desc = 'edit your own cheat sheet queries' })
 vim.api.nvim_create_user_command('TradarCrud', function(a) require('tradar.crud').crud_command(a.args) end, {
   nargs = '?', complete = function() return { 'create', 'read', 'update', 'delete' } end,

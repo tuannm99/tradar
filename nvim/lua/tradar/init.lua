@@ -69,6 +69,7 @@ function M.attach(buf)
     map('n', 's', M.schema, 'schema panel')
     map('n', 't', function() require('tradar.telescope').tables() end, 'tables (telescope)')
     map('n', 'k', function() M.cheatsheet() end, 'cheat sheet: ready-made queries for this connection')
+    map('n', 'K', function() M.cheatsheet_file() end, 'cheat sheet: the whole thing in one buffer to read and fold')
     map('n', 'g', function() M.crud_command() end, 'generate create/read/update/delete for a table')
     map('n', 'h', function() require('tradar.telescope').history() end, 'history (telescope)')
     map('n', 'S', function() M.save() end, 'save to the query library')
@@ -85,6 +86,7 @@ function M.attach(buf)
         ('- `%sc` / `%ss` choose connection / schema panel'):format(p, p),
         ('- `%st` / `%sh` tables / history (telescope)'):format(p, p),
         ('- `%sk` cheat sheet: ready-made queries for this connection (`<CR>` insert, `<C-r>` insert and run)'):format(p),
+        ('- `%sK` the whole cheat sheet in one buffer: categories to fold (`zM`/`zR`), every entry a block you run with `%srr`'):format(p, p),
         ('- `%sg` generate create/read/update/delete for the table under the cursor (or pick one)'):format(p),
         ('- `%sS` / `%sf` save to / open from the query library (`:TradarSave`, `:TradarOpen`)'):format(p, p),
         ('- `%sm` load the next page of rows (scrolling does not)'):format(p),

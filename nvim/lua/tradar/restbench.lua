@@ -291,6 +291,15 @@ context = function(buf, row)
   end
 end
 
+--- `{ conn, driver }` of the place requests are written at the cursor (the
+--- connection may be nil), for the cheat sheet overview; nil elsewhere.
+function M.describe(buf)
+  local c = context(buf)
+  if not c then return nil end
+  local driver = c.driver or (c.conn and ctx.M.cached_driver(c.conn) == 'grpc') and 'grpc' or 'http'
+  return { conn = c.conn, driver = driver }
+end
+
 --- Whether the cursor of `buf` is somewhere HTTP / gRPC requests are written
 --- (see `context`) -- `<leader>rr`, `rx`, completion... then mean requests.
 function M.applies(buf, row) return context(buf, row) ~= nil end
