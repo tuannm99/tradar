@@ -52,6 +52,7 @@ HTTP và gRPC dùng **chung một workbench**: mỗi connection một buffer s�
 - **Workbench** (`:TradarRequests [tên]`): buffer tạm của một connection.
 - **File `.http`**: mở file có đuôi `.http`; `# tradar: web` ở đầu file chọn connection (alias, giống `-- tradar: tên` của file query). Phím `rr`/`rx`/`ry`/`rk` và gợi ý có sẵn như trong workbench.
 - **File `.tdb`**: block ` ```http [connection] ` / ` ```grpc [connection] ` — xem [File `.tdb`](File-tdb).
+- **Không kiểm tra chứng chỉ TLS** (server HTTPS tự ký): đặt `?insecure=1` ở cuối `target` của connection HTTP (`https://host:8443?insecure=1`; tham số này không thuộc base URL). Với request viết thẳng vào URL không có connection, thêm dòng `@insecure = 1` trong file. gRPC: `https://host:443?insecure=1` (xem mục gRPC). Tab response ghi `TLS not verified` ở footer, và plugin báo một lần khi kết nối.
 - **URL thẳng, không connection**: `GET https://api.example.com/users` (HTTP) hoặc `GRPC host:port pkg.Service/Method` (gRPC, `https://host:port` cho TLS) chạy được mà không cần `connections.toml`; chỉ url tương đối mới cần connection (alias).
 
 ### Màu
@@ -117,7 +118,7 @@ deadline: 5s                          # deadline của call, không gửi như h
 
 ### gRPC
 
-`target` dạng `host:port` hoặc `http://…` là plaintext; `https://host:port` bật **TLS** (chứng chỉ server được kiểm tra theo bộ root CA webpki đi kèm). Tuỳ chọn TLS đặt ngay trong query của `target`: `?ca=/đường/dẫn/ca.pem` thêm CA riêng, `&cert=…&key=…` gửi client certificate (mTLS, phải đi cùng nhau), `&domain=tên` đổi tên dùng để kiểm tra chứng chỉ (hữu ích khi dial theo IP); ví dụ `https://10.0.0.5:443?ca=/etc/ca.pem&cert=/me.pem&key=/me.key&domain=api.internal`. Các tham số này chỉ dùng được với `https://`. Hỗ trợ **unary, server-streaming, client-streaming và bidi**, metadata và deadline.
+`target` dạng `host:port` hoặc `http://…` là plaintext; `https://host:port` bật **TLS** (chứng chỉ server được kiểm tra theo bộ root CA webpki đi kèm). Tuỳ chọn TLS đặt ngay trong query của `target`: `?ca=/đường/dẫn/ca.pem` thêm CA riêng, `&cert=…&key=…` gửi client certificate (mTLS, phải đi cùng nhau), `&domain=tên` đổi tên dùng để kiểm tra chứng chỉ (hữu ích khi dial theo IP); ví dụ `https://10.0.0.5:443?ca=/etc/ca.pem&cert=/me.pem&key=/me.key&domain=api.internal`. Các tham số này chỉ dùng được với `https://`. `&insecure=1` (hoặc chỉ `&insecure`) **không kiểm tra chứng chỉ của server** — dùng cho server tự ký hoặc nội bộ khi chưa có CA để đưa vào `ca=`; kết nối vẫn được mã hoá nhưng không xác thực được đối phương, nên chỉ dùng trên mạng bạn tin. Vẫn gửi được client certificate (`cert`/`key`) cùng lúc. Server ghi cảnh báo vào log lúc kết nối, và plugin báo `TLS certificate is NOT verified`. Hỗ trợ **unary, server-streaming, client-streaming và bidi**, metadata và deadline.
 
 | Lệnh | Việc |
 |---|---|

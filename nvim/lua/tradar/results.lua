@@ -146,6 +146,7 @@ local function text_title(r)
   text = text .. (r.status or 'response')
   if r.took_ms then text = text .. ' · ' .. took_text(r.took_ms) end
   if r.bytes then text = text .. (' · %d bytes'):format(r.bytes) end
+  if r.insecure then text = text .. ' · TLS not verified' end
   text = text .. (' · %d lines'):format(#(r.lines or {}))
   if r.filter then text = text .. (' · filter «%s»: %d lines'):format(r.filter, #(text_view(r) or {})) end
   if r.stream then text = text .. (r.stream_open and ' · streaming (' .. (opts.prefix or '<leader>r') .. 'x stops)' or ' · stream ended') end

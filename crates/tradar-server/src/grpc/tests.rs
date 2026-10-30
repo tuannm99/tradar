@@ -149,6 +149,18 @@ fn tls_options_come_out_of_the_target_query() {
 }
 
 #[test]
+fn insecure_is_a_tls_option_too() {
+    let (uri, options) = split_target("https://h:443?insecure=1&other=1").unwrap();
+    assert_eq!(uri, "https://h:443?other=1");
+    assert!(options.insecure);
+    assert!(split_target("https://h?insecure").unwrap().1.insecure);
+    assert!(split_target("https://h?insecure=true").unwrap().1.insecure);
+    assert!(!split_target("https://h?insecure=0").unwrap().1.insecure);
+    assert!(!split_target("https://h?insecure=false").unwrap().1.insecure);
+    assert!(!split_target("https://h").unwrap().1.insecure);
+}
+
+#[test]
 fn an_unknown_method_is_an_error() {
     assert!(skeleton(&pool(), "demo.Svc", "Nope", false).is_err());
     assert!(skeleton(&pool(), "demo.Nope", "Do", false).is_err());

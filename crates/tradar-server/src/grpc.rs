@@ -30,6 +30,7 @@ mod call;
 mod codec;
 mod connect;
 mod extension;
+mod insecure;
 mod metadata;
 mod schema;
 mod skeleton;

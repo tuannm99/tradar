@@ -23,6 +23,7 @@ local last_start = 0
 local stream_listener
 local methods_cache = {} -- connection .. service -> grpc.methods answer
 local context -- defined with the running code below; the workbench functions above use it
+local insecure = {} -- connection name -> true when the server said it does not check TLS certificates
 
 local function notify(msg, level) vim.notify('tradar: ' .. msg, level or vim.log.levels.INFO) end
 
@@ -312,8 +313,9 @@ end
 
 --- The connection `req` runs on in place `c`, as `{ connection, target }`, or
 --- nil and why not. A request with a full URL needs no saved connection (`@`,
---- an ad-hoc one); neither does `GRPC host:port service/Method`.
-local function connection_for(req, c)
+--- an ad-hoc one; `@insecure = 1` in the file skips the certificate check);
+--- neither does `GRPC host:port service/Method` (`https://host:port?insecure=1`).
+local function connection_for(req, c, vars)
   if req.kind == 'grpc' and req.target then return { connection = '@' .. req.target, target = req.target } end
   local conn = c.conn
   if conn then
@@ -325,7 +327,11 @@ local function connection_for(req, c)
     end
     return { connection = conn, target = c.target }
   end
-  if req.kind == 'http' and req.url:match('^https?://') then return { connection = '@', target = '' } end
+  if req.kind == 'http' and req.url:match('^https?://') then
+    local flag = vars and vars.insecure
+    local off = flag == nil or flag == '' or flag == '0' or flag:lower() == 'false' or flag:lower() == 'no'
+    return { connection = off and '@' or '@?insecure=1', target = '' }
+  end
   if req.kind == 'grpc' then
     return nil, 'no connection for this request -- add a `# tradar: <name>` line at the top, name it in the fence (```grpc <name>), or write GRPC host:port service/Method'
   end
@@ -343,9 +349,10 @@ local function request_at(buf, quiet)
     return fail('not on a request -- use a workbench (:TradarRequests), a ```http / ```grpc block in a .tdb, or a .http file')
   end
   local block = reqparse.block_at(c.lines, c.row)
-  local req, err = reqparse.parse(c.lines, block, reqparse.variables(c.all, M.base_vars(c.conn)))
+  local vars = reqparse.variables(c.all, M.base_vars(c.conn))
+  local req, err = reqparse.parse(c.lines, block, vars)
   if not req then return fail(err) end
-  local info, why = connection_for(req, c)
+  local info, why = connection_for(req, c, vars)
   if not info then return fail(why) end
   return req, info, c
 end
@@ -382,7 +389,16 @@ end
 local counter = 0
 
 local function new_entry(conn, key, label, query)
-  return { conn = conn, key = key, label = label, query = query, at = os.time() }
+  return { conn = conn, key = key, label = label, query = query, at = os.time(), insecure = insecure[conn] or nil }
+end
+
+--- What `<driver>.connect` answered: remember (and say, the first time) that
+--- the connection does not check the server's TLS certificate.
+local function note_connect(conn, result)
+  if result and result.insecure and not insecure[conn] then
+    insecure[conn] = true
+    notify(('%s: TLS certificate is NOT verified (insecure=1)'):format(conn), vim.log.levels.WARN)
+  end
 end
 
 local function show_http(req, info, key, label, query, resp, refresh_of, rerun)
@@ -412,7 +428,8 @@ local function run_http(req, info, key, label, query, refresh_of, rerun)
     if running[key] and running[key].token == token then finish(key) end
     notify(msg, vim.log.levels.ERROR)
   end
-  call('http.connect', { connection = info.connection }, function()
+  call('http.connect', { connection = info.connection }, function(connected)
+    note_connect(info.connection, connected)
     call('http.send', {
       connection = info.connection,
       method = req.method,
@@ -582,7 +599,8 @@ function M.execute(req, info, refresh_of)
   end
   if active then return notify(('%s is still running -- %sx cancels it'):format(label, prefix()), vim.log.levels.WARN) end
 
-  call('grpc.connect', { connection = info.connection }, function()
+  call('grpc.connect', { connection = info.connection }, function(connected)
+    note_connect(info.connection, connected)
     method_info(info.connection, req.service, req.method, function(kind)
       if kind and (kind.client_streaming or kind.server_streaming) then
         return start_stream(req, info, key, label, query, kind, refresh_of, rerun)
