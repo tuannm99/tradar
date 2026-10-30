@@ -40,3 +40,4 @@ Làm tiếp 2026-10-30: **không kiểm tra chứng chỉ TLS** (`insecure`).
 - Request viết thẳng vào URL: dòng `@insecure = 1` trong file → connection tạm `@?insecure=1`.
 - Test: `rpc_grpc` (insecure bỏ qua CA, kèm client cert, báo ở `connect`), unit test `split_target`/`split_insecure`, `tls_spec` (server HTTPS tự ký thật bằng openssl + python).
 - Proxy: HTTP/Elasticsearch/RabbitMQ/ClickHouse dùng `reqwest` nên theo biến môi trường `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` của tiến trình `tradar-server`; gRPC (tonic) chưa hỗ trợ proxy. Chưa có cấu hình proxy riêng cho từng connection.
+- Proxy: `setup{ server_env = { NO_PROXY = '*', ... } }` (`rpc.server_env`) đặt biến môi trường cho `tradar-server` khi plugin tự khởi động nó, không phụ thuộc shell đã mở Neovim; chặng Neovim → server là unix socket nên không qua proxy. Test trong `socket_spec`; hướng dẫn ở `Xu-ly-su-co.md`.

@@ -43,4 +43,9 @@ vim.health = real
 local flagged = false
 for _, l in ipairs(health) do if l:find('^error: socket path is') then flagged = true end end
 H.check(':checkhealth reports a too-long socket path as an error', flagged, vim.inspect(health))
+-- the environment the plugin gives a server it starts
+H.check('no idle_ttl and no server_env: nothing added', rpc.server_env({}) == nil)
+local env = rpc.server_env({ idle_ttl = '10m', server_env = { NO_PROXY = '*', HTTPS_PROXY = '', N = 3 } })
+H.check('idle_ttl and server_env are passed on, values as strings', env.TRADAR_IDLE_TTL == '10m' and env.NO_PROXY == '*' and env.HTTPS_PROXY == '' and env.N == '3', vim.inspect(env))
+H.check('idle_ttl = false means never', rpc.server_env({ idle_ttl = false }).TRADAR_IDLE_TTL == 'off')
 H.done()

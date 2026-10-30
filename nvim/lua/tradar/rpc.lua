@@ -58,6 +58,24 @@ end
 
 --- Where to find the server binary: explicit option, then PATH, then a
 --- build sitting next to this plugin (`<repo>/target/{release,debug}`).
+--- The environment added to the server's own when this plugin starts it, or
+--- nil: `setup{ idle_ttl }` as TRADAR_IDLE_TTL and `setup{ server_env = {
+--- NO_PROXY = '*', ... } }` as they are. The server also inherits Neovim's
+--- environment, so a variable set in the shell Neovim was started from reaches
+--- it without this. Only read when the server starts: a server that is already
+--- running keeps the environment it had (`:TradarRestart`).
+function M.server_env(opts)
+  local env
+  if opts.idle_ttl ~= nil then
+    env = { TRADAR_IDLE_TTL = opts.idle_ttl == false and 'off' or tostring(opts.idle_ttl) }
+  end
+  for k, v in pairs(opts.server_env or {}) do
+    env = env or {}
+    env[k] = tostring(v)
+  end
+  return env
+end
+
 function M.server_cmd(opts)
   if opts.server_cmd then return opts.server_cmd end
   if vim.fn.executable('tradar-server') == 1 then return 'tradar-server' end
@@ -182,11 +200,7 @@ function M.ensure(opts, done)
     end
     -- `setup{ idle_ttl = ... }` (seconds, "10m", "2h", false/0 = never) reaches the
     -- server as TRADAR_IDLE_TTL; it only takes effect when the server starts.
-    local env
-    if opts.idle_ttl ~= nil then
-      env = { TRADAR_IDLE_TTL = opts.idle_ttl == false and 'off' or tostring(opts.idle_ttl) }
-    end
-    vim.fn.jobstart({ cmd, path }, { detach = true, env = env })
+    vim.fn.jobstart({ cmd, path }, { detach = true, env = M.server_env(opts) })
     -- Poll until the new server is listening (up to ~3s).
     local tries = 0
     local function retry()
