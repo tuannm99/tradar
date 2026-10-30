@@ -85,7 +85,26 @@ Schema được cache 1 phút phía plugin và tự làm mới sau khi bạn ch�
 
 ## Completion
 
-Nguồn `blink.cmp` (`tradar.blink`, kích hoạt bằng `.`) hoặc `omnifunc` dự phòng. Hiểu ngữ cảnh: sau `alias.` chỉ gợi ý cột của bảng đó, sau `JOIN` ưu tiên bảng có khoá ngoại liên quan, sau `schema.`/`keyspace.` gợi ý bảng trong đó. Nếu cài `sqlls`, nên bỏ nguồn `lsp` cho `sql` trong cấu hình completion của bạn để khỏi trùng.
+Nguồn `blink.cmp` (`tradar.blink`) hoặc `omnifunc` dự phòng (`<C-x><C-o>`). **blink.cmp chỉ dùng các nguồn bạn khai báo**, nên phải đăng ký `tradar` thành một provider (nếu không sẽ không thấy gợi ý nào của tradar, kể cả trong `.tdb`):
+
+```lua
+{
+  'saghen/blink.cmp',
+  opts = {
+    sources = {
+      -- thêm 'tradar' vào danh sách mặc định (mọi filetype)…
+      default = { 'lsp', 'path', 'snippets', 'buffer', 'tradar' },
+      -- …hoặc chỉ cho file của tradar:
+      -- per_filetype = { sql = { 'tradar', 'buffer' }, tdb = { 'tradar', 'buffer' }, http = { 'tradar', 'buffer' } },
+      providers = {
+        tradar = { name = 'tradar', module = 'tradar.blink', score_offset = 100 },
+      },
+    },
+  },
+}
+```
+
+Nguồn tự bật ở: file SQL/Mongo/Redis/ES có connection, **block của `.tdb`** (kể cả block ghi connection riêng trong fence như ` ```sql pg-local `: connection được mở khi mở file hoặc ngay lúc cần), và request HTTP/gRPC (workbench, file `.http`, block ` ```http `/` ```grpc `: động từ, tên header và giá trị thông dụng, `{{biến}}`, service/method gRPC từ reflection). Kích hoạt tự động khi gõ chữ, và sau `.` `{` `/` `:`. Gợi ý theo ngữ cảnh: sau `alias.` chỉ gợi ý cột của bảng đó, sau `JOIN` ưu tiên bảng có khoá ngoại liên quan, sau `schema.`/`keyspace.` gợi ý bảng trong đó. Nếu cài `sqlls`, nên bỏ nguồn `lsp` cho `sql` trong cấu hình completion của bạn để khỏi trùng.
 
 ## Lỗi
 

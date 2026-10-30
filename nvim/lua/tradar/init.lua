@@ -99,6 +99,18 @@ function M.attach(buf)
     end, { buffer = buf, desc = 'tradar: ctx.show keymap help' })
   end
   M.attach_nav(buf)
+  -- A `.tdb` block can name its own connection (```sql pg-local): open those
+  -- now, so the first completion or run in it has nothing to wait for.
+  if M.is_tdb(buf) then
+    local seen = {}
+    for _, block in ipairs(ctx.blocks.parse(vim.api.nvim_buf_get_lines(buf, 0, -1, false))) do
+      local lang = block.lang and block.lang:lower()
+      if block.conn and lang ~= 'http' and lang ~= 'grpc' and not seen[block.conn] and not state.connected[block.conn] then
+        seen[block.conn] = true
+        ctx.ensure_connected(block.conn, function() end, function() end)
+      end
+    end
+  end
   local conn = M.connection_for(buf)
   -- A .http file's connection is an HTTP / gRPC one, connected when a request runs.
   if conn and not state.connected[conn] and not require('tradar.restbench').is_request_buffer(buf) then

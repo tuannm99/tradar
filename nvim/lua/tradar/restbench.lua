@@ -763,7 +763,30 @@ end
 --- What can be completed before the cursor on a workbench line: `{{variables}}`,
 --- the request line (HTTP verbs, gRPC `service/Method` from reflection), header
 --- names and well-known header values. Returns `start_col, words`.
-function M.complete_at(buf, row, col)
+local remote_cache = {}
+
+--- A reflection answer for completion. Sync (`<C-x><C-o>`): asks and waits a
+--- moment. Async (blink.cmp, which must not block typing): the cached answer,
+--- or nothing yet -- the call goes out and a later keystroke finds it;
+--- the second value says it is still on its way.
+local function remote(method, params, async)
+  if not async then
+    local err, result = rpc.request_sync(method, params, 1500)
+    return (not err) and result or nil
+  end
+  local key = method .. '\n' .. vim.json.encode(params)
+  local hit = remote_cache[key]
+  if hit and not hit.pending and os.time() - hit.at < 30 then return hit.value end
+  if hit and hit.pending then return nil, true end
+  remote_cache[key] = { pending = true, at = 0 }
+  rpc.request(method, params, function(err, result)
+    remote_cache[key] = { at = os.time(), value = (not err) and result or nil }
+  end)
+  return nil, true
+end
+
+function M.complete_at(buf, row, col, opts)
+  local async = opts and opts.async
   local c = context(buf, row)
   if not c then return nil end
   local lines = c.lines
@@ -803,19 +826,17 @@ function M.complete_at(buf, row, col)
       if not typed or not c.conn then return nil end
       local start = #before - #typed
       local service = typed:match('^(.-)/')
-      local words = {}
+      local words, pending = {}, nil
       if service then
-        local err, methods = rpc.request_sync('grpc.methods', { connection = c.conn, service = service }, 1500)
-        if not err then
-          for _, m in ipairs(methods or {}) do words[#words + 1] = service .. '/' .. m.name end
-        end
+        local methods
+        methods, pending = remote('grpc.methods', { connection = c.conn, service = service }, async)
+        for _, m in ipairs(methods or {}) do words[#words + 1] = service .. '/' .. m.name end
       else
-        local err, services = rpc.request_sync('grpc.services', { connection = c.conn }, 1500)
-        if not err then
-          for _, svc in ipairs(services or {}) do words[#words + 1] = svc end
-        end
+        local services
+        services, pending = remote('grpc.services', { connection = c.conn }, async)
+        for _, svc in ipairs(services or {}) do words[#words + 1] = svc end
       end
-      return start, starts(words, typed)
+      return start, starts(words, typed), pending
     end
     local typed = before:match('^%s*(%a*)$')
     if typed then return #before - #typed, starts(HTTP_VERBS, typed) end
