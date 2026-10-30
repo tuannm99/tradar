@@ -175,6 +175,20 @@ vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufNewFile' }, {
   callback = function(a) t().maybe_attach(a.buf) end,
 })
 
+-- Colours for request text (HTTP / gRPC): a .http file, the request
+-- workbench, the ```http / ```grpc blocks of a .tdb. A scanner, not a grammar
+-- (nvim/lua/tradar/reqhl.lua), so nothing needs installing.
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = { 'http', 'tdb' },
+  group = group,
+  callback = function(a) require('tradar.reqhl').attach(a.buf) end,
+})
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) and (vim.bo[buf].filetype == 'http' or vim.bo[buf].filetype == 'tdb') then
+    require('tradar.reqhl').attach(buf)
+  end
+end
+
 -- An LSP's own on_attach sets K/gd after FileType; take them back once all
 -- LspAttach handlers have run.
 vim.api.nvim_create_autocmd('LspAttach', {

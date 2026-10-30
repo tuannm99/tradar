@@ -54,6 +54,10 @@ HTTP và gRPC dùng **chung một workbench**: mỗi connection một buffer s�
 - **File `.tdb`**: block ` ```http [connection] ` / ` ```grpc [connection] ` — xem [File `.tdb`](File-tdb).
 - **URL thẳng, không connection**: `GET https://api.example.com/users` (HTTP) hoặc `GRPC host:port pkg.Service/Method` (gRPC, `https://host:port` cho TLS) chạy được mà không cần `connections.toml`; chỉ url tương đối mới cần connection (alias).
 
+### Màu
+
+Request được tô màu bằng bộ quét riêng của plugin (không cần cài tree-sitter grammar `http`), cả trong workbench, file `.http` và block ` ```http `/` ```grpc ` của `.tdb`: dòng `###`, comment, `@biến = giá trị`, động từ + URL (hoặc `GRPC` + service/method, `deadline:` nổi riêng), tên và giá trị header, `{{biến}}`, và body JSON (cùng bảng màu với kết quả JSON). Các nhóm là `TradarReqSeparator`, `TradarReqComment`, `TradarReqVarDef`, `TradarReqVar`, `TradarReqMethod`, `TradarReqUrl`, `TradarReqService`, `TradarReqRpc`, `TradarReqHeader`, `TradarReqValue`, `TradarReqDeadline` (mặc định link tới `Title`, `Comment`, `Identifier`, `Special`, `Keyword`, `Underlined`, `Type`, `Function`, `Label`, `String`, `Special`); colorscheme ghi đè bằng `highlight TradarReqMethod ...`.
+
 ### Cú pháp
 
 ```
