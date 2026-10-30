@@ -46,6 +46,13 @@ async-trait = "0.1"
 # to feed the TUI's registry, which gRPC deliberately does not target.
 tonic = { version = "0.12", optional = true, features = ["tls", "tls-webpki-roots"] }
 tonic-reflection = { version = "0.12", optional = true }
+# `?insecure=1` on a gRPC target: a TLS connector that does not check the server
+# certificate (tonic's own TLS config cannot turn that off).
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = { version = "2", optional = true }
+hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
+tower-service = { version = "0.3", optional = true }
 prost = { version = "0.13", optional = true }
 prost-reflect = { version = "0.14", optional = true, features = ["serde"] }
 protox = { version = "0.7", optional = true }
@@ -107,7 +114,7 @@ elasticsearch = ["dep:tradar-connector-elasticsearch"]
 redis = ["dep:tradar-connector-redis"]
 cassandra = ["dep:tradar-connector-cassandra"]
 clickhouse = ["dep:tradar-connector-clickhouse"]
-grpc = ["dep:tonic", "dep:tonic-reflection", "dep:prost", "dep:prost-reflect", "dep:protox", "dep:tokio-stream", "dep:bytes"]
+grpc = ["dep:tonic", "dep:tonic-reflection", "dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:hyper-util", "dep:tower-service", "dep:prost", "dep:prost-reflect", "dep:protox", "dep:tokio-stream", "dep:bytes"]
 kafka = ["dep:rdkafka", "dep:futures-util", "dep:tradar-connector-kafka"]
 # Socket tail -- unlike `kafka`, needs no extra toolchain (plain
 # `tokio::net::TcpStream`; the connector crate only adds its hex preview), so

@@ -7,7 +7,7 @@
 //! TUI-free `request` module so both interfaces build requests the same way.
 
 use serde::Serialize;
-use tradar_connector_http::{parse_headers, resolve_url};
+use tradar_connector_http::{parse_headers, resolve_url, split_insecure};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HttpResponseInfo {
@@ -26,6 +26,8 @@ pub struct HttpResponseInfo {
 pub struct HttpConnection {
     client: reqwest::Client,
     base_url: String,
+    /// `?insecure=1` on the target: the server certificate is not checked.
+    insecure: bool,
 }
 
 /// No liveness probe -- unlike RabbitMQ's `connect`, a base URL may be
@@ -33,10 +35,20 @@ pub struct HttpConnection {
 /// block adding the connection the way an unreachable database host
 /// should (same reasoning as `tradar-connector-http`'s own `connect`).
 /// Not async: there is no IO to wait on here.
+///
+/// `target` may end in `?insecure=1`, which turns TLS certificate checking
+/// off for this connection (a self-signed or internal certificate); it is
+/// not part of the base URL.
 pub fn connect(target: &str) -> HttpConnection {
+    let (target, insecure) = split_insecure(target);
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(insecure)
+        .build()
+        .unwrap_or_default();
     HttpConnection {
-        client: reqwest::Client::new(),
+        client,
         base_url: target.trim_end_matches('/').to_string(),
+        insecure,
     }
 }
 
@@ -121,11 +133,15 @@ impl crate::extension::Extension for HttpExtension {
                 }
                 let saved = ctx.saved(name, "http")?;
                 let conn = connect(&saved.target);
+                let insecure = conn.insecure;
+                if insecure {
+                    tracing::warn!("http [{name}] TLS certificate checking is OFF (insecure=1)");
+                }
                 self.connections
                     .lock()
                     .unwrap()
                     .insert(name.to_string(), conn);
-                Ok(json!({"connected": true, "already": false}))
+                Ok(json!({"connected": true, "already": false, "insecure": insecure}))
             }
             "disconnect" => {
                 let removed = self.close(name);

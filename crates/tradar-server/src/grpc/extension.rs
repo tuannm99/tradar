@@ -134,6 +134,12 @@ impl crate::extension::Extension for GrpcExtension {
                     return Ok(json!({"connected": true, "already": true}));
                 }
                 let saved = ctx.saved(name, "grpc")?;
+                let insecure = split_target(&saved.target)
+                    .map(|(uri, o)| o.insecure && uri.starts_with("https://"))
+                    .unwrap_or(false);
+                if insecure {
+                    tracing::warn!("grpc [{name}] TLS certificate checking is OFF (insecure=1)");
+                }
                 let channel = connect(&saved.target).await.map_err(|e| {
                     RpcError::app(format!("could not connect to `{}`: {e}", saved.target))
                 })?;
@@ -151,7 +157,7 @@ impl crate::extension::Extension for GrpcExtension {
                     .lock()
                     .unwrap()
                     .insert(name.to_string(), GrpcConnection { channel, pool });
-                Ok(json!({"connected": true, "already": false}))
+                Ok(json!({"connected": true, "already": false, "insecure": insecure}))
             }
             "disconnect" => {
                 let removed = self.close(name);

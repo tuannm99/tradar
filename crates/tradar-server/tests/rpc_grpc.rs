@@ -788,3 +788,67 @@ async fn mtls_needs_the_client_certificate() {
     let reply = connect_and_say_hello(&with).await.unwrap();
     assert_eq!(reply["message"], "Hello, tls!");
 }
+
+#[tokio::test]
+async fn insecure_connects_without_trusting_the_certificate() {
+    let pki = pki();
+    let addr = spawn_greeter_tls(&pki, false).await;
+
+    // Not trusted: the certificate is signed by a CA nobody has.
+    let strict = format!("https://{addr}?domain=localhost");
+    assert!(connect_and_say_hello(&strict).await.is_err());
+
+    // `insecure` skips the check -- no CA, and not even the right name.
+    let reply = connect_and_say_hello(&format!("https://{addr}?insecure=1"))
+        .await
+        .unwrap();
+    assert_eq!(reply["message"], "Hello, tls!");
+    let reply = connect_and_say_hello(&format!("https://{addr}?insecure"))
+        .await
+        .unwrap();
+    assert_eq!(reply["message"], "Hello, tls!");
+
+    // `insecure=0` is the normal, checked connection.
+    assert!(
+        connect_and_say_hello(&format!("https://{addr}?insecure=0"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn insecure_still_presents_the_client_certificate() {
+    let pki = pki();
+    let addr = spawn_greeter_tls(&pki, true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str, content: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, content).unwrap();
+        p.display().to_string()
+    };
+    let (cert, key) = (
+        path("c.pem", &pki.client_cert),
+        path("k.pem", &pki.client_key),
+    );
+
+    // The server demands a client certificate: skipping the check of *its*
+    // certificate does not change that.
+    assert!(
+        connect_and_say_hello(&format!("https://{addr}?insecure=1"))
+            .await
+            .is_err()
+    );
+    let with = format!("https://{addr}?insecure=1&cert={cert}&key={key}");
+    let reply = connect_and_say_hello(&with).await.unwrap();
+    assert_eq!(reply["message"], "Hello, tls!");
+}
+
+#[tokio::test]
+async fn connect_reports_when_certificate_checking_is_off() {
+    let pki = pki();
+    let addr = spawn_greeter_tls(&pki, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with_grpc(dir.path(), &format!("https://{addr}?insecure=1"));
+    let connected = call(&server, "grpc.connect", json!({"connection": "g"})).await;
+    assert_eq!(ok(&connected)["insecure"], true);
+}

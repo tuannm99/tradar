@@ -28,6 +28,32 @@ Cảnh báo này chỉ nhắc, không chặn bạn dùng tiếp. Muốn chắc p
 - Đổi: `setup{ idle_ttl = "10m" }` (giây hoặc `"90s"`/`"10m"`/`"2h"`; `false` hoặc `0` để tắt), hoặc biến môi trường `TRADAR_IDLE_TTL` — có hiệu lực khi server **khởi động** (`:TradarRestart`).
 - `:checkhealth tradar` hiện giá trị đang dùng.
 
+## Request HTTP/gRPC bị proxy chặn (`NO_PROXY` không có tác dụng)
+
+Có **hai chặng**, chỉ một chặng đi qua proxy được:
+
+1. **Neovim → `tradar-server`**: qua unix socket cục bộ (hoặc đường dẫn bạn đặt trong `setup{ socket }`), không phải mạng, nên proxy không bao giờ chen vào được. Chặng này không cần cấu hình.
+2. **`tradar-server` → API/đích**: đây mới là chặng bị proxy. HTTP (và Elasticsearch, RabbitMQ, ClickHouse — cùng dùng `reqwest`) đọc `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` (cả chữ thường) từ môi trường **của tiến trình server**. gRPC không đọc các biến này nên không đi qua proxy; nếu gRPC vẫn bị chặn thì là tường lửa/mạng, không phải proxy.
+
+Hai điều khiến `NO_PROXY` tưởng như vô hiệu:
+
+- **Chỉ đọc lúc server khởi động.** Server đang chạy giữ môi trường cũ — sửa xong phải `:TradarRestart`.
+- **Server kế thừa môi trường của Neovim** đã tự khởi động nó (không phải của terminal bạn đang gõ). Đặt `export NO_PROXY=…` trong shell mà Neovim đã mở trước đó thì chưa đủ.
+
+Cách chắc chắn, không phụ thuộc shell: đặt thẳng trong `setup`, rồi `:TradarRestart`:
+
+```lua
+require('tradar').setup({
+  server_env = { NO_PROXY = '*' },                 -- bỏ qua proxy cho mọi đích
+  -- hoặc chỉ một số đích:
+  -- server_env = { NO_PROXY = 'api.example.com,.internal,127.0.0.1' },
+  -- hoặc đi qua một proxy riêng của tradar:
+  -- server_env = { HTTPS_PROXY = 'http://proxy.corp:3128' },
+})
+```
+
+Kiểm tra server đang thấy gì (Linux): `tr '\0' '\n' < /proc/$(pgrep -f tradar-server | head -1)/environ | grep -i proxy`. Server tự khởi động chỉ khi plugin chạy nó; nếu bạn tự chạy `tradar-server` (service, tmux…), đặt biến ngay ở nơi chạy đó.
+
 ## Xem log của server
 
 `:TradarLog` mở file log của `tradar-server` trong một split dưới và bám theo dòng mới (con trỏ đang ở dòng cuối thì tự cuộn; cuộn lên để đọc, `G` để bám lại; `q` đóng). Đường dẫn cũng hiện trong `:checkhealth tradar`.

@@ -33,10 +33,16 @@ end
 function M.complete(buf, text, cb, row)
   row = row or vim.api.nvim_win_get_cursor(0)[1]
   local conn = M.block_connection(buf, row)
-  if not conn or not state.connected[conn] then return cb({}) end
-  rpc.request('complete', { connection = conn, text = text }, function(err, result)
-    cb((not err and result) and result.items or {})
-  end)
+  if not conn then return cb({}) end
+  local function go()
+    rpc.request('complete', { connection = conn, text = text }, function(err, result)
+      cb((not err and result) and result.items or {})
+    end)
+  end
+  if state.connected[conn] then return go() end
+  -- A `.tdb` block can name a connection nothing else has opened yet: open it,
+  -- then answer (quietly -- a connection that will not open just completes nothing).
+  ctx.ensure_connected(conn, go, function() cb({}) end)
 end
 
 --- Built-in `omnifunc` fallback for setups without blink.cmp.
@@ -48,7 +54,12 @@ function M.omnifunc(findstart, base)
     return col - #line:match('[%w_$]*$')
   end
   local conn = M.block_connection(0, row)
-  if not conn or not state.connected[conn] then return {} end
+  if not conn then return {} end
+  if not state.connected[conn] then
+    -- Not open yet (a `.tdb` block's own connection): open it for the next try.
+    ctx.ensure_connected(conn, function() end, function() end)
+    return {}
+  end
   local text = M.text_before_cursor(0, row, col)
   if not text then return {} end
   local err, result = rpc.request_sync('complete', { connection = conn, text = text })

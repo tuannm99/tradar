@@ -27,9 +27,9 @@ Thêm/sửa/xoá được ngay trong connection picker của TUI (`a`/`e`/`d`), 
 | `clickhouse` | `http://[user[:password]@]host[:port][/database]` — **cổng HTTP** (8123, hoặc `https://…:8443` với ClickHouse Cloud), không phải cổng native 9000; ký tự đặc biệt trong user/password phải mã hoá phần trăm (`@`→`%40`, `:`→`%3A`, `/`→`%2F`, `#`→`%23`, khoảng trắng→`%20`, `%`→`%25`) |
 | `kafka` | bootstrap servers: `host:port[,host:port...]` |
 | `rabbitmq` | URL tới Management API kèm credentials: `http://user:pass@host:15672/%2f` (`%2f` là vhost mặc định `/`) |
-| `http` | base URL tuỳ chọn (có thể để trống nếu luôn gõ URL đầy đủ) |
+| `http` | base URL tuỳ chọn (có thể để trống nếu luôn gõ URL đầy đủ); thêm `?insecure=1` để **không kiểm tra chứng chỉ TLS** (server tự ký) |
 | `socket` | `host:port` trần |
-| `grpc` | `host:port` trần hoặc URL đầy đủ, `https://…` bật TLS (root CA webpki; thêm `?ca=…&cert=…&key=…&domain=…` cho CA riêng/mTLS — xem trang gRPC), còn lại plaintext |
+| `grpc` | `host:port` trần hoặc URL đầy đủ, `https://…` bật TLS (root CA webpki; thêm `?ca=…&cert=…&key=…&domain=…` cho CA riêng/mTLS, hoặc `?insecure=1` để không kiểm tra chứng chỉ — xem trang gRPC), còn lại plaintext |
 
 Chỉ những `driver` mà bản `tradar-server`/`tradar` của bạn đã compile vào mới dùng được — xem [Cài đặt](Cai-dat).
 

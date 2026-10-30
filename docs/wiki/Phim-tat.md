@@ -24,7 +24,7 @@ Quy ước: `<leader>r` là **tiền tố** mặc định, đổi bằng `setup{
 | `rk` | n | cheatsheet: query mẫu của loại database này (`<CR>` chèn, `<C-r>` chèn và chạy; `:TradarCheatsheet`) |
 | `rK` | n | cả cheatsheet trong một buffer (nhóm gập được, `rr` chạy block); `:TradarCheatsheetFile` |
 | `gd` | n | sinh câu xem dòng của bảng dưới con trỏ vào buffer, chưa chạy (không có bảng thì rơi về LSP go-to-definition) |
-| `<C-x><C-o>` | i | completion qua `omnifunc` (hoặc nguồn `tradar.blink` của `blink.cmp`, tự động sau `.`) |
+| `<C-x><C-o>` | i | completion qua `omnifunc` (hoặc nguồn `tradar.blink` của `blink.cmp`, tự động khi gõ — cần khai báo provider, xem [Truy vấn SQL](Truy-van-SQL#completion)) |
 
 ## 2. Buffer kết quả (`tradar://results`)
 

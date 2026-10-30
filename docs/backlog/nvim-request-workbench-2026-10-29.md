@@ -32,3 +32,14 @@ Làm tiếp 2026-10-30: request không còn bó trong workbench.
 - Thêm `:TradarGrpcCancel` / `:TradarGrpcClose` toàn cục (theo con trỏ) vì trong `.tdb`/`.http` `rc` vẫn là "chọn connection".
 - Test: `restbench_spec` (file `.http` URL thẳng / alias / lỗi thiếu connection, `.tdb` trộn block http/sql, curl, gợi ý, cheatsheet vào trong block, gRPC thẳng), `rest_spec` (cú pháp `GRPC host:port …`), unit test `Ctx::saved`.
 - **Màu** (`reqhl.lua`, `TradarReq*`): quét từng dòng đặt extmark (như `jsonhl`), không cần grammar `http`; áp dụng cho workbench, `*.http`, và chỉ các block ` ```http `/` ```grpc ` của `.tdb`; vẽ lại ~30 ms sau khi sửa. Body JSON dùng `jsonhl.tokens`. Test `reqhl_spec`.
+
+Làm tiếp 2026-10-30: **không kiểm tra chứng chỉ TLS** (`insecure`).
+
+- HTTP: `?insecure=1` ở cuối `target` (tách khỏi base URL bằng `tradar_connector_http::split_insecure`), `reqwest::ClientBuilder::danger_accept_invalid_certs`. gRPC: `TlsOptions.insecure`; tonic không tắt được verify nên `grpc/insecure.rs` tự dựng kết nối: rustls với `ServerCertVerifier` nhận mọi chứng chỉ (chữ ký handshake vẫn được kiểm), ALPN `h2`, dial bằng URL `http://` + `.origin(https://…)` vì tonic từ chối endpoint https không có TLS config; vẫn gửi được client certificate.
+- `http.connect`/`grpc.connect` trả thêm `insecure` (protocol 1.17) và server ghi `warn` vào log; plugin báo `TLS certificate is NOT verified` một lần và ghi `TLS not verified` ở footer tab response.
+- Request viết thẳng vào URL: dòng `@insecure = 1` trong file → connection tạm `@?insecure=1`.
+- Test: `rpc_grpc` (insecure bỏ qua CA, kèm client cert, báo ở `connect`), unit test `split_target`/`split_insecure`, `tls_spec` (server HTTPS tự ký thật bằng openssl + python).
+- Proxy: HTTP/Elasticsearch/RabbitMQ/ClickHouse dùng `reqwest` nên theo biến môi trường `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` của tiến trình `tradar-server`; gRPC (tonic) chưa hỗ trợ proxy. Chưa có cấu hình proxy riêng cho từng connection.
+- Proxy: `setup{ server_env = { NO_PROXY = '*', ... } }` (`rpc.server_env`) đặt biến môi trường cho `tradar-server` khi plugin tự khởi động nó, không phụ thuộc shell đã mở Neovim; chặng Neovim → server là unix socket nên không qua proxy. Test trong `socket_spec`; hướng dẫn ở `Xu-ly-su-co.md`.
+
+Làm tiếp 2026-10-30: **blink.cmp trong `.tdb`**. Hai lỗi: (1) gợi ý rỗng khi block ghi connection trong fence mà chưa có gì mở nó (`complete` đòi `state.connected`) -> `complete`/`omnifunc` tự mở connection, và `attach` mở sẵn các connection của fence; (2) block `http`/`grpc` bị tắt nguồn (chỉ có omnifunc) -> `tradar.blink` gợi ý request qua `restbench.complete_at` (textEdit từ đầu từ đang gõ; tra cứu reflection bất đồng bộ có cache 30 s, `is_incomplete_forward` khi chưa có; trigger thêm `{ / :`). Docs chưa hề nói phải khai báo provider `tradar` trong `sources` của blink -> thêm ví dụ. Test `blink_spec` (nguồn gọi trực tiếp, không cần blink).
