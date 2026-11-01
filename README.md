@@ -31,6 +31,7 @@ cargo build -p tradar-server --no-default-features --features mongo,elasticsearc
 | Kiến trúc, protocol, trait `QueryDriver`/`Connector`/`Session` | [`docs/architecture.md`](docs/architecture.md) |
 | Việc đang mở | [`docs/roadmap.md`](docs/roadmap.md) |
 | Việc đã xong, vì sao, kiểm chứng thế nào | [`docs/backlog/`](docs/backlog/README.md) |
+| Playground: dữ liệu mẫu và ghi chú tối ưu query/transaction (Postgres, ClickHouse, Mongo), repo riêng | [`tradar-playground`](https://github.com/tuannm99/tradar-playground) |
 | TUI (deprecated) | [`docs/wiki/TUI.md`](docs/wiki/TUI.md) |
 
 ## Triết lý
