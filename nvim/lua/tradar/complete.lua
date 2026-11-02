@@ -26,6 +26,19 @@ function M.text_before_cursor(buf, row, col)
   return table.concat(lines, '\n')
 end
 
+--- A short warning when completion cannot work because of the connection
+--- (it does not open, or the server errors): without it a database that is
+--- down looks like "nothing to suggest". Once per connection -- it is typed over
+--- on every keystroke -- and again only after the connection has worked.
+function M.completion_failed(conn, err)
+  state.completion_warned = state.completion_warned or {}
+  if state.completion_warned[conn] then return end
+  state.completion_warned[conn] = true
+  vim.schedule(function()
+    ctx.notify(('completion: `%s` is not available -- %s'):format(conn, tostring(err):gsub('%s+', ' ')), vim.log.levels.WARN)
+  end)
+end
+
 --- `cb(items)` with `{text, kind}` for the text before the cursor. Used by
 --- the blink.cmp source; async, so typing never waits on it. `row`
 --- (1-based, defaults to the cursor's) picks which `.tdb` block's own
@@ -36,13 +49,21 @@ function M.complete(buf, text, cb, row)
   if not conn then return cb({}) end
   local function go()
     rpc.request('complete', { connection = conn, text = text }, function(err, result)
+      if err then
+        M.completion_failed(conn, err)
+      elseif state.completion_warned then
+        state.completion_warned[conn] = nil -- it works again: a later failure is news
+      end
       cb((not err and result) and result.items or {})
     end)
   end
   if state.connected[conn] then return go() end
   -- A `.tdb` block can name a connection nothing else has opened yet: open it,
-  -- then answer (quietly -- a connection that will not open just completes nothing).
-  ctx.ensure_connected(conn, go, function() cb({}) end)
+  -- then answer. One that will not open completes nothing -- and says why, once.
+  ctx.ensure_connected(conn, go, function(err)
+    M.completion_failed(conn, err)
+    cb({})
+  end)
 end
 
 --- Built-in `omnifunc` fallback for setups without blink.cmp.
@@ -57,12 +78,17 @@ function M.omnifunc(findstart, base)
   if not conn then return {} end
   if not state.connected[conn] then
     -- Not open yet (a `.tdb` block's own connection): open it for the next try.
-    ctx.ensure_connected(conn, function() end, function() end)
+    ctx.ensure_connected(conn, function() end, function(err) M.completion_failed(conn, err) end)
     return {}
   end
   local text = M.text_before_cursor(0, row, col)
   if not text then return {} end
   local err, result = rpc.request_sync('complete', { connection = conn, text = text })
+  if err then
+    M.completion_failed(conn, err)
+  elseif state.completion_warned then
+    state.completion_warned[conn] = nil
+  end
   if err or not result then return {} end
   local out = {}
   for _, item in ipairs(result.items) do out[#out + 1] = { word = item.text, menu = '[' .. item.kind .. ']' } end
