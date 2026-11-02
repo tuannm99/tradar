@@ -47,3 +47,15 @@ Có ba cách, theo thứ tự bạn sẽ dùng:
 3. **`:TradarConnect [tên]`** — gắn riêng buffer hiện tại. Bỏ trống tên thì mở **picker telescope** (có telescope): mỗi connection một dòng (`●` đang kết nối, `○` chưa, `✗` server không phục vụ loại này) kèm khung xem trước — loại, target (mật khẩu thay bằng `***`), trạng thái (đang kết nối, idle, đang trong transaction…). `<CR>` chọn, `<C-a>` thêm connection, `<C-d>` ngắt kết nối đang chọn (hỏi lại; kết quả đã tải vẫn giữ, lần dùng sau tự kết nối lại để giải phóng pool và bộ nhớ), `<C-e>` mở file. Không có telescope, hoặc `setup{ connection_picker = 'ui' }`, thì dùng danh sách `vim.ui.select`.
 
 Mở file là plugin tự connect nền, không cần gõ lệnh.
+
+### Connection viết thẳng tại chỗ (không cần `connections.toml`)
+
+Thay vì alias, dòng liên kết hoặc fence của `.tdb` có thể mang **chính địa chỉ**:
+
+```
+-- tradar: postgres://user:pw@host:5432/db      (driver suy từ scheme: postgres, mysql, mongodb, redis, clickhouse, cassandra)
+-- tradar: sqlite /tmp/x.db                      (hoặc chỉ đường dẫn: /tmp/x.db, ./x.db, ~/x.db → SQLite)
+-- tradar: elasticsearch http://localhost:9201   (`driver đích`: viết rõ driver)
+```
+
+Trong `.tdb`, tên ngôn ngữ của fence cho biết driver: ` ```elasticsearch http://localhost:9201 `, ` ```sqlite ~/x.db `, ` ```sql postgres://… `, ` ```cassandra localhost:9042 `, ` ```clickhouse http://…:8123 `. Một URL `http(s)://` không có scheme riêng nên phải ghi rõ driver (`elasticsearch`, `clickhouse`); ` ```http https://api.example.com ` / ` ```grpc host:port ` là base URL / địa chỉ cho request HTTP / gRPC. Server mở connection này dưới tên `@driver:đích` (protocol 1.18), không ghi gì vào `connections.toml`. Mật khẩu trong URL hiện thành `***` ở statusline và log của server. Alias vẫn dùng như cũ — nó hợp hơn khi nhiều file cùng dùng một nơi hoặc khi không muốn mật khẩu nằm trong file.

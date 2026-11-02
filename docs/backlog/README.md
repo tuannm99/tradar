@@ -63,6 +63,7 @@ Nhóm theo chủ đề, trong mỗi nhóm theo thứ tự thời gian. Mục m�
 - [`nvim-request-workbench-2026-10-29.md`](nvim-request-workbench-2026-10-29.md) — HTTP + gRPC chung một workbench `###` (biến `{{x}}`, response vào result tabs có history/diff/rerun, copy curl/grpcurl)
 - [`nvim-cheatsheet-overview-2026-10-30.md`](nvim-cheatsheet-overview-2026-10-30.md) — `rK`: cả cheatsheet trong một buffer `.tdb` (nhóm gập được, block chạy được bằng `rr`)
 - [`nvim-completion-connection-errors-2026-11-02.md`](nvim-completion-connection-errors-2026-11-02.md) — completion báo một cảnh báo ngắn khi connection của block không mở được / server lỗi
+- [`nvim-direct-connections-2026-11-02.md`](nvim-direct-connections-2026-11-02.md) — connection viết thẳng trong fence/modeline (`@driver:đích`, protocol 1.18) + text thuần (ES `_cat`) hiện từng dòng
 - [`nvim-cheatsheet-2026-10-26.md`](nvim-cheatsheet-2026-10-26.md) — cheatsheet query mẫu theo driver (protocol 1.15), `<leader>rk`, telescope có preview
 - [`nvim-snippet-menu-connection-picker-2026-10-26.md`](nvim-snippet-menu-connection-picker-2026-10-26.md) — menu sinh câu lệnh theo driver (Mongo: find by _id, count, aggregate…; protocol 1.14), picker connection bằng telescope
 - [`nvim-result-history-filter-diff-2026-10-24.md`](nvim-result-history-filter-diff-2026-10-24.md) — lịch sử lần chạy (`[R`/`]R`), ghim tab, lọc/sắp xếp (`rF`/`ro`), `:TradarDiff`, gợi ý giá trị `${}`

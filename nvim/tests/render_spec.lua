@@ -12,6 +12,15 @@ H.check('the last column is still bounded',
   render.column_widths({ 'a' }, { { string.rep('y', 5000) } })[1] == render.MAX_LAST_COLUMN_WIDTH)
 H.check('an uncut cell has no ellipsis', not render.row_lines({ 'explain' }, { 120 }, { { long } })[1]:find('…', 1, true))
 
+-- a plain-text reply (Elasticsearch `GET _cat/indices`) is shown as text
+local cat = 'play_products 0 p STARTED 100000 11.2mb\nplay_logs     0 p STARTED 500000 39.7mb\n'
+H.check('a document that is a string: one line per line, no quotes, no trailing blank line',
+  vim.deep_equal(render.documents({ cat }), { 'play_products 0 p STARTED 100000 11.2mb', 'play_logs     0 p STARTED 500000 39.7mb' }),
+  vim.inspect(render.documents({ cat })))
+H.check('...with CRLF too', vim.deep_equal(render.documents({ 'a\r\nb\r\n' }), { 'a', 'b' }))
+H.check('a string inside a document keeps its escapes (it is data)', render.documents({ { bio = 'x\ny' } })[2]:find('x\\ny', 1, true) ~= nil, vim.inspect(render.documents({ { bio = 'x\ny' } })))
+H.check('text replies are told apart', render.is_text_reply({ 'a' }) and not render.is_text_reply({ { a = 1 } }) and not render.is_text_reply({ 'a', { a = 1 } }) and not render.is_text_reply({}))
+
 -- grid edit diff
 local cols = { 'id', 'name', 'bio' }
 local rows = { { '1', 'ann', 'a\nb' }, { '2', 'bob', string.rep('x', 60) }, { '3', 'cy', 'NULL' }, { '4', 'dee', '' } }

@@ -111,6 +111,10 @@ vim.api.nvim_create_user_command('Tradar', function(a) require('tradar.commands'
 vim.filetype.add({ extension = { mongo = 'mongo', redis = 'redis', esq = 'esq', http = 'http' } })
 pcall(vim.treesitter.language.register, 'javascript', 'mongo')
 pcall(vim.treesitter.language.register, 'json', 'esq')
+pcall(vim.treesitter.language.register, 'json', 'elasticsearch')
+for _, name in ipairs({ 'postgres', 'mysql', 'sqlite', 'clickhouse', 'cassandra' }) do
+  pcall(vim.treesitter.language.register, 'sql', name)
+end
 
 -- `.tdb`: one file, several ```sql/```mongo/```redis fenced blocks (see
 -- "The .tdb format" in README) instead of one filetype per dialect.

@@ -135,3 +135,111 @@ async fn connect_loads_the_schema_once_and_needs_no_tui() {
     assert_eq!(reply["result"]["connected"], true, "{reply}");
     assert_eq!(loads.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn an_adhoc_connection_name_carries_its_driver_and_target() {
+    use super::connections::{adhoc_connection, redact};
+    let c = adhoc_connection("@elasticsearch:http://localhost:9201").unwrap();
+    assert_eq!(
+        (c.driver.as_str(), c.target.as_str()),
+        ("elasticsearch", "http://localhost:9201")
+    );
+    // The first colon ends the driver: the target keeps its own.
+    let c = adhoc_connection("@Postgres:postgres://u:p@h:5432/db").unwrap();
+    assert_eq!(
+        (c.driver.as_str(), c.target.as_str()),
+        ("postgres", "postgres://u:p@h:5432/db")
+    );
+    assert_eq!(
+        adhoc_connection("@sqlite:/tmp/x.db").unwrap().target,
+        "/tmp/x.db"
+    );
+    // Not ad-hoc: a plain alias, no driver, no target.
+    assert!(adhoc_connection("local").is_none());
+    assert!(adhoc_connection("@:x").is_none());
+    assert!(adhoc_connection("@sqlite:").is_none());
+    assert!(adhoc_connection("@no-target").is_none());
+    assert!(adhoc_connection("@bad driver:x").is_none());
+
+    // A password does not reach the log.
+    assert_eq!(
+        redact("@postgres:postgres://ann:s3cret@h:5432/db"),
+        "@postgres:postgres://ann:***@h:5432/db"
+    );
+    assert_eq!(
+        redact("@elasticsearch:http://localhost:9201"),
+        "@elasticsearch:http://localhost:9201"
+    );
+    assert_eq!(
+        redact("@postgres:postgres://ann@h/db"),
+        "@postgres:postgres://ann@h/db"
+    );
+    assert_eq!(redact("local"), "local");
+}
+
+/// A connection written as `@driver:target` connects with no saved entry.
+#[tokio::test]
+async fn connect_opens_an_adhoc_connection_without_a_saved_entry() {
+    use tradar_query::{DriverOpener, QueryResult, SchemaInfo};
+
+    struct Fake;
+    #[async_trait::async_trait]
+    impl QueryDriver for Fake {
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn list_schema(&self) -> anyhow::Result<Vec<SchemaInfo>> {
+            Ok(Vec::new())
+        }
+        async fn execute(&self, _query: &str) -> anyhow::Result<QueryResult> {
+            anyhow::bail!("unused")
+        }
+    }
+    /// Remembers the target it was asked to open.
+    struct Opener(Arc<std::sync::Mutex<Option<String>>>);
+    #[async_trait::async_trait]
+    impl DriverOpener for Opener {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {
+            *self.0.lock().unwrap() = Some(target.to_string());
+            Ok(Arc::new(Fake))
+        }
+    }
+
+    let opened = Arc::new(std::sync::Mutex::new(None));
+    let mut registry: HashMap<String, Box<dyn DriverOpener>> = HashMap::new();
+    registry.insert("fake".into(), Box::new(Opener(Arc::clone(&opened))));
+    // No store at all: nothing is saved anywhere.
+    let server = Server::new(registry, None);
+    let call = |name: &str| json!({"id": 1, "method": "connect", "params": {"connection": name}});
+
+    let reply = server
+        .handle(call("@fake:db://somewhere"), &ClientConnection::detached())
+        .await;
+    assert_eq!(reply["result"]["connected"], true, "{reply}");
+    assert_eq!(opened.lock().unwrap().as_deref(), Some("db://somewhere"));
+
+    // An alias that is not saved is still refused, and a driver this build lacks is named.
+    let reply = server
+        .handle(call("plain"), &ClientConnection::detached())
+        .await;
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no saved connection"),
+        "{reply}"
+    );
+    let reply = server
+        .handle(call("@nosuch:x"), &ClientConnection::detached())
+        .await;
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no `nosuch` connector"),
+        "{reply}"
+    );
+}

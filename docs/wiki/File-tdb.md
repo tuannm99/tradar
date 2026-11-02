@@ -23,7 +23,23 @@ Authorization: Bearer {{token}}
 ```
 ````
 
-Dòng mở fence là `` ```<dialect> [connection] ``. Thiếu `connection` thì block rơi về connection của buffer (dòng `-- tradar:`, file `.tradar` hoặc `:TradarConnect`).
+Dòng mở fence là `` ```<dialect> [connection] ``. Thiếu `connection` thì block rơi về connection của buffer (dòng `-- tradar:`, file `.tradar` hoặc `:TradarConnect`). `connection` là alias trong `connections.toml` **hoặc địa chỉ viết thẳng**, không cần khai báo trước:
+
+````
+```elasticsearch http://localhost:9201
+GET _cat/indices
+```
+
+```sqlite ~/data/app.db
+select count(*) from users
+```
+
+```sql postgres://user:pw@localhost:5432/shop
+select now()
+```
+````
+
+Cách viết và quy tắc suy ra driver: [Kết nối](Ket-noi#connection-viết-thẳng-tại-chỗ-không-cần-connectionstoml).
 
 ## Hành vi
 

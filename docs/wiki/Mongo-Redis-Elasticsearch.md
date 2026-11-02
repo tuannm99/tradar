@@ -46,6 +46,7 @@ GET /my-index/_search
 
 - Comment kiểu Kibana được bỏ trước khi gửi: dòng bắt đầu bằng `#` ở bất kỳ đâu, `// …` và `/* … */` trong body (không nhầm với `//` trong đường dẫn hay trong chuỗi `"http://…"`).
 - Body được kiểm tra JSON ngay trên máy trước khi gửi; chấp nhận cả NDJSON (một JSON mỗi dòng) cho `_bulk`/`_msearch`.
+- Lệnh trả **văn bản thuần** (`GET _cat/indices?v`, `_cat/health`…) hiện đúng như văn bản, mỗi dòng một dòng, không còn một chuỗi JSON đầy `\n`. (Chuỗi nằm *trong* một field của document thì vẫn giữ `\n` dạng escape, vì đó là dữ liệu.)
 - `_search` thường hiện mỗi hit là một dòng (`_id` + các field của `_source`; tìm trên nhiều index như `logs-*` thì thêm `_index` để biết hit thuộc index nào). Mặc định Elasticsearch chỉ trả 10 hit — đặt `"size"` trong body nếu cần nhiều hơn. Nếu response có `aggregations` hoặc `suggest` (thường kèm `"size": 0` nên không có hit) thì hiện **nguyên response** dạng JSON, vì phần đó mới là câu trả lời. Một document lồng nhiều tầng (response aggregation, `serverStatus`) tự mở ở dạng JSON thay vì bảng một dòng rất rộng; `<leader>rv` đổi qua lại, `setup{ documents_view }` ép một kiểu.
 - Response không phải 2xx hiện như lỗi thật, kèm body lỗi của Elasticsearch.
 - Mỗi lần chạy chỉ một request; chưa có cấu hình auth/TLS client-cert riêng.

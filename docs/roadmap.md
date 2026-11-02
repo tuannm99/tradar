@@ -70,6 +70,7 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] HTTP + gRPC: workbench request chung (`###`, biến, response vào result tabs) — `docs/backlog/nvim-request-workbench-2026-10-29.md`
 - [x] HTTP/gRPC: request viết trong `.tdb`/file `.http` (alias connection hoặc URL thẳng, protocol 1.16), tô màu, gợi ý (omnifunc + blink), xuất curl/grpcurl, cheatsheet block mẫu, lọc body — `docs/backlog/nvim-request-workbench-2026-10-29.md`
 - [x] Không kiểm tra chứng chỉ TLS (`?insecure=1` cho HTTP/gRPC, `@insecure = 1`, protocol 1.17) và `setup{ server_env }` (biến môi trường/proxy cho server do plugin khởi động) — cùng backlog
+- [x] Connection viết thẳng trong fence/modeline thay alias (`@driver:đích`, protocol 1.18); text thuần (ES `_cat`) hiện từng dòng — `docs/backlog/nvim-direct-connections-2026-11-02.md`
 - [x] Completion báo lỗi kết nối (một cảnh báo ngắn mỗi connection, không lặp khi gõ) — `docs/backlog/nvim-completion-connection-errors-2026-11-02.md`
 - [x] Cheatsheet: xem cả bảng trong một buffer `.tdb` (`rK`, gập được, block chạy được) — `docs/backlog/nvim-cheatsheet-overview-2026-10-30.md`
 - [x] `rA` hỏi server lọc/sắp xếp cho mọi dòng (SQL), `<C-d>` ngắt kết nối trong picker — `docs/backlog/nvim-server-view-disconnect-2026-10-28.md`

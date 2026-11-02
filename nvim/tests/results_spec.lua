@@ -34,4 +34,16 @@ H.check('export file written', vim.fn.filereadable(csv) == 1)
 H.check('next query replaces it (old cursor released)', H.run_until('select 1 as a', '1/1 rows'), H.text())
 H.check('no error notifications', #vim.tbl_filter(function(n) return n.level == vim.log.levels.ERROR end, H.notes) == 0, vim.inspect(H.notes))
 
+-- a plain-text reply (Elasticsearch `GET _cat/indices`): lines, not one escaped string
+local ctx = require('tradar.ctx')
+ctx.show_result({
+  kind = 'documents', total = 1, rows = { 'play_products 0 p STARTED 100000 11.2mb\nplay_logs     0 p STARTED 500000 39.7mb\n' },
+  field_order = { {} },
+}, { conn = 'local', query = 'GET _cat/indices' })
+H.check('a text reply is shown one line per line', H.wait(3000, function()
+  local lines = H.lines()
+  return lines[1] == 'play_products 0 p STARTED 100000 11.2mb' and lines[2] == 'play_logs     0 p STARTED 500000 39.7mb'
+end), H.text('|'))
+H.check('...without quotes or \\n', not H.text():find('\\n', 1, true) and not H.text():find('"', 1, true), H.text('|'))
+H.check('...and without JSON colours', #vim.api.nvim_buf_get_extmarks(H.rbuf(), require('tradar.jsonhl').ns, 0, -1, {}) == 0)
 H.done()

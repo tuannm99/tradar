@@ -105,9 +105,10 @@ function M.attach(buf)
     local seen = {}
     for _, block in ipairs(ctx.blocks.parse(vim.api.nvim_buf_get_lines(buf, 0, -1, false))) do
       local lang = block.lang and block.lang:lower()
-      if block.conn and lang ~= 'http' and lang ~= 'grpc' and not seen[block.conn] and not state.connected[block.conn] then
-        seen[block.conn] = true
-        ctx.ensure_connected(block.conn, function() end, function() end)
+      local name = block.conn and M.adhoc_name(block.conn, block.lang)
+      if name and lang ~= 'http' and lang ~= 'grpc' and not seen[name] and not state.connected[name] then
+        seen[name] = true
+        ctx.ensure_connected(name, function() end, function() end)
       end
     end
   end
