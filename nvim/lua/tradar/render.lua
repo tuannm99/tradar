@@ -386,13 +386,32 @@ end
 --- Documents as pretty-printed JSON, a blank line between them. `orders`
 --- (optional, one key list per item -- the server's `field_order`) keeps
 --- each document's top-level fields in their stored order.
+---
+--- A document that is just a string -- the text reply of a command that
+--- answers in plain text, like Elasticsearch's `GET _cat/indices` -- is shown
+--- as the text it is, one line per line, not as one JSON string full of `\n`.
+--- (A string inside a document keeps its escapes: that is data.)
 function M.documents(items, orders)
   local out = {}
   for i, item in ipairs(items) do
     if i > 1 then out[#out + 1] = '' end
-    vim.list_extend(out, vim.split(M.pretty(item, orders and orders[i], nil, true), '\n', { plain = true }))
+    if type(item) == 'string' then
+      local text = item:gsub('\r\n', '\n'):gsub('\n$', '')
+      vim.list_extend(out, vim.split(text, '\n', { plain = true }))
+    else
+      vim.list_extend(out, vim.split(M.pretty(item, orders and orders[i], nil, true), '\n', { plain = true }))
+    end
   end
   return out
+end
+
+--- Whether `items` are all plain-text replies (see `M.documents`).
+function M.is_text_reply(items)
+  if type(items) ~= 'table' or #items == 0 then return false end
+  for _, item in ipairs(items) do
+    if type(item) ~= 'string' then return false end
+  end
+  return true
 end
 
 --- Which column index a display column (virtcol) falls in. The separator

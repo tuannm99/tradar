@@ -197,7 +197,7 @@ impl Server {
                 let params = request.get("params").cloned().unwrap_or(Value::Null);
                 label = method.to_string();
                 if let Some(connection) = params.get("connection").and_then(Value::as_str) {
-                    label = format!("{method} [{connection}]");
+                    label = format!("{method} [{}]", connections::redact(connection));
                 }
                 // The background `status` poll must not count as use, or no
                 // connection would ever go idle.

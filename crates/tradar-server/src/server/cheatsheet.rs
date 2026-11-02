@@ -86,11 +86,7 @@ impl Server {
     pub(super) async fn cheatsheet(&self, params: &Value) -> Result<Value, RpcError> {
         let name = str_param(params, "connection")?;
         let driver = self.driver(params)?;
-        let driver_id = self
-            .saved()?
-            .into_iter()
-            .find(|c| c.name == name)
-            .map(|c| c.driver.to_lowercase());
+        let driver_id = self.find_connection(name)?.map(|c| c.driver.to_lowercase());
 
         let mut entries: Vec<Value> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();

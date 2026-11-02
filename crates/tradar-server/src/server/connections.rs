@@ -7,7 +7,53 @@ use tradar_query::QueryDriver;
 
 use super::*;
 
+/// An ad-hoc connection written straight into the name: `@driver:target`
+/// (`@elasticsearch:http://localhost:9201`, `@postgres:postgres://u:p@h/db`,
+/// `@sqlite:/tmp/x.db`). It needs no `connections.toml` entry; the driver id
+/// is the connector that opens `target`.
+pub(crate) fn adhoc_connection(name: &str) -> Option<SavedConnection> {
+    let (driver, target) = name.strip_prefix('@')?.split_once(':')?;
+    let driver_ok = !driver.is_empty()
+        && driver
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !driver_ok || target.is_empty() {
+        return None;
+    }
+    Some(SavedConnection {
+        name: name.to_string(),
+        driver: driver.to_ascii_lowercase(),
+        target: target.to_string(),
+    })
+}
+
+/// `name` for the log: a password in `scheme://user:password@host` is hidden.
+pub(crate) fn redact(name: &str) -> String {
+    let Some(scheme_end) = name.find("://") else {
+        return name.to_string();
+    };
+    let start = scheme_end + 3;
+    let rest = &name[start..];
+    let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
+    let Some(at) = authority.rfind('@') else {
+        return name.to_string();
+    };
+    let Some(colon) = authority[..at].find(':') else {
+        return name.to_string();
+    };
+    format!("{}:***{}", &name[..start + colon], &name[start + at..])
+}
+
 impl Server {
+    /// The connection called `name`: one saved in `connections.toml`, else an
+    /// ad-hoc `@driver:target` (see `adhoc_connection`).
+    pub(super) fn find_connection(&self, name: &str) -> Result<Option<SavedConnection>, RpcError> {
+        if let Some(saved) = self.saved()?.into_iter().find(|c| c.name == name) {
+            return Ok(Some(saved));
+        }
+        Ok(adhoc_connection(name))
+    }
+
     /// `{major, minor}` of `protocol::PROTOCOL_VERSION` -- never behind a
     /// connector feature gate (unlike almost every other method here), so
     /// even the most trimmed build still answers it. See that constant's
@@ -101,11 +147,9 @@ impl Server {
         if self.state.lock().unwrap().drivers.contains_key(name) {
             return Ok(json!({"connected": true, "already": true}));
         }
-        let saved = self
-            .saved()?
-            .into_iter()
-            .find(|c| c.name == name)
-            .ok_or_else(|| RpcError::app(format!("no saved connection named `{name}`")))?;
+        let saved = self.find_connection(name)?.ok_or_else(|| {
+            RpcError::app(format!("no saved connection named `{}`", redact(name)))
+        })?;
         let opener = self.registry.get(&saved.driver).ok_or_else(|| {
             RpcError::app(format!(
                 "this server build has no `{}` connector (or it has no query language to serve)",

@@ -130,6 +130,8 @@ Trong buffer kết quả: nếu kết quả sửa được (một bảng, có kh
 Buffer kết quả **không có sort/filter theo cột** như TUI — chủ đích: Neovim đã có sẵn editor SQL thật ngay cạnh, sửa `ORDER BY`/`WHERE` rồi `<leader>rr` chạy lại tiện hơn một UI tương tác riêng.
 
 Cần Neovim ≥ 0.10 (`:checkhealth tradar` kiểm tra). Bảng đầy đủ mọi phím/lệnh theo từng buffer: `docs/wiki/Phim-tat.md`. Statusline: `require('tradar').status()` (chuỗi rỗng ngoài buffer SQL).
+Connection có thể viết thẳng tại chỗ (` ```elasticsearch http://localhost:9201 `, `-- tradar: postgres://…`, `-- tradar: sqlite /tmp/x.db`) thay vì alias; server mở nó dưới tên `@driver:đích` — xem `docs/wiki/Ket-noi.md`. Lệnh trả văn bản thuần (Elasticsearch `_cat/…`) hiện thành từng dòng.
+
 Completion: nguồn `blink.cmp` `tradar.blink` (hoặc `omnifunc`, `<C-x><C-o>`) — phải khai báo provider `tradar = { name = 'tradar', module = 'tradar.blink' }` trong `sources` của blink (ví dụ đầy đủ ở `docs/wiki/Truy-van-SQL.md`, mục Completion). Hoạt động trong file query, block `.tdb` (kể cả connection ghi ở fence) và request HTTP/gRPC.
 
 ## An toàn

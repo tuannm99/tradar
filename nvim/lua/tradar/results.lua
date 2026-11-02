@@ -302,7 +302,8 @@ local function paint_results(new_from)
   -- engine is time-limited and dropped colours on big results. No `filetype`, so
   -- no JSON ftplugins/LSP attach to a scratch buffer.
   vim.bo[buf].syntax = ''
-  local json_view = (r.kind == 'documents' or r.kind == 'table') and r.view == 'json'
+  -- A plain-text reply is text, not JSON: no JSON colours on it.
+  local json_view = (r.kind == 'documents' or r.kind == 'table') and r.view == 'json' and not (r.kind == 'documents' and render.is_text_reply(r.rows))
   -- Not the blank line and the footer that close the buffer.
   if r.kind == 'text' then
     jsonhl.apply(buf, r.json and lines or nil, #lines - 2, body_from)

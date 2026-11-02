@@ -38,7 +38,66 @@ end
 --- `.tradar` file in a parent directory, else the last one chosen.
 function M.connection_for(buf)
   buf = resolve_buf(buf)
-  return vim.b[buf].tradar_connection or modeline(buf) or project_file(buf) or state.default
+  return M.adhoc_name(vim.b[buf].tradar_connection or modeline(buf) or project_file(buf) or state.default)
+end
+
+-- ── connections written in place ─────────────────────────────────────────
+-- Instead of an alias from connections.toml, a block or a modeline can carry
+-- the target itself:  ```elasticsearch http://localhost:9201
+--                     -- tradar: postgres://user:pw@host/db
+--                     -- tradar: sqlite /tmp/x.db
+-- The server opens it as the connection `@<driver>:<target>` (no saved entry).
+
+--- Fence language / first word -> connector id.
+local LANG_DRIVER = {
+  elasticsearch = 'elasticsearch', esq = 'elasticsearch', mongo = 'mongo', redis = 'redis',
+  cassandra = 'cassandra', clickhouse = 'clickhouse', postgres = 'postgres', postgresql = 'postgres',
+  mysql = 'mysql', mariadb = 'mysql', sqlite = 'sqlite',
+}
+--- URL scheme -> connector id (for ```sql postgres://... and bare modelines).
+local SCHEME_DRIVER = {
+  postgres = 'postgres', postgresql = 'postgres', mysql = 'mysql', mariadb = 'mysql',
+  mongodb = 'mongo', ['mongodb+srv'] = 'mongo', redis = 'redis', rediss = 'redis',
+  cassandra = 'cassandra', clickhouse = 'clickhouse',
+}
+local QUERY_DRIVERS = {}
+for _, id in pairs(LANG_DRIVER) do QUERY_DRIVERS[id] = true end
+
+--- Whether `text` is a connection target rather than an alias: a URL, a
+--- `host:port`, or a path.
+function M.is_direct(text)
+  if type(text) ~= 'string' or text == '' then return false end
+  return text:find('://', 1, true) ~= nil or text:match('^[%w%.%-]+:%d+$') ~= nil
+    or text:match('^[~/]') ~= nil or text:match('^%.%.?/') ~= nil
+end
+
+--- The connection name for `conn` as written -- an alias stays as it is; `driver
+--- target`, or a target the language (`lang`: the fence's) or its URL scheme
+--- gives a driver for, becomes `@driver:target`.
+function M.adhoc_name(conn, lang)
+  if type(conn) ~= 'string' or conn == '' or conn:sub(1, 1) == '@' then return conn end
+  local driver, target
+  local word, rest = conn:match('^(%S+)%s+(.+)$')
+  if word and LANG_DRIVER[word:lower()] then
+    driver, target = LANG_DRIVER[word:lower()], vim.trim(rest)
+  elseif M.is_direct(conn) then
+    target = conn
+    driver = LANG_DRIVER[(lang or ''):lower()]
+    if not driver then
+      local scheme = conn:match('^([%w+]+)://')
+      driver = scheme and SCHEME_DRIVER[scheme:lower()]
+      if not driver and (conn:match('^[~/]') or conn:match('^%.%.?/')) then driver = 'sqlite' end
+    end
+  end
+  if not (driver and target) then return conn end
+  if target:sub(1, 1) == '~' then target = vim.fn.expand(target) end
+  return '@' .. driver .. ':' .. target
+end
+
+--- `name` as shown to the user: a password in `scheme://user:password@host` is hidden.
+function M.display_name(name)
+  if type(name) ~= 'string' then return name end
+  return (name:gsub('(://[^/@:]*):[^/@]*@', '%1:***@'))
 end
 
 --- Whether `buf` is a `.tdb` file: by filetype, or -- when that did not get
@@ -66,11 +125,14 @@ end
 --- connection of its own, same as every other filetype.
 function M.block_connection(buf, row)
   local block = M.block_at(buf, row)
-  return (block and block.conn) or M.connection_for(buf)
+  if block and block.conn then return M.adhoc_name(block.conn, block.lang) end
+  return M.connection_for(buf)
 end
 
 --- `cb(driver_id)` for a connection ("sqlite", "postgres", ...); cached.
 local function driver_of(conn, cb)
+  local adhoc = M.adhoc_driver(conn)
+  if adhoc then return cb(adhoc) end
   if state.drivers then return cb(state.drivers[conn]) end
   call('connections.list', nil, function(list)
     state.drivers = {}
@@ -81,7 +143,13 @@ end
 
 --- The driver id of `conn` if `connections.list` has been fetched already
 --- (nil otherwise) -- for callers that cannot wait for an async lookup.
-function M.cached_driver(conn) return state.drivers and state.drivers[conn] or nil end
+function M.cached_driver(conn) return M.adhoc_driver(conn) or (state.drivers and state.drivers[conn]) or nil end
+
+--- The connector of an `@driver:target` name, else nil.
+function M.adhoc_driver(conn)
+  local driver = type(conn) == 'string' and conn:match('^@([%w_%-]+):')
+  return driver and QUERY_DRIVERS[driver] and driver or nil
+end
 
 --- Whether the server has confirmed a connection (not merely a binding).
 function M.is_connected(name) return state.connected[name] == true end
@@ -155,7 +223,7 @@ function M.status()
     or (in_results and state.result and state.result.conn)
     or M.block_connection(0, vim.api.nvim_win_get_cursor(0)[1])
   if not conn then return '' end
-  local parts = { 'db ' .. conn .. (M.is_protected(conn) and ' ⚠' or '') }
+  local parts = { 'db ' .. M.display_name(conn) .. (M.is_protected(conn) and ' ⚠' or '') }
   if state.alive[conn] == false then
     parts[1] = parts[1] .. ' ✗'
   elseif state.idle[conn] then

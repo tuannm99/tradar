@@ -258,6 +258,13 @@ local function explicit_connection(buf)
   return vim.b[buf].tradar_connection or ctx.modeline(buf)
 end
 
+--- A connection written as a target (`https://api.example.com/v1`,
+--- `localhost:50051`) instead of an alias is the ad-hoc connection `@target`.
+local function direct_connection(conn)
+  if conn and conn:sub(1, 1) ~= '@' and ctx.M.is_direct(conn) then return '@' .. conn end
+  return conn
+end
+
 --- Where requests are being edited, for `row` of `buf`, or nil elsewhere:
 ---   - a workbench (`:TradarRequests`): the whole buffer, bound to its connection;
 ---   - a ```` ```http ```` / ```` ```grpc ```` block of a `.tdb` (the fence may
@@ -285,10 +292,12 @@ context = function(buf, row)
     local body = vim.list_slice(all, block.start, block.finish)
     if #body == 0 then body = { '' } end
     local r = math.min(math.max(row - block.start + 1, 1), #body)
-    return { buf = buf, lines = body, row = r, all = all, conn = block.conn or explicit_connection(buf), driver = lang, insert_at = block.finish }
+    local conn = direct_connection(block.conn or explicit_connection(buf))
+    return { buf = buf, lines = body, row = r, all = all, conn = conn, driver = lang, insert_at = block.finish, target = conn and conn:sub(1, 1) == '@' and conn:sub(2) or nil }
   end
   if vim.bo[buf].filetype == 'http' then
-    return { buf = buf, lines = all, row = row, all = all, conn = explicit_connection(buf), insert_at = #all }
+    local conn = direct_connection(explicit_connection(buf))
+    return { buf = buf, lines = all, row = row, all = all, conn = conn, insert_at = #all, target = conn and conn:sub(1, 1) == '@' and conn:sub(2) or nil }
   end
 end
 
