@@ -15,8 +15,7 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét. 
 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước — bảo mật hiện dựa vào quyền `0600` của unix socket); Windows named pipe.
 
-**Completion trong Neovim — ý tưởng chưa scope** (ghi 2026-10-30, từ việc `.tdb` không ra gợi ý khi connection không với tới được; chưa việc nào được code):
-- **Báo lỗi kết nối khi completion**: `complete.lua` (`ctx.ensure_connected(conn, go, function() cb({}) end)`) nuốt lỗi nên DB sập chỉ thấy "không có gợi ý". Hiện một cảnh báo ngắn, một lần cho mỗi connection (có thể dùng `notify`), không làm gián đoạn lúc gõ.
+**Completion trong Neovim — ý tưởng chưa scope** (ghi 2026-10-30, từ việc `.tdb` không ra gợi ý khi connection không với tới được; báo lỗi kết nối đã xong, còn lại chưa code):
 - **Keyword tĩnh khi chưa kết nối**: gợi ý `SELECT`/`FROM`/`WHERE`… theo dialect của block khi chưa có schema. Hiện toàn bộ gợi ý (bảng, cột, `alias.`, JOIN theo FK) lấy từ schema của connection đang mở, nên chưa kết nối = rỗng. Cần `nvim/tests/*_spec.lua` cho hành vi này, và cập nhật `docs/wiki/Truy-van-SQL.md` (mục Completion).
 
 **Mongo/Elasticsearch — ý tưởng chưa scope** (chuyển từ `docs/next-run.md` cũ, ghi 2026-09-10, chưa việc nào được code; làm khi có nhu cầu thật, mỗi mục cần hỏi lại chủ dự án trước khi code):
@@ -71,6 +70,7 @@ Quét nhanh — chi tiết/lý do đầy đủ nằm trong `docs/backlog/<file>.
 - [x] HTTP + gRPC: workbench request chung (`###`, biến, response vào result tabs) — `docs/backlog/nvim-request-workbench-2026-10-29.md`
 - [x] HTTP/gRPC: request viết trong `.tdb`/file `.http` (alias connection hoặc URL thẳng, protocol 1.16), tô màu, gợi ý (omnifunc + blink), xuất curl/grpcurl, cheatsheet block mẫu, lọc body — `docs/backlog/nvim-request-workbench-2026-10-29.md`
 - [x] Không kiểm tra chứng chỉ TLS (`?insecure=1` cho HTTP/gRPC, `@insecure = 1`, protocol 1.17) và `setup{ server_env }` (biến môi trường/proxy cho server do plugin khởi động) — cùng backlog
+- [x] Completion báo lỗi kết nối (một cảnh báo ngắn mỗi connection, không lặp khi gõ) — `docs/backlog/nvim-completion-connection-errors-2026-11-02.md`
 - [x] Cheatsheet: xem cả bảng trong một buffer `.tdb` (`rK`, gập được, block chạy được) — `docs/backlog/nvim-cheatsheet-overview-2026-10-30.md`
 - [x] `rA` hỏi server lọc/sắp xếp cho mọi dòng (SQL), `<C-d>` ngắt kết nối trong picker — `docs/backlog/nvim-server-view-disconnect-2026-10-28.md`
 - [x] Màu view JSON bằng extmark (hết mất màu theo dữ liệu) — `docs/backlog/nvim-json-colours-2026-10-28.md`

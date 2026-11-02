@@ -9,6 +9,7 @@ local other = H.tmp .. '/other.db'
 vim.fn.system({ 'python3', '-I', '-c', "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table gadgets(id integer primary key)'); c.commit()", other })
 local f = io.open(os.getenv('XDG_CONFIG_HOME') .. '/tradar/connections.toml', 'a')
 f:write(('\n[[connections]]\nname = "other"\ndriver = "sqlite"\ntarget = "%s"\n'):format(other))
+f:write(('\n[[connections]]\nname = "down"\ndriver = "sqlite"\ntarget = "%s/nope/missing.db"\n'):format(H.tmp))
 f:write('\n[[connections]]\nname = "web"\ndriver = "http"\ntarget = "http://127.0.0.1:1"\n')
 f:write('\n[[connections]]\nname = "rpc"\ndriver = "grpc"\ntarget = "127.0.0.1:1"\n')
 f:close()
@@ -38,6 +39,32 @@ H.check('the source is on in a .tdb block that names a connection', enabled)
 H.check('a table is suggested', vim.tbl_contains(labels(r), 'people'), vim.inspect(labels(r)))
 r = ask(8)
 H.check('...and one from the other block\'s connection, opened by the completion itself', vim.tbl_contains(labels(r), 'gadgets'), vim.inspect(labels(r)))
+
+-- a connection that will not open: say so, once
+vim.cmd('enew')
+vim.cmd('edit! ' .. H.tmp .. '/down.tdb')
+vim.bo.filetype = 'tdb'
+vim.api.nvim_buf_set_lines(0, 0, -1, false, { '```sql down', 'select * from peo', '```' })
+H.notes = {}
+r = ask(2)
+H.check('a connection that cannot open completes nothing', r and #r.items == 0, vim.inspect(r))
+H.check('...and a warning says which connection and why', H.wait(3000, function() return #H.notes_with('`down` is not available') == 1 end), vim.inspect(H.notes))
+H.check('...at warning level', H.notes[1] and H.notes[1].level == vim.log.levels.WARN)
+r = ask(2)
+r = ask(2)
+H.sleep(300)
+H.check('typing on does not repeat it', #H.notes_with('`down` is not available') == 1, vim.inspect(H.notes))
+H.check('another connection that works is not warned about', #H.notes_with('`local`') == 0 and #H.notes_with('`other`') == 0)
+
+-- once it works again, a later failure is reported again
+vim.fn.mkdir(H.tmp .. '/nope', 'p')
+vim.fn.system({ 'python3', '-I', '-c', "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table gizmos(id integer)'); c.commit()", H.tmp .. '/nope/missing.db' })
+r = ask(2)
+H.check('the connection opens once its database exists', H.wait(3000, function() return ctx.state.connected.down end))
+vim.api.nvim_buf_set_lines(0, 1, 2, false, { 'select * from giz' })
+r = ask(2)
+H.check('...and then completes', r and vim.tbl_contains(labels(r), 'gizmos'), vim.inspect(labels(r)))
+H.check('...which clears the warning for next time', not (ctx.state.completion_warned or {}).down, vim.inspect(ctx.state.completion_warned))
 
 -- opening a .tdb opens the connections its fences name
 vim.cmd('enew')

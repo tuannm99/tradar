@@ -104,7 +104,7 @@ Nguồn `blink.cmp` (`tradar.blink`) hoặc `omnifunc` dự phòng (`<C-x><C-o>`
 }
 ```
 
-Nguồn tự bật ở: file SQL/Mongo/Redis/ES có connection, **block của `.tdb`** (kể cả block ghi connection riêng trong fence như ` ```sql pg-local `: connection được mở khi mở file hoặc ngay lúc cần), và request HTTP/gRPC (workbench, file `.http`, block ` ```http `/` ```grpc `: động từ, tên header và giá trị thông dụng, `{{biến}}`, service/method gRPC từ reflection). Kích hoạt tự động khi gõ chữ, và sau `.` `{` `/` `:`. Gợi ý theo ngữ cảnh: sau `alias.` chỉ gợi ý cột của bảng đó, sau `JOIN` ưu tiên bảng có khoá ngoại liên quan, sau `schema.`/`keyspace.` gợi ý bảng trong đó. Nếu cài `sqlls`, nên bỏ nguồn `lsp` cho `sql` trong cấu hình completion của bạn để khỏi trùng.
+Nguồn tự bật ở: file SQL/Mongo/Redis/ES có connection, **block của `.tdb`** (kể cả block ghi connection riêng trong fence như ` ```sql pg-local `: connection được mở khi mở file hoặc ngay lúc cần), và request HTTP/gRPC (workbench, file `.http`, block ` ```http `/` ```grpc `: động từ, tên header và giá trị thông dụng, `{{biến}}`, service/method gRPC từ reflection). Kích hoạt tự động khi gõ chữ, và sau `.` `{` `/` `:`. Nếu connection của block không mở được (database sập, đường dẫn sai…) hoặc server báo lỗi khi gợi ý, plugin hiện **một** cảnh báo ngắn `completion: \`tên\` is not available -- lý do` thay vì im lặng không gợi ý gì; không lặp lại khi bạn gõ tiếp, và báo lại nếu sau đó connection chạy được rồi lại hỏng. Gợi ý theo ngữ cảnh: sau `alias.` chỉ gợi ý cột của bảng đó, sau `JOIN` ưu tiên bảng có khoá ngoại liên quan, sau `schema.`/`keyspace.` gợi ý bảng trong đó. Nếu cài `sqlls`, nên bỏ nguồn `lsp` cho `sql` trong cấu hình completion của bạn để khỏi trùng.
 
 ## Lỗi
 
