@@ -126,3 +126,4 @@ Nhóm theo chủ đề, trong mỗi nhóm theo thứ tự thời gian. Mục m�
 - [`connector-ux-gaps-2026-10-02.md`](connector-ux-gaps-2026-10-02.md) — 6 gap UX: highlighting ClickHouse/Cassandra, filter Redis/HTTP, error marker, chuột Kafka/RabbitMQ/Socket.
 - [`vim-operations-gap-2026-10-02.md`](vim-operations-gap-2026-10-02.md) — word motion/operator/text object/`.` repeat trong query editor, `Focus`+scroll cho bảng lag Kafka/RabbitMQ.
 - [`app-wide-ux-gaps-2026-10-02.md`](app-wide-ux-gaps-2026-10-02.md) — `--help`/`--version`, màu lỗi nhất quán, `/`-filter history/snippet, HTTP response search+wrap, scroll migration panel, Mongo `MAX_ROWS`+`truncated`.
+- [`nvim-static-keywords-2026-11-04.md`](nvim-static-keywords-2026-11-04.md) — gợi ý từ khoá tĩnh khi connection chưa mở/lỗi/không có (`keywords {driver}`, protocol 1.19).

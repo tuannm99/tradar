@@ -44,6 +44,13 @@ pub trait DriverOpener: Send + Sync {
     /// The connector id saved connections name (`driver = "postgres"`).
     fn id(&self) -> &'static str;
     async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>>;
+    /// The words this backend's query language uses (what
+    /// `QueryDriver::keywords` says of an open driver), known without a
+    /// connection -- the suggestions an editor can still make while the
+    /// database is not reachable. Empty unless the connector says.
+    fn keywords(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 #[cfg(test)]

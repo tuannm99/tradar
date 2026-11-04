@@ -43,6 +43,50 @@ impl RedisDriver {
 
 mod cheatsheet;
 
+/// Words of this backend's query language, offered as completions (also
+/// before a connection exists, see `DriverOpener::keywords`).
+const KEYWORDS: &[&str] = &[
+    "GET",
+    "SET",
+    "DEL",
+    "EXISTS",
+    "EXPIRE",
+    "TTL",
+    "KEYS",
+    "SCAN",
+    "TYPE",
+    "INCR",
+    "DECR",
+    "MGET",
+    "MSET",
+    "HGET",
+    "HSET",
+    "HGETALL",
+    "HDEL",
+    "HKEYS",
+    "HVALS",
+    "LPUSH",
+    "RPUSH",
+    "LPOP",
+    "RPOP",
+    "LRANGE",
+    "LLEN",
+    "SADD",
+    "SREM",
+    "SMEMBERS",
+    "SCARD",
+    "ZADD",
+    "ZRANGE",
+    "ZREVRANGE",
+    "ZSCORE",
+    "ZCARD",
+    "WITHSCORES",
+    "INFO",
+    "DBSIZE",
+    "FLUSHDB",
+    "PING",
+];
+
 #[async_trait]
 impl QueryDriver for RedisDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -58,47 +102,7 @@ impl QueryDriver for RedisDriver {
     }
 
     fn keywords(&self) -> &'static [&'static str] {
-        &[
-            "GET",
-            "SET",
-            "DEL",
-            "EXISTS",
-            "EXPIRE",
-            "TTL",
-            "KEYS",
-            "SCAN",
-            "TYPE",
-            "INCR",
-            "DECR",
-            "MGET",
-            "MSET",
-            "HGET",
-            "HSET",
-            "HGETALL",
-            "HDEL",
-            "HKEYS",
-            "HVALS",
-            "LPUSH",
-            "RPUSH",
-            "LPOP",
-            "RPOP",
-            "LRANGE",
-            "LLEN",
-            "SADD",
-            "SREM",
-            "SMEMBERS",
-            "SCARD",
-            "ZADD",
-            "ZRANGE",
-            "ZREVRANGE",
-            "ZSCORE",
-            "ZCARD",
-            "WITHSCORES",
-            "INFO",
-            "DBSIZE",
-            "FLUSHDB",
-            "PING",
-        ]
+        KEYWORDS
     }
 
     /// One command per line -- this driver runs a single whitespace-split
@@ -298,6 +302,10 @@ struct Opener;
 impl tradar_query::DriverOpener for Opener {
     fn id(&self) -> &'static str {
         "redis"
+    }
+
+    fn keywords(&self) -> &'static [&'static str] {
+        KEYWORDS
     }
 
     async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {

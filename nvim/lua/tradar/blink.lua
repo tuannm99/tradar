@@ -16,7 +16,10 @@ function source:enabled()
   if vim.b.tradar_attached ~= true then return false end
   local tradar = require('tradar')
   local row = vim.api.nvim_win_get_cursor(0)[1]
-  return tradar.block_connection(0, row) ~= nil
+  if tradar.block_connection(0, row) ~= nil then return true end
+  -- No connection named, but the block's language still has words to suggest.
+  local block = tradar.block_at(0, row)
+  return block ~= nil and tradar.lang_driver(block.lang) ~= nil
 end
 
 function source:get_trigger_characters()

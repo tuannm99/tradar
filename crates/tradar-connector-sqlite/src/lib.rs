@@ -464,6 +464,10 @@ impl tradar_query::DriverOpener for Opener {
         "sqlite"
     }
 
+    fn keywords(&self) -> &'static [&'static str] {
+        query_driver::SQL_KEYWORDS
+    }
+
     async fn open(&self, target: &str) -> anyhow::Result<std::sync::Arc<dyn QueryDriver>> {
         let mut driver = SqliteDriver::new(target);
         tradar_query::with_connect_timeout(target, driver.connect()).await?;

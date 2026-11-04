@@ -66,6 +66,30 @@ r = ask(2)
 H.check('...and then completes', r and vim.tbl_contains(labels(r), 'gizmos'), vim.inspect(labels(r)))
 H.check('...which clears the warning for next time', not (ctx.state.completion_warned or {}).down, vim.inspect(ctx.state.completion_warned))
 
+-- ── no schema: the language's own words ──────────────────────────────────
+vim.cmd('enew')
+vim.cmd('edit! ' .. H.tmp .. '/kw.tdb')
+vim.bo.filetype = 'tdb'
+vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+  '```sql nosuch', 'sel', '```', '',
+  '```sql', 'selec', '```', '',
+  '```mongo', 'db.people.fi', '```', '',
+  '```redis', 'HGE', '```',
+})
+r = ask(2)
+H.check('a connection that does not exist still gets the SQL keywords', vim.tbl_contains(labels(r), 'SELECT'), vim.inspect(labels(r)))
+H.check('...as keywords', r.items[1] and r.items[1].labelDetails.description == 'keyword', vim.inspect(r.items[1]))
+r = ask(6)
+H.check('a block with no connection at all, too', vim.tbl_contains(labels(r), 'SELECT'), vim.inspect(labels(r)))
+r = ask(10)
+H.check('...Mongo\'s own', #labels(r) > 0 and vim.tbl_contains(labels(r), 'find'), vim.inspect(labels(r)))
+r = ask(14)
+H.check('...Redis commands', vim.tbl_contains(labels(r), 'HGET'), vim.inspect(labels(r)))
+local omni_row = 2
+vim.api.nvim_win_set_cursor(0, { omni_row, 3 })
+local omni = require('tradar').omnifunc(0, 'sel')
+H.check('omnifunc offers them as well', #omni > 0 and omni[1].word == 'SELECT', vim.inspect(omni))
+
 -- opening a .tdb opens the connections its fences name
 vim.cmd('enew')
 vim.cmd('edit! ' .. H.tmp .. '/pre.tdb')
