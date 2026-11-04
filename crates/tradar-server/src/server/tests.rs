@@ -243,3 +243,64 @@ async fn connect_opens_an_adhoc_connection_without_a_saved_entry() {
         "{reply}"
     );
 }
+
+/// `keywords` with a `driver` answers without any connection.
+#[tokio::test]
+async fn keywords_of_a_driver_need_no_connection() {
+    use tradar_query::DriverOpener;
+
+    struct Opener;
+    #[async_trait::async_trait]
+    impl DriverOpener for Opener {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        async fn open(&self, _target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {
+            anyhow::bail!("never opened")
+        }
+        fn keywords(&self) -> &'static [&'static str] {
+            &["FOO", "BAR"]
+        }
+    }
+    let mut registry: HashMap<String, Box<dyn DriverOpener>> = HashMap::new();
+    registry.insert("fake".into(), Box::new(Opener));
+    let server = Server::new(registry, None);
+    let ask = |params: Value| json!({"id": 1, "method": "keywords", "params": params});
+
+    let reply = server
+        .handle(
+            ask(json!({"driver": "Fake"})),
+            &ClientConnection::detached(),
+        )
+        .await;
+    assert_eq!(reply["result"], json!(["FOO", "BAR"]), "{reply}");
+
+    let reply = server
+        .handle(
+            ask(json!({"driver": "nosuch"})),
+            &ClientConnection::detached(),
+        )
+        .await;
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no `nosuch` connector"),
+        "{reply}"
+    );
+
+    // Without either, it is still the open connection's, as before.
+    let reply = server
+        .handle(
+            ask(json!({"connection": "x"})),
+            &ClientConnection::detached(),
+        )
+        .await;
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not connected"),
+        "{reply}"
+    );
+}

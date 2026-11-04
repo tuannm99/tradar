@@ -39,6 +39,37 @@ function M.completion_failed(conn, err)
   end)
 end
 
+--- The words of `driver`'s query language, from the server (cached): all that
+--- can be suggested with no schema -- the database is down, not connected yet,
+--- or no connection is named at all. `cb(items)` with `{text, kind='keyword'}`
+--- starting with `partial` (nothing for an empty one), case-insensitively.
+function M.static_keywords(driver, partial, cb)
+  state.keywords = state.keywords or {}
+  local function answer(words)
+    local out, p = {}, (partial or ''):lower()
+    for _, w in ipairs(words) do
+      if p ~= '' and w:lower():sub(1, #p) == p and w:lower() ~= p then out[#out + 1] = { text = w, kind = 'keyword' } end
+    end
+    cb(out)
+  end
+  if not driver then return cb({}) end
+  if state.keywords[driver] then return answer(state.keywords[driver]) end
+  rpc.request('keywords', { driver = driver }, function(err, result)
+    if err or type(result) ~= 'table' then return cb({}) end
+    state.keywords[driver] = result
+    answer(result)
+  end)
+end
+
+--- The fallback driver for a block with no usable connection: its fence's
+--- language, else the failing connection's own.
+local function fallback_driver(buf, row, conn)
+  local block = M.block_at(buf, row)
+  return (conn and M.cached_driver(conn)) or (block and M.lang_driver(block.lang)) or nil
+end
+
+local function word_before(text) return text:match('[%w_$]*$') or '' end
+
 --- `cb(items)` with `{text, kind}` for the text before the cursor. Used by
 --- the blink.cmp source; async, so typing never waits on it. `row`
 --- (1-based, defaults to the cursor's) picks which `.tdb` block's own
@@ -46,7 +77,7 @@ end
 function M.complete(buf, text, cb, row)
   row = row or vim.api.nvim_win_get_cursor(0)[1]
   local conn = M.block_connection(buf, row)
-  if not conn then return cb({}) end
+  if not conn then return M.static_keywords(fallback_driver(buf, row, nil), word_before(text), cb) end
   local function go()
     rpc.request('complete', { connection = conn, text = text }, function(err, result)
       if err then
@@ -54,7 +85,8 @@ function M.complete(buf, text, cb, row)
       elseif state.completion_warned then
         state.completion_warned[conn] = nil -- it works again: a later failure is news
       end
-      cb((not err and result) and result.items or {})
+      if err then return M.static_keywords(fallback_driver(buf, row, conn), word_before(text), cb) end
+      cb(result and result.items or {})
     end)
   end
   if state.connected[conn] then return go() end
@@ -62,7 +94,8 @@ function M.complete(buf, text, cb, row)
   -- then answer. One that will not open completes nothing -- and says why, once.
   ctx.ensure_connected(conn, go, function(err)
     M.completion_failed(conn, err)
-    cb({})
+    -- No schema, but the language's own words still help.
+    M.static_keywords(fallback_driver(buf, row, conn), word_before(text), cb)
   end)
 end
 
@@ -75,11 +108,30 @@ function M.omnifunc(findstart, base)
     return col - #line:match('[%w_$]*$')
   end
   local conn = M.block_connection(0, row)
-  if not conn then return {} end
+  local function words()
+    local text = M.text_before_cursor(0, row, col)
+    local out = {}
+    local driver = fallback_driver(0, row, conn)
+    local cached = driver and state.keywords and state.keywords[driver]
+    if not cached and driver then
+      local err, r = rpc.request_sync('keywords', { driver = driver })
+      cached = not err and r or nil
+      if cached then
+        state.keywords = state.keywords or {}
+        state.keywords[driver] = cached
+      end
+    end
+    local p = word_before(text or ''):lower()
+    for _, w in ipairs(cached or {}) do
+      if p == '' or (w:lower():sub(1, #p) == p and w:lower() ~= p) then out[#out + 1] = { word = w, menu = '[keyword]' } end
+    end
+    return out
+  end
+  if not conn then return words() end
   if not state.connected[conn] then
     -- Not open yet (a `.tdb` block's own connection): open it for the next try.
     ctx.ensure_connected(conn, function() end, function(err) M.completion_failed(conn, err) end)
-    return {}
+    return words()
   end
   local text = M.text_before_cursor(0, row, col)
   if not text then return {} end
@@ -89,7 +141,7 @@ function M.omnifunc(findstart, base)
   elseif state.completion_warned then
     state.completion_warned[conn] = nil
   end
-  if err or not result then return {} end
+  if err or not result then return words() end
   local out = {}
   for _, item in ipairs(result.items) do out[#out + 1] = { word = item.text, menu = '[' .. item.kind .. ']' } end
   return out

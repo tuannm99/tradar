@@ -100,6 +100,14 @@ function M.display_name(name)
   return (name:gsub('(://[^/@:]*):[^/@]*@', '%1:***@'))
 end
 
+--- The connector whose language a fence `lang` is written in, for words to
+--- suggest when no connection is known: `sql` -> any SQL connector's will do.
+function M.lang_driver(lang)
+  lang = (lang or ''):lower()
+  if lang == 'sql' then return 'postgres' end
+  return LANG_DRIVER[lang]
+end
+
 --- Whether `buf` is a `.tdb` file: by filetype, or -- when that did not get
 --- set (the plugin loaded after the buffer, a filetype override) -- by name, so
 --- the fences are never sent to the server as if they were a query.

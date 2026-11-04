@@ -33,6 +33,85 @@ impl ElasticsearchDriver {
 
 mod cheatsheet;
 
+/// Words of this backend's query language, offered as completions (also
+/// before a connection exists, see `DriverOpener::keywords`).
+const KEYWORDS: &[&str] = &[
+    "GET",
+    "POST",
+    "PUT",
+    "DELETE",
+    "HEAD",
+    // Endpoints. Not a closed set -- the driver forwards whatever
+    // path is typed as-is (see the module docs) -- just the ones
+    // reached for often enough to be worth completing.
+    "_search",
+    "_count",
+    "_mapping",
+    "_settings",
+    "_cat/indices",
+    "_cat/health",
+    "_cat/nodes",
+    "_cat/shards",
+    "_cluster/health",
+    "_bulk",
+    "_doc",
+    "_aliases",
+    "_refresh",
+    "_analyze",
+    "_reindex",
+    "_update_by_query",
+    "_delete_by_query",
+    "_forcemerge",
+    "_close",
+    "_open",
+    "_template",
+    // Query DSL.
+    "query",
+    "match",
+    "match_all",
+    "match_phrase",
+    "multi_match",
+    "term",
+    "terms",
+    "range",
+    "regexp",
+    "ids",
+    "bool",
+    "must",
+    "must_not",
+    "should",
+    "filter",
+    "minimum_should_match",
+    "boost",
+    "constant_score",
+    "function_score",
+    "aggs",
+    "sort",
+    "size",
+    "from",
+    "_source",
+    "exists",
+    "wildcard",
+    "prefix",
+    "fuzzy",
+    "nested",
+    "highlight",
+    "script",
+    "script_fields",
+    "geo_distance",
+    "geo_bounding_box",
+    // Aggregations.
+    "avg",
+    "sum",
+    "min",
+    "max",
+    "cardinality",
+    "stats",
+    "histogram",
+    "date_histogram",
+    "composite",
+];
+
 #[async_trait]
 impl QueryDriver for ElasticsearchDriver {
     async fn connect(&mut self) -> anyhow::Result<()> {
@@ -53,82 +132,7 @@ impl QueryDriver for ElasticsearchDriver {
     }
 
     fn keywords(&self) -> &'static [&'static str] {
-        &[
-            "GET",
-            "POST",
-            "PUT",
-            "DELETE",
-            "HEAD",
-            // Endpoints. Not a closed set -- the driver forwards whatever
-            // path is typed as-is (see the module docs) -- just the ones
-            // reached for often enough to be worth completing.
-            "_search",
-            "_count",
-            "_mapping",
-            "_settings",
-            "_cat/indices",
-            "_cat/health",
-            "_cat/nodes",
-            "_cat/shards",
-            "_cluster/health",
-            "_bulk",
-            "_doc",
-            "_aliases",
-            "_refresh",
-            "_analyze",
-            "_reindex",
-            "_update_by_query",
-            "_delete_by_query",
-            "_forcemerge",
-            "_close",
-            "_open",
-            "_template",
-            // Query DSL.
-            "query",
-            "match",
-            "match_all",
-            "match_phrase",
-            "multi_match",
-            "term",
-            "terms",
-            "range",
-            "regexp",
-            "ids",
-            "bool",
-            "must",
-            "must_not",
-            "should",
-            "filter",
-            "minimum_should_match",
-            "boost",
-            "constant_score",
-            "function_score",
-            "aggs",
-            "sort",
-            "size",
-            "from",
-            "_source",
-            "exists",
-            "wildcard",
-            "prefix",
-            "fuzzy",
-            "nested",
-            "highlight",
-            "script",
-            "script_fields",
-            "geo_distance",
-            "geo_bounding_box",
-            // Aggregations.
-            "avg",
-            "sum",
-            "min",
-            "max",
-            "cardinality",
-            "stats",
-            "histogram",
-            "date_histogram",
-            "composite",
-        ]
+        KEYWORDS
     }
 
     /// A request is a `METHOD /path` line plus the JSON body that follows
@@ -432,6 +436,10 @@ struct Opener;
 impl tradar_query::DriverOpener for Opener {
     fn id(&self) -> &'static str {
         "elasticsearch"
+    }
+
+    fn keywords(&self) -> &'static [&'static str] {
+        KEYWORDS
     }
 
     async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {

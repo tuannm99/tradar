@@ -16,7 +16,6 @@ Việc **đang mở/chưa scope xong** sống ở đây — ngắn, dễ quét. 
 **Cố ý để sau, chưa có nhu cầu**: đóng gói `tradar-server` vào Docker (cần transport TCP + token trước — bảo mật hiện dựa vào quyền `0600` của unix socket); Windows named pipe.
 
 **Completion trong Neovim — ý tưởng chưa scope** (ghi 2026-10-30, từ việc `.tdb` không ra gợi ý khi connection không với tới được; báo lỗi kết nối đã xong, còn lại chưa code):
-- **Keyword tĩnh khi chưa kết nối**: gợi ý `SELECT`/`FROM`/`WHERE`… theo dialect của block khi chưa có schema. Hiện toàn bộ gợi ý (bảng, cột, `alias.`, JOIN theo FK) lấy từ schema của connection đang mở, nên chưa kết nối = rỗng. Cần `nvim/tests/*_spec.lua` cho hành vi này, và cập nhật `docs/wiki/Truy-van-SQL.md` (mục Completion).
 
 **Mongo/Elasticsearch — ý tưởng chưa scope** (chuyển từ `docs/next-run.md` cũ, ghi 2026-09-10, chưa việc nào được code; làm khi có nhu cầu thật, mỗi mục cần hỏi lại chủ dự án trước khi code):
 - **ES `GET <index>/_doc/<id>` tách thành 1 row có `_id`** (rủi ro thấp nhất): response này vẫn hiện nguyên envelope `{_index,_id,_version,found,_source}` trong khi `_search` đã được `unwrap_search_hits` (`crates/tradar-connector-elasticsearch/src/response.rs`) tách thành từng hit. Thêm hàm tương tự (gộp `_id` + field của `_source`; `found:false` → 0 row, không lỗi), gọi trong `execute()` cạnh `unwrap_search_hits`, nhận diện bằng body (`found` + `_source` ở top-level, không có `hits`).

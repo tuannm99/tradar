@@ -48,6 +48,10 @@ impl tradar_query::DriverOpener for Opener {
         "mongo"
     }
 
+    fn keywords(&self) -> &'static [&'static str] {
+        crate::keywords::KEYWORDS
+    }
+
     async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {
         let mut driver = MongoDriver::new(target);
         tradar_query::with_connect_timeout(target, driver.connect()).await?;

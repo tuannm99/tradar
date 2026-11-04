@@ -425,6 +425,10 @@ impl tradar_query::DriverOpener for Opener {
         "clickhouse"
     }
 
+    fn keywords(&self) -> &'static [&'static str] {
+        query_driver::SQL_KEYWORDS
+    }
+
     async fn open(&self, target: &str) -> anyhow::Result<Arc<dyn QueryDriver>> {
         let mut driver = ClickHouseDriver::new(target);
         tradar_query::with_connect_timeout(target, driver.connect()).await?;

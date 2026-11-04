@@ -17,7 +17,19 @@ impl Server {
         ))
     }
 
+    /// The words of a query language. With `connection`: the open driver's.
+    /// With `driver` (a connector id) instead: that connector's, no
+    /// connection needed -- what an editor can still suggest when the
+    /// database is down or has not been connected yet.
     pub(super) fn keywords(&self, params: &Value) -> Result<Value, RpcError> {
+        if params.get("connection").is_none()
+            && let Some(id) = params.get("driver").and_then(Value::as_str)
+        {
+            let opener = self.registry.get(&id.to_ascii_lowercase()).ok_or_else(|| {
+                RpcError::app(format!("this server build has no `{id}` connector"))
+            })?;
+            return Ok(json!(opener.keywords()));
+        }
         Ok(json!(self.driver(params)?.keywords()))
     }
 
